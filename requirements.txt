@@ -1,0 +1,23 @@
+# A股量化交易系统 - 依赖列表
+
+# Web框架
+streamlit>=1.30.0
+
+# 数据处理
+pandas>=2.1.0
+numpy>=1.26.0
+
+# 数据源
+tushare>=1.4.0
+akshare>=1.12.0
+baostock>=0.8.8
+requests>=2.31.0
+
+# 图表
+plotly>=5.18.0
+
+# 定时任务
+apscheduler>=3.10.0
+
+# 配置管理
+python-dotenv>=1.0.0
