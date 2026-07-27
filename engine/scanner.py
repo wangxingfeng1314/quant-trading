@@ -89,7 +89,7 @@ def scan_signals(universe: list = None, strategy_names: list = None,
                 signals = strategy.on_bar(end_date, data_dict)
                 all_signals.extend(signals)
             except Exception as e:
-                logger.debug(f"{ts_code} {strategy.name} 扫描异常: {e}")
+                logger.warning(f"{ts_code} {strategy.name} 扫描异常: {e}")
 
         if (i + 1) % 100 == 0:
             logger.info(f"已扫描 {i + 1}/{len(universe)}")

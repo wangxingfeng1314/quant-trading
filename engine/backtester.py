@@ -4,6 +4,7 @@ import logging
 from typing import List, Type, Callable
 import pandas as pd
 import itertools
+import concurrent.futures
 
 from engine.portfolio import Portfolio
 from data.storage import get_daily, save_backtest_result, save_backtest_trades
@@ -252,5 +253,76 @@ def grid_search(strategy_cls, universe: list, start_date: str, end_date: str,
             progress_callback(i + 1, total)
 
     # 按指标降序排列
+    results.sort(key=lambda r: r["metric_value"], reverse=True)
+    return results
+
+
+def grid_search_parallel(strategy_cls, universe: list, start_date: str, end_date: str,
+                          initial_capital: float = 100000, param_grid: dict = None,
+                          metric: str = "total_return", max_workers: int = None,
+                          progress_callback: Callable = None) -> list:
+    """并行参数网格搜索（基于 ProcessPoolExecutor）
+
+    与 grid_search() 功能相同，但利用多核 CPU 并行执行回测。
+    适用于参数组合较多（>10）的场景。
+
+    Args:
+        同 grid_search()
+        max_workers: 并行进程数（默认 = CPU 核心数）
+
+    Returns:
+        同 grid_search()
+    """
+    if param_grid is None:
+        param_grid = {}
+
+    param_names = list(param_grid.keys())
+    param_values = list(param_grid.values())
+    combinations = list(itertools.product(*param_values))
+    total = len(combinations)
+
+    if total == 0:
+        return []
+
+    # 对单个参数组合执行一次回测（作为并行任务单元）
+    def _run_single(combo):
+        params = dict(zip(param_names, combo))
+        bt = Backtester(
+            strategy_cls=strategy_cls,
+            params=params,
+            universe=universe,
+            start_date=start_date,
+            end_date=end_date,
+            initial_capital=initial_capital,
+        )
+        return bt.run(save=False)
+
+    results = []
+    completed = 0
+    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_run_single, combo): combo
+                   for combo in combinations}
+
+        for future in concurrent.futures.as_completed(futures):
+            combo = futures[future]
+            try:
+                result = future.result()
+                params = dict(zip(param_names, combo))
+                metric_value = getattr(result, metric, 0)
+                if metric == "max_drawdown":
+                    metric_value = -metric_value
+
+                results.append({
+                    "params": params,
+                    "result": result,
+                    "metric_value": metric_value,
+                })
+            except Exception as e:
+                logger.error(f"并行回测异常 ({combo}): {e}")
+
+            completed += 1
+            if progress_callback:
+                progress_callback(completed, total)
+
     results.sort(key=lambda r: r["metric_value"], reverse=True)
     return results

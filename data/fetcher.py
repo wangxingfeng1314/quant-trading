@@ -262,7 +262,7 @@ def fetch_daily(ts_code: str, start_date: str, end_date: str) -> pd.DataFrame:
         return df
 
     # 所有数据源均失败
-    logger.debug(f"{ts_code} 所有数据源均失败")
+    logger.warning(f"{ts_code} 所有数据源均失败 (AKShare→Tushare→Baostock)")
     return pd.DataFrame()
 
 
@@ -349,57 +349,71 @@ def _fetch_daily_tushare(ts_code: str, start_date: str,
     注意：
       - Tushare免费用户限频 1次/秒
       - 如果拿不到复权因子则放弃此源（价格必须统一为前复权）
+      - 内置 1 次自动重试（应对临时网络抖动）
     """
-    try:
-        pro = _get_pro()                             # 获取 Tushare API 实例
-        _rate_limit()                                 # 限频 0.35s
-        # ---------- 第一步：拉取未复权日线 ----------
-        df = pro.daily(
-            ts_code=ts_code,                         # 股票代码
-            start_date=start_date,                   # 起始日期
-            end_date=end_date,                       # 结束日期
-            fields="ts_code,trade_date,open,high,low,close,vol,amount,pct_chg"  # 需要的字段
-        )
-        if df is None or df.empty:
-            return pd.DataFrame()                    # 无数据则跳过
-
-        df = df.rename(columns={"vol": "volume"})    # 列名统一: vol → volume
-
-        # ---------- 第二步：获取复权因子 ----------
-        # 注意：免费用户 1 分钟只能调 1 次 adj_factor 接口
+    MAX_TUSHARE_RETRIES = 2
+    for attempt in range(1, MAX_TUSHARE_RETRIES + 1):
         try:
-            adj_df = pro.adj_factor(
-                ts_code=ts_code,
-                start_date=start_date,
-                end_date=end_date
+            pro = _get_pro()                             # 获取 Tushare API 实例
+            _rate_limit()                                 # 限频 0.35s
+
+            if attempt > 1:
+                wait = 1.0 + random.uniform(0, 1)
+                logger.debug(f"{ts_code} Tushare 第{attempt}次重试，等待{wait:.1f}s")
+                time.sleep(wait)
+
+            # ---------- 第一步：拉取未复权日线 ----------
+            df = pro.daily(
+                ts_code=ts_code,                         # 股票代码
+                start_date=start_date,                   # 起始日期
+                end_date=end_date,                       # 结束日期
+                fields="ts_code,trade_date,open,high,low,close,vol,amount,pct_chg"  # 需要的字段
             )
-            if adj_df is not None and not adj_df.empty:
-                adj_map = dict(zip(adj_df["trade_date"], adj_df["adj_factor"]))  # 日期→因子映射
-                df["adj_factor"] = df["trade_date"].map(adj_map).fillna(1.0)     # 填充到日线
-            else:
-                df["adj_factor"] = 1.0                # 无复权因子则默认1
-        except Exception:
-            # 限频导致拿不到复权因子 → 放弃此数据源
-            # （宁可降级到 Baostock，也不用未复权价格）
-            logger.debug(f"{ts_code} Tushare复权因子获取失败，跳过该源")
+            if df is None or df.empty:
+                if attempt < MAX_TUSHARE_RETRIES:
+                    continue
+                return pd.DataFrame()                    # 无数据则跳过
+
+            df = df.rename(columns={"vol": "volume"})    # 列名统一: vol → volume
+
+            # ---------- 第二步：获取复权因子 ----------
+            # 注意：免费用户 1 分钟只能调 1 次 adj_factor 接口
+            try:
+                adj_df = pro.adj_factor(
+                    ts_code=ts_code,
+                    start_date=start_date,
+                    end_date=end_date
+                )
+                if adj_df is not None and not adj_df.empty:
+                    adj_map = dict(zip(adj_df["trade_date"], adj_df["adj_factor"]))  # 日期→因子映射
+                    df["adj_factor"] = df["trade_date"].map(adj_map).fillna(1.0)     # 填充到日线
+                else:
+                    df["adj_factor"] = 1.0                # 无复权因子则默认1
+            except Exception:
+                # 限频导致拿不到复权因子 → 放弃此数据源
+                # （宁可降级到 Baostock，也不用未复权价格）
+                logger.debug(f"{ts_code} Tushare复权因子获取失败，跳过该源")
+                return pd.DataFrame()
+
+            df["turnover"] = 0.0                          # Tushare不直接提供换手率，置0
+
+            # ---------- 第三步：计算前复权价格 ----------
+            # 公式：前复权 = 未复权 × (当日复权因子 / 最新复权因子)
+            latest_adj = df["adj_factor"].iloc[-1] if not df.empty else 1.0  # 取最新复权因子
+            if latest_adj > 0:
+                for col in ["open", "high", "low", "close"]:
+                    df[col] = (df[col] * df["adj_factor"] / latest_adj).round(2)  # 计算前复权并保留2位小数
+                df["adj_factor"] = 1.0                    # 已前复权，复权因子置1
+
+            logger.info(f"{ts_code} Tushare ✓ ({len(df)}条)")
+            return df[DAILY_COLUMNS].sort_values("trade_date").reset_index(drop=True)
+
+        except Exception as e:
+            logger.debug(f"{ts_code} Tushare第{attempt}次失败: {e}")
+            if attempt < MAX_TUSHARE_RETRIES:
+                continue
             return pd.DataFrame()
-
-        df["turnover"] = 0.0                          # Tushare不直接提供换手率，置0
-
-        # ---------- 第三步：计算前复权价格 ----------
-        # 公式：前复权 = 未复权 × (当日复权因子 / 最新复权因子)
-        latest_adj = df["adj_factor"].iloc[-1] if not df.empty else 1.0  # 取最新复权因子
-        if latest_adj > 0:
-            for col in ["open", "high", "low", "close"]:
-                df[col] = (df[col] * df["adj_factor"] / latest_adj).round(2)  # 计算前复权并保留2位小数
-            df["adj_factor"] = 1.0                    # 已前复权，复权因子置1
-
-        logger.info(f"{ts_code} Tushare ✓ ({len(df)}条)")
-        return df[DAILY_COLUMNS].sort_values("trade_date").reset_index(drop=True)
-
-    except Exception as e:
-        logger.debug(f"{ts_code} Tushare失败: {e}")
-        return pd.DataFrame()
+    return pd.DataFrame()
 
 
 # ============================================================
@@ -496,6 +510,9 @@ def _fetch_daily_baostock(ts_code: str, start_date: str,
     except Exception as e:
         logger.debug(f"{ts_code} Baostock失败: {e}")
         return pd.DataFrame()
+
+    # 所以重试已在外部 fetch_daily 级联兜底，Baostock 本身不实现重试
+    # （它已经是最后一道防线，失败直接回到 fetch_daily 返回空）
 
 
 # ============================================================
@@ -668,7 +685,7 @@ INDEX_CODES = {
 
 def fetch_index_daily(index_code: str, start_date: str = "",
                       end_date: str = "") -> pd.DataFrame:
-    """获取大盘指数日线数据（从 AKShare 实时拉取）
+    """获取大盘指数日线数据（从 AKShare 实时拉取），内置重试
 
     参数:
         index_code: 指数代码，如 "000001.SH"
@@ -678,45 +695,58 @@ def fetch_index_daily(index_code: str, start_date: str = "",
     返回:
         DataFrame 列: ts_code, trade_date, open, high, low, close, volume, pct_chg
     """
-    try:
-        import akshare as ak
-        # ---------- 代码格式转换 ----------
-        # "000001.SH" → "sh000001"（AKShare 格式）
-        parts = index_code.split(".")
-        market = parts[1].lower()                            # "SH" → "sh"
-        symbol = parts[0]                                    # "000001"
-        ak_code = f"{market}{symbol}"                        # "sh000001"
+    MAX_INDEX_RETRIES = 2
+    for attempt in range(1, MAX_INDEX_RETRIES + 1):
+        try:
+            import akshare as ak
+            # ---------- 代码格式转换 ----------
+            # "000001.SH" → "sh000001"（AKShare 格式）
+            parts = index_code.split(".")
+            market = parts[1].lower()                            # "SH" → "sh"
+            symbol = parts[0]                                    # "000001"
+            ak_code = f"{market}{symbol}"                        # "sh000001"
 
-        # ---------- 调用 AKShare 指数接口 ----------
-        df = ak.stock_zh_index_daily(symbol=ak_code)
-        if df is None or df.empty:
+            if attempt > 1:
+                wait = 2.0 + random.uniform(0, 2)
+                logger.debug(f"指数 {index_code} 第{attempt}次重试，等待{wait:.1f}s")
+                time.sleep(wait)
+
+            # ---------- 调用 AKShare 指数接口 ----------
+            df = ak.stock_zh_index_daily(symbol=ak_code)
+            if df is None or df.empty:
+                if attempt < MAX_INDEX_RETRIES:
+                    continue
+                return pd.DataFrame()
+
+            # ---------- 列名翻译：中文→英文 ----------
+            df = df.rename(columns={
+                "date": "trade_date", "open": "open", "high": "high",
+                "low": "low", "close": "close", "volume": "volume",
+            })
+            df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.strftime("%Y%m%d")  # 统一日期格式
+            df["ts_code"] = index_code                           # 标记指数代码
+            df["pct_chg"] = df["close"].pct_change() * 100       # 计算涨跌幅（百分比）
+
+            # 按标准列序整理
+            cols = ["ts_code", "trade_date", "open", "high", "low", "close",
+                    "volume", "pct_chg"]
+            df = df[cols].sort_values("trade_date").reset_index(drop=True)
+
+            # 按日期范围过滤
+            if start_date:
+                df = df[df["trade_date"] >= start_date]
+            if end_date:
+                df = df[df["trade_date"] <= end_date]
+
+            logger.info(f"指数 {index_code} AKShare ✓ ({len(df)}条)")
+            return df
+        except Exception as e:
+            logger.warning(f"获取指数 {index_code} 第{attempt}次失败: {e}")
+            if attempt < MAX_INDEX_RETRIES:
+                continue
+            logger.error(f"指数 {index_code} 所有重试均失败")
             return pd.DataFrame()
-
-        # ---------- 列名翻译：中文→英文 ----------
-        df = df.rename(columns={
-            "date": "trade_date", "open": "open", "high": "high",
-            "low": "low", "close": "close", "volume": "volume",
-        })
-        df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.strftime("%Y%m%d")  # 统一日期格式
-        df["ts_code"] = index_code                           # 标记指数代码
-        df["pct_chg"] = df["close"].pct_change() * 100       # 计算涨跌幅（百分比）
-
-        # 按标准列序整理
-        cols = ["ts_code", "trade_date", "open", "high", "low", "close",
-                "volume", "pct_chg"]
-        df = df[cols].sort_values("trade_date").reset_index(drop=True)
-
-        # 按日期范围过滤
-        if start_date:
-            df = df[df["trade_date"] >= start_date]
-        if end_date:
-            df = df[df["trade_date"] <= end_date]
-
-        logger.info(f"指数 {index_code} AKShare ✓ ({len(df)}条)")
-        return df
-    except Exception as e:
-        logger.warning(f"获取指数 {index_code} 失败: {e}")
-        return pd.DataFrame()
+    return pd.DataFrame()
 
 
 def update_all_indices(start_date: str = "", end_date: str = "") -> int:

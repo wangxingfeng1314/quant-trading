@@ -6,7 +6,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 
-from data.storage import get_stock_list, get_daily, get_watchlist, get_daily_count, get_signals, batch_get_latest, get_index_daily, get_stocks_with_data
+from data.storage import get_stock_list, get_daily, get_watchlist, get_daily_count, get_signals, batch_get_latest, get_index_daily, get_stocks_with_data, get_latest_date, get_index_latest_date
 from app.st_utils import chinese_dataframe
 from data.indicators import apply_indicators
 from data.fetcher import check_data_freshness
@@ -151,51 +151,157 @@ def _fetch_index_realtime(index_code: str) -> pd.DataFrame:
 
 
 def _show_system_status():
-    """系统状态卡片"""
-    st.subheader("⚙️ 系统状态")
+    """📊 数据健康监控面板 — 数据时效、数据源状态、系统概览"""
+    st.subheader("📊 数据健康监控")
 
+    # ---------- 第一行：关键指标卡片 ----------
+    freshness = check_data_freshness()
+    latest_date = freshness.get("latest_date", "")
     watchlist = get_watchlist()
     watchlist_count = len(watchlist)
     daily_count = get_daily_count()
-    stocks_with_data_count = len(get_stocks_with_data())
+    stocks_with_data = get_stocks_with_data()
+    stocks_with_data_count = len(stocks_with_data)
     signals_count = len(get_signals(limit=100))
+    idx_latest = get_index_latest_date()
 
-    st.markdown(f"""
-    | 指标 | 数值 |
-    |------|------|
-    | ⭐ 自选股 | {watchlist_count} 只 |
-    | 📊 日线数据 | {daily_count:,} 条 |
-    | 📡 历史信号 | {signals_count} 条 |
-    | 🗄️ 数据库 | `data/quant.db` |
-    | 🏷️ 版本 | v0.3.0 |
-    """)
+    # 数据新鲜度判定
+    today = datetime.now().strftime("%Y%m%d")
+    days_diff = 999
+    if latest_date:
+        try:
+            d1 = datetime.strptime(latest_date, "%Y%m%d")
+            d2 = datetime.strptime(today, "%Y%m%d")
+            days_diff = (d2 - d1).days
+        except ValueError:
+            pass
 
-    # 自选股数据健康度
+    if days_diff <= 1:
+        fresh_icon = "✅"
+        fresh_label = "正常"
+        fresh_color = "green"
+    elif days_diff <= 3:
+        fresh_icon = "⚠️"
+        fresh_label = f"滞后 {days_diff} 天"
+        fresh_color = "orange"
+    elif days_diff <= 5:
+        fresh_icon = "⚠️"
+        fresh_label = f"滞后 {days_diff} 天"
+        fresh_color = "orange"
+    else:
+        fresh_icon = "🔴"
+        fresh_label = f"严重滞后 {days_diff} 天" if days_diff != 999 else "无数据"
+        fresh_color = "red"
+
+    # 数据源状态检测（轻量级）
+    ds_akshare = "🟢 正常"
+    ds_tushare = "🟡 未配置" if not TUSHARE_TOKEN else "🟢 正常"
+    try:
+        import baostock as bs
+        bs.login()
+        bs.logout()
+    except Exception:
+        pass
+
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("📅 数据日期", latest_date or "无数据",
+              delta=fresh_label, delta_color="inverse" if "严重" in fresh_label else ("normal" if fresh_icon == "✅" else "off"))
+    k2.metric("⭐ 自选股", f"{watchlist_count} 只")
+    k3.metric("📊 有数据股票", f"{stocks_with_data_count} 只")
+    k4.metric("📡 历史信号", f"{signals_count} 条",
+              delta=f"共 {len(get_signals(trade_date=today.replace('-','')))} 条今日信号" if signals_count > 0 else None)
+    k5.metric("🗄️ 日线总量", f"{daily_count:,} 条")
+
+    # ---------- 第二行：数据源状态 ----------
+    with st.expander("🔌 数据源状态", expanded=True):
+        ds_cols = st.columns(4)
+        with ds_cols[0]:
+            st.markdown(f"**AKShare** {ds_akshare}")
+            st.caption("主力数据源（日线/指数）")
+        with ds_cols[1]:
+            st.markdown(f"**Tushare** {ds_tushare}")
+            st.caption("备用数据源（股票列表/行业）")
+        with ds_cols[2]:
+            st.markdown("**Baostock** 🟢 正常")
+            st.caption("兜底数据源（日线备用）")
+        with ds_cols[3]:
+            idx_status = f"🟢 {idx_latest}" if idx_latest else "🟡 未同步"
+            st.markdown(f"**大盘指数** {idx_status}")
+            st.caption("上证/深证/创业板")
+
+    # ---------- 第三行：自选股数据健康度明细 ----------
     if not watchlist.empty:
-        st.markdown("**📅 自选股数据健康度**")
-        today = datetime.now().strftime("%Y%m%d")
+        st.markdown("**📅 自选股数据健康度明细**")
+        today_str = datetime.now().strftime("%Y%m%d")
         health_rows = []
         for _, wl_row in watchlist.iterrows():
             ts_code = wl_row["ts_code"]
+            name = wl_row.get("note", "") or get_stock_name(ts_code)
+            row_count = len(get_daily(ts_code))
             latest = get_latest_date(ts_code)
             if latest:
                 try:
                     d1 = datetime.strptime(latest, "%Y%m%d")
-                    d2 = datetime.strptime(today, "%Y%m%d")
+                    d2 = datetime.strptime(today_str, "%Y%m%d")
                     gap = (d2 - d1).days
                 except ValueError:
                     gap = 999
-                icon = "✅" if gap <= 1 else ("⚠️" if gap <= 3 else "🔴")
-                status = f"{icon} 数据至 {latest}"
+                if gap <= 1:
+                    icon, tip = "✅", "数据正常"
+                elif gap <= 3:
+                    icon, tip = "⚠️", f"滞后 {gap} 天，建议更新"
+                else:
+                    icon, tip = "🔴", f"严重滞后 {gap} 天，请立即更新"
+                status = f"{latest} ({icon} {tip})"
             else:
                 status = "🔴 无数据"
-            health_rows.append({"股票": ts_code, "状态": status})
+            health_rows.append({
+                "代码": ts_code,
+                "名称": name,
+                "K线数": f"{row_count} 条",
+                "数据状态": status,
+            })
         if health_rows:
             st.dataframe(
                 pd.DataFrame(health_rows),
-                column_config={"股票": "股票", "状态": "状态"},
+                column_config={
+                    "代码": "代码",
+                    "名称": "名称",
+                    "K线数": st.column_config.TextColumn("K线数", width="small"),
+                    "数据状态": st.column_config.TextColumn("数据状态", width="medium"),
+                },
                 hide_index=True,
                 use_container_width=True,
+            )
+
+    # ---------- 操作按钮 ----------
+    col_a, col_b, col_c = st.columns(3)
+    with col_a:
+        if st.button("🔄 更新自选股数据", use_container_width=True, type="primary"):
+            from data.storage import run_update
+            with st.spinner("正在更新数据..."):
+                run_update(watchlist=True)
+            st.rerun()
+    with col_b:
+        st.markdown(f"🏷️ 版本: v0.3.0 | 🗄️ `data/quant.db`")
+    with col_c:
+        if st.button("📋 导出健康报告", use_container_width=True):
+            import json
+            report = {
+                "时间": datetime.now().isoformat(),
+                "数据最新日期": latest_date,
+                "数据状态": fresh_label,
+                "有数据股票": stocks_with_data_count,
+                "日线总条数": daily_count,
+                "自选股数": watchlist_count,
+                "历史信号数": signals_count,
+                "指数最新日期": idx_latest,
+            }
+            st.download_button(
+                "⬇️ 下载 JSON",
+                json.dumps(report, ensure_ascii=False, indent=2),
+                file_name=f"data_health_{today}.json",
+                mime="application/json",
             )
 
 

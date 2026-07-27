@@ -1,4 +1,4 @@
-"""消息推送模块 - Server酱 / PushPlus 通知"""
+"""消息推送模块 - Server酱 / PushPlus / 企业微信 / 钉钉 通知"""
 import json
 import logging
 from typing import List
@@ -18,6 +18,9 @@ load_dotenv(PROJECT_ROOT / ".env")
 
 SERVER_CHAN_KEY = os.getenv("SERVER_CHAN_KEY", "")
 PUSHPLUS_TOKEN = os.getenv("PUSHPLUS_TOKEN", "")
+WECOM_WEBHOOK = os.getenv("WECOM_WEBHOOK", "")    # 企业微信机器人 Webhook URL
+DINGTALK_WEBHOOK = os.getenv("DINGTALK_WEBHOOK", "")  # 钉钉机器人 Webhook URL
+DINGTALK_SECRET = os.getenv("DINGTALK_SECRET", "")     # 钉钉加签密钥（可选）
 
 
 def send_notification(title: str, content: str, msg_type: str = "markdown") -> bool:
@@ -29,7 +32,7 @@ def send_notification(title: str, content: str, msg_type: str = "markdown") -> b
         msg_type: 消息类型
 
     Returns:
-        是否发送成功
+        是否至少一个通道发送成功
     """
     success = False
 
@@ -41,9 +44,17 @@ def send_notification(title: str, content: str, msg_type: str = "markdown") -> b
     if PUSHPLUS_TOKEN:
         success = _send_pushplus(title, content, msg_type) or success
 
+    # 企业微信
+    if WECOM_WEBHOOK:
+        success = _send_wecom(title, content) or success
+
+    # 钉钉
+    if DINGTALK_WEBHOOK:
+        success = _send_dingtalk(title, content) or success
+
     if not success:
-        logger.warning("未配置推送通道（SERVER_CHAN_KEY 或 PUSHPLUS_TOKEN），"
-                       "请在 .env 中配置")
+        logger.info("未配置推送通道（SERVER_CHAN_KEY / PUSHPLUS_TOKEN / "
+                     "WECOM_WEBHOOK / DINGTALK_WEBHOOK），请在 .env 中配置任一通道")
 
     return success
 
@@ -87,6 +98,91 @@ def _send_pushplus(title: str, content: str, msg_type: str = "markdown") -> bool
             return False
     except Exception as e:
         logger.error(f"PushPlus推送异常: {e}")
+        return False
+
+
+def _send_wecom(title: str, content: str) -> bool:
+    """通过企业微信机器人推送
+
+    配置: 在 .env 中设置 WECOM_WEBHOOK（群机器人 Webhook URL）
+
+    Args:
+        title: 消息标题
+        content: Markdown 内容
+
+    Returns:
+        是否发送成功
+    """
+    try:
+        # 企业微信 Markdown 消息格式
+        md_content = f"## {title}\n{content}"
+        payload = {
+            "msgtype": "markdown",
+            "markdown": {"content": md_content},
+        }
+        resp = requests.post(WECOM_WEBHOOK, json=payload, timeout=10)
+        data = resp.json()
+        if data.get("errcode") == 0:
+            logger.info(f"企业微信推送成功: {title}")
+            return True
+        else:
+            logger.error(f"企业微信推送失败: {data}")
+            return False
+    except Exception as e:
+        logger.error(f"企业微信推送异常: {e}")
+        return False
+
+
+def _send_dingtalk(title: str, content: str) -> bool:
+    """通过钉钉机器人推送
+
+    配置: 在 .env 中设置 DINGTALK_WEBHOOK（可选加签 DINGTALK_SECRET）
+
+    Args:
+        title: 消息标题
+        content: Markdown 内容
+
+    Returns:
+        是否发送成功
+    """
+    try:
+        # 钉钉 Markdown 消息格式
+        payload = {
+            "msgtype": "markdown",
+            "markdown": {
+                "title": title,
+                "text": f"## {title}\n\n{content}",
+            },
+        }
+
+        url = DINGTALK_WEBHOOK
+        # 加签模式（安全设置→加签）
+        if DINGTALK_SECRET:
+            import time
+            import hmac
+            import hashlib
+            import base64
+            timestamp = str(round(time.time() * 1000))
+            sign_str = f"{timestamp}\n{DINGTALK_SECRET}"
+            signature = base64.b64encode(
+                hmac.new(
+                    DINGTALK_SECRET.encode("utf-8"),
+                    sign_str.encode("utf-8"),
+                    hashlib.sha256,
+                ).digest()
+            ).decode("utf-8")
+            url = f"{url}&timestamp={timestamp}&sign={signature}"
+
+        resp = requests.post(url, json=payload, timeout=10)
+        data = resp.json()
+        if data.get("errcode") == 0:
+            logger.info(f"钉钉推送成功: {title}")
+            return True
+        else:
+            logger.error(f"钉钉推送失败: {data}")
+            return False
+    except Exception as e:
+        logger.error(f"钉钉推送异常: {e}")
         return False
 
 

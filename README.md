@@ -1,7 +1,42 @@
-# 📊 A股量化交易系统
+<p align="center">
+  <h1 align="center">📊 A股量化交易系统</h1>
+  <p align="center">
+    以<strong>自选股为中心</strong>的个人 A 股量化系统
+    <br />
+    多数据源 · 策略回测 · 信号扫描 · 一键跟单
+    <br />
+    <br />
+    <a href="#-快速启动"><strong>🚀 快速启动 »</strong></a>
+    ·
+    <a href="#-功能页面"><strong>📖 功能指南 »</strong></a>
+    ·
+    <a href="#-策略体系"><strong>🧩 11个策略 »</strong></a>
+  </p>
+</p>
 
-以 **自选股为中心** 的个人A股量化系统。支持多数据源、策略回测、信号扫描、一键跟单。  
-加自选股 → 自动下载数据 → 自动扫信号，一条龙。
+<p align="center">
+  <img src="https://img.shields.io/badge/version-v0.3.0-blue" alt="version" />
+  <img src="https://img.shields.io/badge/python-3.11-green" alt="python" />
+  <img src="https://img.shields.io/badge/tests-49%20passed-brightgreen" alt="tests" />
+  <img src="https://img.shields.io/badge/streamlit-1.58-red" alt="streamlit" />
+</p>
+
+---
+
+## 📋 目录
+
+- [🚀 快速启动](#-快速启动)
+- [💡 设计理念](#-设计理念)
+- [📖 功能页面](#-功能页面)
+- [🧩 策略体系](#-策略体系)
+- [⚙️ 数据管理](#️-数据管理)
+- [🔬 回测引擎](#-回测引擎)
+- [📡 消息推送](#-消息推送)
+- [🧪 测试与CI/CD](#-测试与cicd)
+- [📦 依赖](#-依赖)
+- [🏗️ 系统架构](#️-系统架构)
+- [➕ 添加新策略](#-添加新策略)
+- [📜 Changelog](#-changelog)
 
 ---
 
@@ -11,250 +46,406 @@
 # 1. 安装依赖
 pip install -r requirements.txt
 
-# 2. 配置 Token（可选，缺省用 AKShare 免费数据源）
+# 2. 配置（可选，缺省用 AKShare 免费数据源）
 cp .env.example .env
-# 编辑 .env 填入你的 Tushare Token（如果不配置，自动降级到 AKShare / Baostock）
 
-# 3. 首次初始化（先加自选股，再只下载自选股的数据）
+# 3. 首次初始化（先加自选股，然后只下载自选股数据）
 py scripts/init_data.py --watchlist
 
 # 4. 启动系统
 py run.py
 ```
 
-浏览器自动打开 http://localhost:8501
+浏览器自动打开 **http://localhost:8501**
+
+### ⏰ 每日推荐工作流
+
+```
+17:00 定时任务自动更新数据
+  ↓
+🏠 首页看板 → 看大盘 + 数据健康度 + 自选股快照
+  ↓
+📡 信号中心 → 扫描今日信号
+  ↓
+🔍 选股筛选 → 找符合形态标的
+  ↓
+🔬 回测中心 → 验证策略参数（支持并行网格搜索）
+  ↓
+💼 持仓管理 → 一键跟单
+```
 
 ---
 
-## 📖 完整使用指南
+## 💡 设计理念
 
-### 🏠 首页看板 — 每天先看这个
+**自选股中心化**——系统所有功能围绕你的自选股展开，不淹没在全市场 5000+ 只股票里。
 
-一屏掌握全局：大盘指数（上证/深证/创业板）、自选股快照（含趋势判断/RSI）、今日信号、自选股涨跌幅排行。
+```
+加自选股 → 自动下载数据 → 自动扫描信号 → 页面刷新可见
+```
 
-### 📈 数据浏览 — 看K线+指标
+| 对比项 | 传统全市场扫描 | ✅ 本系统（自选股中心） |
+|:-------|:-------------|:---------------------|
+| 数据量 | 5000+ 只 | 你关注的 N 只 |
+| 扫描速度 | 几分钟 | 几秒 |
+| 关注度 | 分散 | 聚焦 |
+| 信号噪音 | 大量无效信号 | 只产生你关心的信号 |
 
-搜索股票 → 选日期范围 → 勾选指标（均线/MACD/布林带）→ 看K线图 + 顶部指标卡片。
+---
 
-### 🔬 回测中心 — 核心功能（4个Tab）
+## 📖 功能页面
+
+### 🏠 首页看板
+一屏掌握全局：大盘指数（上证/深证/创业板）、**数据健康监控面板**、自选股快照（趋势/RSI/MA20）、今日信号排行、涨跌幅榜。
+
+> **数据健康面板**：5 个指标卡片 + 数据源状态 + 自选股健康度明细 + 一键更新 + 导出健康报告。
+
+### 📈 数据浏览
+搜索股票 → 选日期范围 → 勾选指标 → 看K线 + 顶部指标卡片。
+- 支持：均线(MA5/20/60)、MACD、布林带、RSI
+- 默认只列出有数据的股票
+
+### 🔬 回测中心（4个Tab）
 
 | Tab | 功能 | 说明 |
-|-----|------|------|
-| ① 运行回测 | 单次回测/批量自选股回测+基准对比 | 选策略→调参数→选股票→运行→看权益曲线/月度热力图/滚动夏普 |
-| ② 参数优化 | 网格搜索+热力图 | 选策略→设优化目标→设参数范围→运行→看最优参数+2D热力图 |
-| ③ 多策略对比 | 叠加权益曲线/矩阵热力图 | 对比单股多策略，或策略×自选股热力图 |
-| ④ 历史记录 | 查看过往回测 | 展开查看详情+交易明细 |
+|:----|:-----|:------|
+| ① **运行回测** | 单次回测/批量自选股 | 选策略→调参数→选股票→运行→权益曲线+月度热力图+滚动夏普 |
+| ② **参数优化** | 网格搜索(串行+并行) | 选策略→设优化目标→设参数范围→运行→热力图+最佳参数 |
+| ③ **多策略对比** | 叠加权益曲线 | 对比单股多策略效果 |
+| ④ **历史记录** | 过往回测 | 展开查看详情+交易明细 |
 
-**新增功能：**
-- **批量回测自选股**：一键对所有自选股跑回测，对比表格 + 最佳标记
-- **矩阵热力图**：策略×自选股，热力图展示收益分布
-- **策略参数模板**：保存/加载参数配置，支持"标记当前参数"
-- **绩效指标增强**：新增卡玛比率(Calmar)、Alpha、Beta
+**回测特性：**
+- ✅ A股费用模型（佣金万2.5/最低5元/印花万5/过户费）
+- ✅ 滑点模型（可配置千分之一）
+- ✅ 涨跌停限制（主板±10%/ST±5%/创业板±20%）
+- ✅ T+1 规则
+- ✅ 评分仓位管理
+- ✅ 沪深300基准对比
+- ✅ 绩效归因（月度热力图/逐年收益/滚动夏普/回撤）
+- ✅ 导出报告
+- 🚀 **网格搜索并行化**：多核 CPU 加速参数搜索
 
-### 🔍 选股筛选 — 对自选股按因子排序
+### 🔍 选股筛选
+按技术因子筛选：均线多头/MACD金叉/RSI范围/放量/布林带/KDJ金叉/涨跌幅。
+→ 综合评分排序 → 导出 CSV
 
-左侧设条件：均线多头/MACD金叉/RSI范围/放量/布林带/KDJ金叉/涨跌幅范围。
-→ 点「开始筛选」→ 按综合评分排序 → 导出CSV
-
-### 📡 信号中心 — 扫描+验证
-
-| Tab | 功能 |
-|-----|------|
-| ① 实时扫描 | 选策略→选范围（自选股/全部有数据的股票）→ 开始扫描 |
-| ② 历史信号 | 按策略/方向筛选 |
-| ③ 信号验证 ⭐ | 验证信号后N日涨跌幅+胜率统计 |
-| ④ 🎯 组合信号 | 多策略共识分析，买入/卖出共识+策略冲突检测 |
-
-### 💼 持仓管理 — 自选股 + 跟单
+### 📡 信号中心（4个Tab）
 
 | Tab | 功能 |
-|-----|------|
-| ① 自选股 | 添加/删除 + 自动下载数据 + 自动扫信号 + 分组管理 + K线快览 |
-| ② 模拟持仓 | 手动记录持仓 + 自动算盈亏（**持久化到SQLite，刷新不丢**） |
-| ③ 信号自动跟单 ⭐ | 一键跟入/跟出信号到持仓 + K线买卖点标注 |
+|:----|:------|
+| ① **实时扫描** | 选策略+范围（自选股/全部有数据股票），带进度条 |
+| ② **历史信号** | 按策略/方向筛选 |
+| ③ **信号验证 ⭐** | 验证信号后 N 日涨跌幅 + 胜率统计 |
+| ④ **组合信号** | 多策略共识分析 + 冲突检测 |
+
+### 💼 持仓管理（3个Tab）
+
+| Tab | 功能 |
+|:----|:------|
+| ① **自选股** | 添加/删除 + 自动下载数据 + 自动扫信号 + 分组管理(长线/短线) |
+| ② **模拟持仓** | 手动记录持仓 + 自动算盈亏（**持久化到 SQLite，刷新不丢**） |
+| ③ **信号自动跟单 ⭐** | 一键跟入/跟出信号到持仓 + K线买卖点标注 |
+
+### 📚 策略百科
+策略说明 + 参数详情 + 历史回测排行榜。
 
 ---
 
-## ⏰ 每日推荐工作流
+## 🧩 策略体系
 
-```
-打开系统 → 🏠 首页看自选股快照
-         → 📡 信号中心扫自选股
-         → 🔬 回测中心验证策略
-         → 💼 持仓管理一键跟单
-```
+### 趋势跟踪（4个）
+| 策略 | 文件 | 核心逻辑 |
+|:-----|:-----|:---------|
+| **双均线交叉** | `ma_cross.py` | 快线上穿慢线买入，下穿卖出 |
+| **均线多头排列** | `ma_bullish.py` | MA5 > MA20 > MA60 确认上升趋势入场 |
+| **海龟突破** | `turtle.py` | 突破 N 日高点买入，跌破 N 日低点卖出 |
+| **唐奇安通道突破** | `donchian_breakout.py` | 通道突破 + ATR 动态止损 |
 
-右上角侧边栏的 **🔄 更新自选股数据** 按钮，点击即可拉取最新数据（每次覆盖最近14天），带进度条和实时文字。
+### 反转交易（4个）
+| 策略 | 文件 | 核心逻辑 |
+|:-----|:-----|:---------|
+| **MACD背离** | `macd_divergence.py` | 价格新低 + MACD 底背离买入 |
+| **RSI超买超卖** | `rsi_oversold.py` | RSI < 30 买入，> 70 卖出 |
+| **布林带反转** | `bollinger_reversal.py` | 触下轨买入，触上轨卖出 |
+| **双底形态识别** | `double_bottom.py` | 自动检测 W 底 + 突破颈线买入 |
 
-侧边栏还显示：
-- 定时任务状态（下次运行时间）
-- 数据库一键备份/恢复
+### 动量（2个）
+| 策略 | 文件 | 核心逻辑 |
+|:-----|:-----|:---------|
+| **KDJ金叉死叉** | `kdj_cross.py` | 低位金叉买入，高位死叉卖出 |
+| **量价突破** | `volume_price_breakout.py` | 放量突破均线买入，缩量反弹卖出 |
+
+### 组合（1个）
+| 策略 | 文件 | 核心逻辑 |
+|:-----|:-----|:---------|
+| **多因子综合评分** | `multi_factor.py` | 5 因子加权打分（均线+MACD+RSI+量能+布林） |
 
 ---
 
 ## ⚙️ 数据管理
 
-### 自选股模式（当前推荐）
-
-系统以自选股为中心。**加多少只自选股，系统就管理多少只的数据。**  
-加自选股时自动完成：
+### 数据源级联
 
 ```
-添加股票 → 写入自选股表 → 下载5年历史数据 → 扫描信号 → 页面刷新可见
+AKShare（主力，免费前复权）
+  └─ 失败 → Tushare Pro（备用，需Token）
+       └─ 失败 → Baostock（兜底，免费无限量）
 ```
+
+| 数据源 | 用途 | Token | 熔断保护 | 重试策略 |
+|:------:|:-----|:-----:|:---------|:---------|
+| **AKShare** 🏆 | 日线/指数/成分股 | ❌ | 连续20次失败→熔断300s | 3次，指数退避+随机 |
+| **Tushare Pro** | 股票列表(含行业)/复权因子 | ✅ | — | 2次重试 |
+| **Baostock** | 日线最后兜底 | ❌ | — | 级联自然兜底 |
 
 ### 常用命令
 
 ```bash
-# 首次初始化（只下载自选股数据）
+# 自选股初始化
 py scripts/init_data.py --watchlist
 
-# 增量更新数据（只更新自选股，覆盖最近14天）
+# 增量更新
 py scripts/init_data.py --update --days 30 --watchlist
 
-# 或者用 UI 侧边栏的 "🔄 更新自选股数据" 按钮
-
-# 全市场模式（不用自选股时，下载沪深300+前300只）
-py scripts/init_data.py --stocks 300
-
-# 断点续传（中途中断后继续）
-py scripts/init_data.py --stocks 300 --resume
+# 全市场模式
+py scripts/init_data.py --stocks 300 --resume   # 断点续传
 ```
-
-### 数据源级联
-
-| 优先级 | 数据源 | 用途 | Token |
-|:------:|--------|------|:-----:|
-| 1 | **AKShare** 🏆 | 日线数据（前复权），主力免费，无限量 | ❌ |
-| 2 | Tushare Pro | 股票列表（含行业）、复权因子 | ✅ 可选 |
-| 3 | Baostock | 最后兜底 | ❌ |
 
 ### Windows 定时任务
 
-系统已预设定时任务 `QuantTrading-DataUpdate`，每个工作日 **17:00** 自动更新数据：
+| 任务名 | 触发时间 | 脚本 |
+|:-------|:---------|:-----|
+| `QuantTrading-DataUpdate` | 每个工作日 17:00 | `scripts/update_data.bat` |
 
 ```bash
-# 查看任务状态
-schtasks /query /tn QuantTrading-DataUpdate
+schtasks /query /tn QuantTrading-DataUpdate  # 查看状态
+schtasks /run /tn QuantTrading-DataUpdate   # 手动触发
+```
 
-# 手动触发
-schtasks /run /tn QuantTrading-DataUpdate
+也可以在 Streamlit UI 侧边栏点击 **「🔄 更新自选股数据」** 按钮（带进度条）。
+
+### 配置项（.env）
+
+```
+# 数据源
+TUSHARE_TOKEN=               # 可选，AKShare不需要
+
+# 回测参数
+SLIPPAGE_RATE=0.001          # 滑点千分之一
+COMMISSION_RATE=0.00025      # 佣金万2.5
+STAMP_TAX_RATE=0.0005        # 印花税万5
+DEFAULT_CAPITAL=100000       # 默认资金10万
+DATA_START_DATE=20210701     # 数据起始日期
+
+# 定时调度
+SCHEDULER_ENABLED=true
+SCHEDULER_HOUR=17
+
+# 推送通道（可选）
+WECOM_WEBHOOK=               # 企业微信机器人 Webhook
+DINGTALK_WEBHOOK=            # 钉钉机器人 Webhook
+DINGTALK_SECRET=             # 钉钉加签密钥
+SERVER_CHAN_KEY=             # Server酱 Key
+PUSHPLUS_TOKEN=              # PushPlus Token
 ```
 
 ---
 
-## 🧩 系统架构
+## 🔬 回测引擎
+
+### 核心特性
+- **逐日迭代**：加载数据 → 构建日期序列 → 逐日产生信号 → 执行交易 → 记录权益
+- **A股费用模型**：佣金万2.5（最低5元）、印花税万5（仅卖出）、过户费万0.1、滑点千1
+- **风控规则**：涨跌停限制、T+1、评分仓位管理（5%~20%）
+- **绩效指标**：总收益、年化收益、最大回撤、夏普比率、卡玛比率(Calmar)、Alpha、Beta、胜率
+- **网格搜索**：`grid_search()`（串行）+ `grid_search_parallel()`（并行，利用多核 CPU）
+- **基准对比**：沪深300归一化权益曲线
+
+### 网格搜索并行化
+
+```python
+from engine.backtester import grid_search_parallel
+
+results = grid_search_parallel(
+    strategy_cls=MyStrategy,
+    universe=["000001.SZ"],
+    start_date="20240101", end_date="20241231",
+    param_grid={"fast": [5, 10, 20], "slow": [30, 60, 120]},
+    metric="sharpe_ratio",
+    max_workers=4,   # 默认 = CPU 核心数
+)
+```
+
+---
+
+## 📡 消息推送
+
+支持 **4 通道** 自动选择（至少一个成功即返回 True）：
+
+| 通道 | 环境变量 | 配置位置 |
+|:-----|:---------|:---------|
+| 🔔 Server酱 | `SERVER_CHAN_KEY` | .env |
+| 📱 PushPlus | `PUSHPLUS_TOKEN` | .env |
+| 💬 企业微信机器人 | `WECOM_WEBHOOK` | .env |
+| 🤖 钉钉机器人 | `DINGTALK_WEBHOOK` + `DINGTALK_SECRET` | .env |
+
+推送内容：信号日报（TOP5买入/卖出）、回测结果通知。
+
+---
+
+## 🧪 测试与CI/CD
+
+### 单元测试（49个）
+
+```bash
+# 运行全部测试
+py -m pytest tests/ -v
+
+# 运行单个文件
+py -m pytest tests/test_commission.py -v
+```
+
+| 测试文件 | 覆盖内容 |
+|:---------|:---------|
+| `test_models.py` | Signal/Trade/BacktestResult/StockInfo 数据模型 |
+| `test_commission.py` | 费用计算/滑点/涨跌停/取整手（15个边界测试） |
+| `test_portfolio.py` | 买入/卖出/权益计算/绩效指标/边界场景 |
+| `test_backtester.py` | 回测主循环/绩效验证/网格搜索（串行+并行） |
+
+### CI/CD
+
+项目已配置 GitHub Actions（`.github/workflows/ci.yml`），每次 push/PR 自动：
 
 ```
-quant-trading/
-├── app/                    # Streamlit 页面（7个功能页）
-│   ├── main.py             # 主入口 + 导航 + 侧边栏（一键更新按钮）
-│   ├── dashboard.py        # 🏠 首页看板
-│   ├── data_viewer.py      # 📈 数据浏览/K线
-│   ├── backtest.py         # 🔬 回测中心
-│   ├── signal.py           # 📡 信号中心
-│   ├── portfolio.py        # 💼 持仓管理
-│   ├── screener.py         # 🔍 选股筛选
-│   └── strategy_intro.py   # 📚 策略百科
-├── core/                   # 配置 + 数据模型
-│   ├── config.py           # .env 配置加载
-│   └── models.py           # Signal, Trade, BacktestResult 等
-├── data/                   # 数据层
-│   ├── fetcher.py          # 多数据源级联：AKShare → Tushare → Baostock
-│   ├── storage.py          # SQLite CRUD
-│   ├── indicators.py       # 技术指标：MA/MACD/RSI/BOLL/KDJ/ATR
-│   └── cleaner.py          # 数据清洗：OHLC校验、停牌过滤、去重
-├── engine/                 # 回测引擎
-│   ├── backtester.py       # 回测主循环 + grid_search() 网格搜索
-│   ├── portfolio.py        # 组合管理（含滑点模型）
-│   ├── position.py         # 持仓类（T+1规则）
-│   ├── commission.py       # A股费用模型（佣金/印花税/过户费/滑点）
-│   └── scanner.py          # 信号扫描器
-├── strategies/             # 策略（插件式注册，共11个）
-│   ├── base.py             # 策略抽象基类
-│   ├── ma_cross.py         # 双均线交叉（趋势跟踪）
-│   ├── macd_divergence.py  # MACD背离（反转）
-│   ├── turtle.py           # 海龟突破（趋势跟踪）
-│   ├── rsi_oversold.py     # RSI超卖反转（反转）
-│   ├── bollinger_reversal.py # 布林带反转（反转）
-│   ├── kdj_cross.py        # KDJ金叉/死叉（短线）
-│   ├── ma_bullish.py       # 均线多头排列（趋势跟踪）
-│   ├── donchian_breakout.py # 唐奇安通道突破（趋势跟踪）
-│   ├── volume_price_breakout.py # 量价突破（动量）
-│   ├── double_bottom.py    # 双底形态识别（反转）
-│   └── multi_factor.py     # 多因子综合评分（组合）
-├── scripts/                # 运维脚本
-│   ├── init_data.py        # 数据初始化/增量更新
-│   └── update_data.bat     # Windows定时任务脚本
-├── scheduler/              # 定时调度
-│   └── __init__.py         # APScheduler 每日定时更新
-├── notifier/               # 消息推送
-│   └── push.py             # Server酱/PushPlus
-├── logs/                   # 日志（自动轮转，5MB × 3份）
-├── .env                    # 配置文件（不提交）
-└── data/quant.db           # SQLite 数据库（自动生成）
+✅ 语法检查（py_compile 全量扫描 50+ 文件）
+✅ pytest 全部 49 个测试
+✅ 关键模块 import 一致性验证
 ```
 
 ---
 
 ## 📦 依赖
 
+所有依赖已锁定版本，见 `requirements.txt`。
+
+### 核心
+| 包 | 版本 | 用途 |
+|:---|:----|:------|
+| streamlit | 1.58.0 | Web UI 框架 |
+| pandas | 3.0.3 | 数据处理 |
+| numpy | 2.2.4 | 数值计算 |
+| plotly | 6.8.0 | 交互图表 |
+
+### 数据源
+| 包 | 版本 | 用途 |
+|:---|:----|:------|
+| akshare | 1.18.64 | 🏆 主力数据源 |
+| tushare | 1.4.29 | 备用数据源 |
+| baostock | 0.9.2 | 兜底数据源 |
+| requests | 2.33.1 | HTTP 请求 |
+
+### 其他
+| 包 | 版本 | 用途 |
+|:---|:----|:------|
+| apscheduler | 3.11.2 | 定时调度 |
+| python-dotenv | 1.2.2 | 配置管理 |
+| pytest | 9.1.1 | 单元测试 |
+
+---
+
+## 🏗️ 系统架构
+
 ```
-streamlit>=1.28
-pandas>=1.5
-numpy>=1.24
-plotly>=5.15
-akshare>=1.10
-tushare>=1.3
-baostock>=0.8
-apscheduler>=3.10
-python-dotenv>=1.0
-requests>=2.28
+quant-trading/
+├── app/                      # Streamlit 7 个功能页面
+│   ├── main.py               # 主入口 + 侧边栏
+│   ├── dashboard.py          # 🏠 首页看板（含数据健康面板）
+│   ├── data_viewer.py        # 📈 数据浏览/K线
+│   ├── backtest.py           # 🔬 回测中心（+ 并行网格搜索 UI）
+│   ├── signal.py             # 📡 信号中心
+│   ├── portfolio.py          # 💼 持仓管理
+│   ├── screener.py           # 🔍 选股筛选
+│   └── strategy_intro.py     # 📚 策略百科
+├── core/                     # 配置 + 数据模型
+│   ├── config.py             # .env 配置加载
+│   └── models.py             # Signal/Trade/BacktestResult/StockInfo
+├── data/                     # 数据层
+│   ├── fetcher.py            # 多源级联 + 熔断保护 + 自动重试
+│   ├── storage.py            # SQLite CRUD
+│   ├── indicators.py         # 技术指标（MA/MACD/RSI/BOLL/KDJ/ATR）
+│   └── cleaner.py            # 数据清洗（OHLC校验/停牌过滤/去重）
+├── engine/                   # 回测引擎
+│   ├── backtester.py         # 回测主循环 + grid_search(串行+并行)
+│   ├── portfolio.py          # 组合管理（滑点/费用）
+│   ├── position.py           # 持仓类（T+1规则）
+│   ├── commission.py         # A股费用模型（佣金/印花税/过户费）
+│   └── scanner.py            # 信号扫描器（异常可见的 warn 级别日志）
+├── strategies/               # 11 个策略（插件式注册）
+├── scripts/                  # 运维脚本
+├── scheduler/                # APScheduler 定时调度
+├── notifier/                 # 消息推送（4通道：Server酱/PushPlus/企微/钉钉）
+├── tests/                    # 49 个单元测试
+├── .github/workflows/        # CI/CD
+├── CHANGELOG.md              # 更新日志
+└── requirements.txt          # 版本锁定
 ```
 
 ---
 
-## ➕ 添加新策略（3步）
+## ➕ 添加新策略
 
-1. 在 `strategies/` 下新建文件，继承 `BaseStrategy`
-2. 在 `strategies/__init__.py` 注册到 `STRATEGY_REGISTRY`
-3. 重启 Streamlit，自动识别
+3 步完成：
 
 ```python
+# 1. strategies/my_strategy.py 新建文件
 from strategies.base import BaseStrategy
+from core.models import Signal
 
 class MyStrategy(BaseStrategy):
     name = "my_strategy"
-    description = "我的自定义策略"
+    description = "自定义策略说明"
     param_schema = {
         "period": {"default": 20, "desc": "计算周期"},
     }
 
     def on_bar(self, trade_date, data, portfolio=None):
-        # 你的策略逻辑
+        signals = []
+        for ts_code, df in data.items():
+            row = df.iloc[-1]
+            # 你的信号逻辑
+            signals.append(Signal(
+                ts_code=ts_code, trade_date=row["trade_date"],
+                strategy=self.name, direction="BUY",
+                score=0.8, price_ref=row["close"],
+                reason="信号原因",
+            ))
         return signals
+
+# 2. strategies/__init__.py 注册一行
+#    在 STRATEGY_REGISTRY 中加入:
+#    "my_strategy": MyStrategy,
+
+# 3. 重启 Streamlit，自动识别
 ```
 
 ---
 
-## ⚙️ 配置项（.env）
+## 📜 Changelog
 
-```
-TUSHARE_TOKEN=xxx           # Tushare Pro token（可选，AKShare不需要）
-SLIPPAGE_RATE=0.001         # 滑点比率
-DATA_START_DATE=20210701     # 数据起始日期（首次下载从哪天开始）
-DEFAULT_CAPITAL=100000      # 回测默认初始资金
-COMMISSION_RATE=0.00025     # 佣金费率（万2.5）
-STAMP_TAX_RATE=0.0005       # 印花税率（万5）
-SCHEDULER_ENABLED=true      # 定时任务开关
-SCHEDULER_HOUR=17           # 定时任务执行小时
-```
+详见 [CHANGELOG.md](./CHANGELOG.md)
+
+### v0.3.0 关键更新
+- 🔄 **自选股中心化重构** — 所有功能围绕自选股
+- 🧩 **11个策略** — 趋势跟踪(4)/反转(4)/动量(2)/组合(1)
+- 🚀 **并行网格搜索** — 多核 CPU 加速参数优化
+- 🧪 **49个单元测试** — 从零到完整测试覆盖
+- 🩺 **数据健康面板** — 实时监控数据时效和数据源状态
+- 💬 **4通道推送** — 新增企业微信/钉钉机器人
+- 🔧 **数据获取增强** — Tushare/指数自动重试 + 异常可见
+- 📋 **CI/CD** — GitHub Actions 自动化
 
 ---
 
-## 💡 开发注意
-
-- Python 3.11，Windows 下用 `py` 命令
-- `.gitignore` 已排除 `__pycache__/`、`*.db`、`.env`、`logs/`
-- 日志轮转：5MB 自动归档，保留 3 份备份
-- 所有 DB 操作只通过 `data/storage.py`
+<p align="center">
+  Made with ❤️ for A股量化 | v0.3.0
+</p>
