@@ -17,7 +17,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/version-v0.3.0-blue" alt="version" />
   <img src="https://img.shields.io/badge/python-3.11-green" alt="python" />
-  <img src="https://img.shields.io/badge/tests-49%20passed-brightgreen" alt="tests" />
+  <img src="https://img.shields.io/badge/tests-89%20passed-brightgreen" alt="tests" />
   <img src="https://img.shields.io/badge/streamlit-1.58-red" alt="streamlit" />
 </p>
 
@@ -96,9 +96,9 @@ py run.py
 ## 📖 功能页面
 
 ### 🏠 首页看板
-一屏掌握全局：大盘指数（上证/深证/创业板）、**数据健康监控面板**、自选股快照（趋势/RSI/MA20）、今日信号排行、涨跌幅榜。
+一屏掌握全局：大盘指数（上证/深证/创业板）、**数据健康监控面板**（含数据库完整性检查）、自选股快照（趋势/RSI/MA20）、今日信号排行、涨跌幅榜。
 
-> **数据健康面板**：5 个指标卡片 + 数据源状态 + 自选股健康度明细 + 一键更新 + 导出健康报告。
+> **数据健康面板**：5 个指标卡片 + 数据源状态 + 自选股健康度明细 + 一键更新 + 导出健康报告 + 数据库完整性检查。
 
 ### 📈 数据浏览
 搜索股票 → 选日期范围 → 勾选指标 → 看K线 + 顶部指标卡片。
@@ -289,13 +289,17 @@ results = grid_search_parallel(
 | 💬 企业微信机器人 | `WECOM_WEBHOOK` | .env |
 | 🤖 钉钉机器人 | `DINGTALK_WEBHOOK` + `DINGTALK_SECRET` | .env |
 
-推送内容：信号日报（TOP5买入/卖出）、回测结果通知。
+推送内容：信号日报（TOP5买入/卖出）、回测结果通知、**每日持仓盈亏日报**。
+
+### 数据源 & API 限速
+- **Tushare**：令牌桶算法限速（`_TokenBucket`），支持突发请求，长期平均速率稳定
+- **AKShare**：指数退避重试（3次）+ 熔断保护（连续20次失败→跳过300s）
 
 ---
 
 ## 🧪 测试与CI/CD
 
-### 单元测试（49个）
+### 单元测试（89个）
 
 ```bash
 # 运行全部测试
@@ -305,12 +309,15 @@ py -m pytest tests/ -v
 py -m pytest tests/test_commission.py -v
 ```
 
-| 测试文件 | 覆盖内容 |
-|:---------|:---------|
-| `test_models.py` | Signal/Trade/BacktestResult/StockInfo 数据模型 |
-| `test_commission.py` | 费用计算/滑点/涨跌停/取整手（15个边界测试） |
-| `test_portfolio.py` | 买入/卖出/权益计算/绩效指标/边界场景 |
-| `test_backtester.py` | 回测主循环/绩效验证/网格搜索（串行+并行） |
+| 测试文件 | 测试数 | 覆盖内容 |
+|:---------|:------|:---------|
+| `test_models.py` | 9 | Signal/Trade/BacktestResult/StockInfo 数据模型 |
+| `test_commission.py` | 15 | 费用计算/滑点/涨跌停/取整手（15个边界测试） |
+| `test_portfolio.py` | 14 | 买入/卖出/权益计算/绩效指标/边界场景 |
+| `test_backtester.py` | 11 | 回测主循环/绩效验证/网格搜索（串行+并行） |
+| `test_backtester_integration.py` | 5 | 真实 cleaner+indicators 集成测试 |
+| `test_storage.py` | 24 | SQLite 7张表 CRUD 全覆盖 |
+| `test_schema_alignment.py` | 11 | 模型-数据库表结构对齐验证 |
 
 ### CI/CD
 
@@ -438,11 +445,14 @@ class MyStrategy(BaseStrategy):
 - 🔄 **自选股中心化重构** — 所有功能围绕自选股
 - 🧩 **11个策略** — 趋势跟踪(4)/反转(4)/动量(2)/组合(1)
 - 🚀 **并行网格搜索** — 多核 CPU 加速参数优化
-- 🧪 **49个单元测试** — 从零到完整测试覆盖
-- 🩺 **数据健康面板** — 实时监控数据时效和数据源状态
-- 💬 **4通道推送** — 新增企业微信/钉钉机器人
-- 🔧 **数据获取增强** — Tushare/指数自动重试 + 异常可见
-- 📋 **CI/CD** — GitHub Actions 自动化
+- 🧪 **89个单元测试+集成测试** — 7个测试文件全覆盖
+- 🩺 **数据健康面板 + 数据库完整性检查** — 启动时自动校验
+- 💬 **4通道推送 + 持仓日报** — 信号推送 + 每日盈亏推送
+- 🔧 **数据获取增强** — Tushare/指数自动重试 + 令牌桶限速
+- 🔐 **SQLite 锁优化** — WAL模式 + timeout + 文件锁防双写
+- ⚡ **信号扫描缓存** — 当天已扫过的直接返回数据库结果
+- 🤖 **策略自动发现** — importlib 扫描目录，新增策略零配置
+- 📋 **CI/CD + 模型对齐测试** — GitHub Actions + 表结构验证
 
 ---
 

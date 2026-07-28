@@ -682,6 +682,87 @@ def _show_multi_strategy():
             chinese_dataframe(pd.DataFrame(rows))
 
 
+def _show_nlp_summary(result):
+    """回测结果的自然语言结论（让非量化用户也能看懂）"""
+    lines = []
+    verdict = ""
+
+    # ---------- 样本量判断 ----------
+    if result.trade_count < 5:
+        lines.append(
+            f"🔴 **样本不足**：仅 {result.trade_count} 次交易，统计意义有限，结论仅供参考")
+    elif result.trade_count < 15:
+        lines.append(
+            f"🟡 **样本偏少**：{result.trade_count} 次交易，建议继续积累数据")
+
+    # ---------- 总收益/年化 ----------
+    if result.annual_return > 20:
+        lines.append(f"✅ **年化收益 {result.annual_return:.1f}%** 表现优秀，远超理财产品")
+        verdict = "positive"
+    elif result.annual_return > 10:
+        lines.append(f"✅ **年化收益 {result.annual_return:.1f}%** 表现良好")
+        verdict = "positive"
+    elif result.annual_return > 5:
+        lines.append(f"🟡 **年化收益 {result.annual_return:.1f}%** 一般，略高于理财")
+    elif result.annual_return > 0:
+        lines.append(f"⚪ **年化收益 {result.annual_return:.1f}%** 勉强跑赢，建议优化参数")
+    else:
+        lines.append(f"🔴 **年化收益 {result.annual_return:.1f}%** 亏损状态，建议修改策略参数")
+        verdict = "negative"
+
+    # ---------- 回撤 ----------
+    if result.max_drawdown > 30:
+        lines.append(f"🔴 **回撤风险极高**：最大回撤 {result.max_drawdown:.1f}%，建议加止损")
+    elif result.max_drawdown > 20:
+        lines.append(f"🟡 **回撤偏高**：最大回撤 {result.max_drawdown:.1f}%，需注意风险")
+    elif result.max_drawdown > 10:
+        lines.append(f"⚪ **回撤适中**：最大回撤 {result.max_drawdown:.1f}%，可接受")
+    else:
+        lines.append(f"✅ **回撤控制优秀**：最大回撤仅 {result.max_drawdown:.1f}%")
+
+    # ---------- 夏普比率 ----------
+    if result.sharpe_ratio > 2:
+        lines.append(f"✅ **夏普 {result.sharpe_ratio:.2f}** 极高，每单位风险回报优秀")
+    elif result.sharpe_ratio > 1.5:
+        lines.append(f"✅ **夏普 {result.sharpe_ratio:.2f}** 较高，风险调整后收益好")
+    elif result.sharpe_ratio > 1:
+        lines.append(f"🟡 **夏普 {result.sharpe_ratio:.2f}** 合格，高于无风险利率")
+    elif result.sharpe_ratio > 0:
+        lines.append(f"⚪ **夏普 {result.sharpe_ratio:.2f}** 偏低，风险调整后收益不理想")
+    else:
+        lines.append(f"🔴 **夏普 {result.sharpe_ratio:.2f}** 为负，风险调整后亏损")
+
+    # ---------- 胜率 ----------
+    if result.trade_count >= 5:
+        if result.win_rate > 60:
+            lines.append(f"✅ **胜率 {result.win_rate:.0f}%** 较高，策略信号准确")
+        elif result.win_rate > 40:
+            lines.append(f"⚪ **胜率 {result.win_rate:.0f}%** 中等")
+        else:
+            lines.append(f"🟡 **胜率 {result.win_rate:.0f}%** 偏低，靠大赚小亏策略")
+            verdict = "neutral"
+
+    # ---------- 卡玛比率 ----------
+    if result.calmar_ratio > 3:
+        lines.append(f"✅ **卡玛比 {result.calmar_ratio:.2f}** 优秀，收益/回撤性价比高")
+    elif result.calmar_ratio > 1:
+        lines.append(f"⚪ **卡玛比 {result.calmar_ratio:.2f}** 一般")
+    elif result.calmar_ratio > 0:
+        lines.append(f"🔴 **卡玛比 {result.calmar_ratio:.2f}** 偏低，回撤相对收益过大")
+
+    # ---------- 最终整体结论 ----------
+    if verdict == "positive":
+        conclusion = "🟢 **综合评估：值得关注** — 该策略整体表现良好，可以考虑实盘验证"
+    elif verdict == "negative":
+        conclusion = "🔴 **综合评估：不建议使用** — 建议修改策略参数或换用其他策略"
+    else:
+        conclusion = "🟡 **综合评估：需谨慎** — 策略有亮点也有风险，建议观察更多数据"
+
+    lines.append(f"\n💡 **结论：** {conclusion}")
+
+    st.info("\n\n".join(lines))
+
+
 def _display_result(result, benchmark_curve=None):
     """展示回测结果（含绩效归因）"""
     st.subheader("📊 回测结果")
@@ -694,6 +775,9 @@ def _display_result(result, benchmark_curve=None):
     c4.metric("夏普比率", f"{result.sharpe_ratio:.2f}")
     c5.metric("卡玛比率", f"{result.calmar_ratio:.2f}")
     c6.metric("胜率", f"{result.win_rate:.1f}%")
+
+    # 自然语言结论
+    _show_nlp_summary(result)
 
     # 第二行指标（Alpha/Beta 需要基准数据才有值）
     if hasattr(result, 'alpha') and result.alpha != 0:

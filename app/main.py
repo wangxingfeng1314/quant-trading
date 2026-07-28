@@ -14,6 +14,10 @@ st.set_page_config(
 st.sidebar.title("📊 A股量化交易系统")
 st.sidebar.markdown("---")
 
+# 启动时确保数据库表结构是最新的（含迁移）
+from data.storage import init_db
+init_db()
+
 # 导航
 page = st.sidebar.radio(
     "导航",
@@ -24,10 +28,18 @@ page = st.sidebar.radio(
 st.sidebar.markdown("---")
 
 # 数据库状态
-from data.storage import get_daily_count, get_watchlist
+from data.storage import get_daily_count, get_watchlist, check_db_integrity
 db_count = get_daily_count()
 watchlist = get_watchlist()
 watchlist_count = len(watchlist)
+
+# 数据库完整性检查
+db_health = check_db_integrity()
+if not db_health["ok"]:
+    st.sidebar.error(f"🔴 **数据库异常**: {db_health['message']}")
+else:
+    st.sidebar.success(f"🟢 {db_health['message']}")
+
 st.sidebar.markdown(
     f"**系统状态**\n\n"
     f"⭐ 自选股: {watchlist_count} 只\n\n"

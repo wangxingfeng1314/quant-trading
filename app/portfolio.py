@@ -147,16 +147,29 @@ def _show_watchlist():
     df = pd.DataFrame(rows)
     chinese_dataframe(df)
 
-    # 删除自选股
+    # 删除自选股（带二次确认）
     with st.expander("移除自选股"):
         remove_code = st.selectbox(
             "选择要移除的股票",
             watchlist["ts_code"].tolist(),
+            key="remove_select",
         )
-        if st.button("移除", type="secondary"):
-            remove_from_watchlist(remove_code)
-            st.success(f"已移除 {remove_code}")
-            st.rerun()
+        col_confirm_a, col_confirm_b = st.columns([1, 1])
+        with col_confirm_a:
+            if st.button("🗑️ 移除", type="secondary", key="remove_btn",
+                         use_container_width=True):
+                st.session_state["confirm_remove"] = remove_code
+        with col_confirm_b:
+            if st.session_state.get("confirm_remove") == remove_code:
+                if st.button("✅ 确认删除", type="primary", key="confirm_btn",
+                             use_container_width=True):
+                    remove_from_watchlist(remove_code)
+                    st.toast(f"✅ 已移除 {remove_code}", icon="🗑️")
+                    st.session_state.pop("confirm_remove", None)
+                    st.rerun()
+                st.caption("⚠️ 再次点击「移除」可取消")
+            else:
+                st.session_state.pop("confirm_remove", None)
 
     # 分组管理
     with st.expander("分组管理"):

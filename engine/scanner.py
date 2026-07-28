@@ -40,6 +40,32 @@ def scan_signals(universe: list = None, strategy_names: list = None,
             return []
         universe = stock_df["ts_code"].tolist()
 
+    # ---------- 缓存检查：当天已扫描过的直接返回 ----------
+    # 防止同一天内多次点击「扫描」重复计算
+    cached = get_signals(trade_date=end_date)
+    if not cached.empty:
+        # 过滤出匹配当前股票和策略的信号
+        cached = cached[cached["ts_code"].isin(universe)]
+        cached = cached[cached["strategy"].isin(strategy_names)]
+        cached_stocks = cached["ts_code"].nunique()
+        # 如果所有股票都已扫过，直接返回缓存
+        if cached_stocks >= len(universe) * 0.9:  # 90% 以上已缓存则认为够用
+            logger.info(f"缓存命中: {len(cached)} 条信号 (日期={end_date}), 跳过全量扫描")
+            signals_list = []
+            for _, row in cached.iterrows():
+                signals_list.append(Signal(
+                    ts_code=row["ts_code"], trade_date=row["trade_date"],
+                    strategy=row["strategy"], direction=row["direction"],
+                    score=float(row.get("score", 0)),
+                    reason=row.get("reason", ""),
+                    price_ref=float(row.get("price_ref", 0)),
+                ))
+            signals_list.sort(key=lambda s: s.score, reverse=True)
+            return signals_list
+        else:
+            logger.info(f"部分缓存: {cached_stocks}/{len(universe)} 只股票, "
+                         f"补扫剩余部分")
+
     # 预过滤：只扫描有数据且数据量足够的股票
     from data.storage import get_conn
     with get_conn() as conn:

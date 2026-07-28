@@ -4,6 +4,9 @@
 支持两种运行模式:
   1. 独立服务: python -m scheduler.service
   2. 内嵌到主程序: 在 run.py 中 import scheduler 并调用 start()
+
+流程:
+  数据更新（加写锁）→ 信号扫描 → 推送通知
 """
 import logging
 import sys
@@ -29,7 +32,14 @@ _scheduler: BackgroundScheduler | None = None
 
 
 def update_data_job():
-    """执行数据更新任务（由 APScheduler 定时触发）"""
+    """执行数据更新任务（由 APScheduler 定时触发）
+
+    完整流程:
+      1. 尝试获取更新锁（防与 Windows 计划任务冲突）
+      2. 增量更新数据（日线 + 指数）
+      3. 扫描自选股信号
+      4. 推送信号通知到配置的通道
+    """
     logger.info("=" * 50)
     logger.info("定时任务触发：开始增量更新数据...")
     logger.info(f"执行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -37,10 +47,34 @@ def update_data_job():
     try:
         # 延迟导入，避免循环依赖
         from scripts.init_data import run_update
+        from data.storage import update_lock, get_watchlist
+        from engine.scanner import scan_signals
+        from notifier.push import notify_signals, notify_position_summary
 
-        # 调用增量更新函数（直接传参，不修改 sys.argv）
-        run_update(days=5, watchlist=True)
-        logger.info("定时任务完成：数据更新成功")
+        with update_lock(timeout=300):
+            # ---------- Step 1: 更新数据 ----------
+            run_update(days=5, watchlist=True)
+            logger.info("定时任务完成：数据更新成功")
+
+            # ---------- Step 2: 扫描自选股信号 ----------
+            watchlist = get_watchlist()
+            if not watchlist.empty:
+                stocks = watchlist["ts_code"].tolist()
+                logger.info(f"开始扫描 {len(stocks)} 只自选股信号...")
+                signals = scan_signals(universe=stocks, save=True)
+                logger.info(f"信号扫描完成：共 {len(signals)} 条信号")
+
+                # ---------- Step 3: 推送通知 ----------
+                if signals:
+                    notify_signals(signals)
+                    logger.info(f"已推送 {len(signals)} 条信号通知")
+            else:
+                logger.info("自选股为空，跳过信号扫描")
+
+            # ---------- Step 4: 推送持仓盈亏日报 ----------
+            notify_position_summary()
+            logger.info("持仓盈亏日报已推送")
+
     except Exception as e:
         logger.error(f"定时任务失败: {e}", exc_info=True)
     logger.info("=" * 50)

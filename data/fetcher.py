@@ -11,6 +11,7 @@
 """
 import time          # 休眠等待，用于API限速控制
 import random        # 随机数，用于请求间隔抖动(避免集中触发限流)
+import threading     # 线程锁（令牌桶线程安全）
 import logging       # 日志记录
 import requests      # HTTP请求库（备用）
 import io            # 字节流处理（备用）
@@ -98,13 +99,63 @@ def _get_pro():
 
 
 def _rate_limit():
-    """Tushare 免费用户限频：最多 1 次/秒，每次调用前休眠
+    """Tushare 免费用户限频：令牌桶算法，最多 1 次/秒
 
-    休眠时长由 TUSHARE_RATE_LIMIT 配置（默认 0.35s），
-    付费用户可调小此值以加快数据获取。
+    相比固定休眠（time.sleep），令牌桶的优势：
+      - 允许短时间突发请求（空闲时积累令牌）
+      - 长期平均速率稳定在配置值
+      - 付费用户调小间隔即可提速
+
+    配置：TUSHARE_RATE_LIMIT（默认 0.35s，即约 2.85 QPS）
     """
     from core.config import TUSHARE_RATE_LIMIT
-    time.sleep(TUSHARE_RATE_LIMIT)
+
+    if not hasattr(_rate_limit, "bucket"):
+        _rate_limit.bucket = _TokenBucket(
+            rate=1.0 / max(TUSHARE_RATE_LIMIT, 0.1),  # tokens/s
+            burst=5,  # 最大突发请求数
+        )
+        _rate_limit.lock = threading.Lock()
+
+    with _rate_limit.lock:
+        _rate_limit.bucket.consume(1)
+
+
+class _TokenBucket:
+    """令牌桶限速器
+
+    以恒定速率向桶中添加令牌，每次调用消耗一个令牌。
+    桶空时阻塞等待。支持短时突发。
+
+    Args:
+        rate: 令牌填充速率（tokens/秒）
+        burst: 桶容量（最大突发请求数）
+    """
+
+    def __init__(self, rate: float, burst: int):
+        self.rate = rate
+        self.capacity = burst
+        self.tokens = float(burst)
+        self.last_refill = time.time()
+
+    def _refill(self):
+        """按时间流逝补充令牌"""
+        now = time.time()
+        elapsed = now - self.last_refill
+        self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
+        self.last_refill = now
+
+    def consume(self, count: int = 1):
+        """消耗 count 个令牌，不足则等待"""
+        while True:
+            self._refill()
+            if self.tokens >= count:
+                self.tokens -= count
+                return
+            # 计算需要等待的时间
+            deficit = count - self.tokens
+            wait = deficit / self.rate if self.rate > 0 else 0.1
+            time.sleep(min(wait, 0.5))  # 每次最多等 0.5s
 
 
 # ============================================================

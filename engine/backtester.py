@@ -170,6 +170,7 @@ class Backtester:
             calmar_ratio=metrics.get("calmar_ratio", 0),
             win_rate=metrics.get("win_rate", 0),
             trade_count=metrics.get("trade_count", 0),
+            sell_count=metrics.get("sell_count", 0),
             equity_curve=portfolio.equity_curve,
             trades=portfolio.trades,
         )

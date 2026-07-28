@@ -252,3 +252,78 @@ def notify_backtest_result(result):
 | 日期范围 | {result.start_date} ~ {result.end_date} |
 """
     send_notification(title, content)
+
+
+def notify_position_summary():
+    """推送持仓盈亏日报
+
+    计算当前所有模拟持仓的浮动盈亏，生成日报推送。
+    数据来源：storage.get_positions() + 最新收盘价。
+    """
+    try:
+        from data.storage import get_positions, get_daily
+
+        positions = get_positions()
+        if not positions:
+            logger.info("持仓为空，跳过盈亏推送")
+            return
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        total_cost = 0.0
+        total_market = 0.0
+        rows = []
+
+        for pos in positions:
+            ts_code = pos["ts_code"]
+            buy_price = pos["buy_price"]
+            shares = pos["shares"]
+            cost = buy_price * shares
+
+            # 取最新收盘价
+            df = get_daily(ts_code, limit=1)
+            if not df.empty:
+                current_price = df.iloc[-1]["close"]
+            else:
+                current_price = buy_price  # 无数据则用成本价
+
+            market_value = current_price * shares
+            pnl = market_value - cost
+            pnl_pct = (pnl / cost * 100) if cost > 0 else 0.0
+
+            total_cost += cost
+            total_market += market_value
+
+            icon = "🟢" if pnl >= 0 else "🔴"
+            rows.append(
+                f"{icon} **{ts_code}** ({pos.get('note', '')})  "
+                f"成本¥{buy_price:.2f}→现¥{current_price:.2f}  "
+                f"**{pnl:+.0f}元 ({pnl_pct:+.1f}%)**"
+            )
+
+        total_pnl = total_market - total_cost
+        total_pnl_pct = (total_pnl / total_cost * 100) if total_cost > 0 else 0.0
+        total_icon = "🟢" if total_pnl >= 0 else "🔴"
+
+        title = f"📊 持仓日报 - {today}"
+        content = f"""## 📊 持仓日报
+**日期**: {today}
+
+**持仓汇总**
+| 指标 | 数值 |
+|:-----|:------|
+| 持仓数 | {len(positions)} 只 |
+| 总成本 | ¥{total_cost:,.0f} |
+| 总市值 | ¥{total_market:,.0f} |
+| 总盈亏 | {total_icon} **¥{total_pnl:+,.0f} ({total_pnl_pct:+.1f}%)** |
+
+**逐只明细**
+{chr(10).join(rows)}
+
+---
+*数据来源：A股量化交易系统 · 自动推送*
+"""
+        send_notification(title, content)
+        logger.info(f"持仓日报推送完成: 共 {len(positions)} 只持仓, "
+                     f"总盈亏 {total_pnl:+.0f}元")
+    except Exception as e:
+        logger.error(f"持仓日报推送失败: {e}")

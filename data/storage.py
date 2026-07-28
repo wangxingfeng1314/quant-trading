@@ -5,9 +5,13 @@
   1. 统一入口：所有 CRUD 操作集中于此，方便维护和审计
   2. 上下文管理：get_conn() 自动管理连接生命周期和事务
   3. 幂等写入：全部使用 INSERT OR REPLACE，支持重复执行
+  4. 写锁保护：_update_lock 文件锁防止多进程并发写入
 """
 import sqlite3          # SQLite 数据库驱动
 import json             # JSON 序列化（用于 equity_curve 等复杂字段）
+import os               # 文件路径/环境变量/锁文件
+import time             # 休眠
+import logging          # 日志记录
 from contextlib import contextmanager  # 上下文管理器装饰器
 from pathlib import Path               # 路径处理
 from typing import Optional            # 类型提示
@@ -15,6 +19,69 @@ import pandas as pd     # 数据处理
 
 # 从配置加载数据库路径
 from core.config import DB_PATH
+
+
+# ============================================================
+# 写锁保护 — 文件锁，防止定时任务+手动更新并发写入
+# ============================================================
+
+_LOCK_FILE = DB_PATH.parent / ".update.lock"
+_LOCK_TIMEOUT = 60  # 最长等待 60 秒
+
+logger = logging.getLogger(__name__)
+
+
+def acquire_update_lock(timeout: int = None) -> bool:
+    """尝试获取更新锁（文件锁，非阻塞式）
+
+    使用原子性 os.mkdir 实现跨平台文件锁。
+    定时任务和手动更新同时触发时，只有一个能拿到锁。
+
+    Args:
+        timeout: 超时秒数（默认 _LOCK_TIMEOUT=60）
+
+    Returns:
+        True=拿到锁, False=超时未拿到
+    """
+    if timeout is None:
+        timeout = _LOCK_TIMEOUT
+    lock_path = str(_LOCK_FILE)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            os.mkdir(lock_path)  # 原子操作：目录不存在则创建成功
+            logger.debug("获取更新锁成功")
+            return True
+        except FileExistsError:
+            time.sleep(1)
+    logger.warning(f"等待更新锁超时 ({timeout}s)，可能是上一次更新还未完成")
+    return False
+
+
+def release_update_lock():
+    """释放更新锁"""
+    lock_path = str(_LOCK_FILE)
+    try:
+        os.rmdir(lock_path)
+        logger.debug("释放更新锁成功")
+    except FileNotFoundError:
+        pass  # 锁已经被释放
+
+
+@contextmanager
+def update_lock(timeout: int = None):
+    """获取/释放更新锁的上下文管理器
+
+    用法:
+        with update_lock():
+            run_update(...)
+    """
+    acquired = acquire_update_lock(timeout)
+    try:
+        yield acquired
+    finally:
+        if acquired:
+            release_update_lock()
 
 
 # ============================================================
@@ -36,8 +103,8 @@ def get_conn():
         - 自动创建父目录（数据库文件所在文件夹）
     """
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)    # 确保 data/ 目录存在
-    conn = sqlite3.connect(str(DB_PATH))                  # 连接数据库
-    conn.execute("PRAGMA journal_mode=WAL")               # WAL 模式：支持并发读
+    conn = sqlite3.connect(str(DB_PATH), timeout=5.0)    # 连接数据库，锁等待5秒
+    conn.execute("PRAGMA journal_mode=WAL")               # WAL 模式：支持并发读写
     conn.execute("PRAGMA synchronous=NORMAL")             # 同步级别：平衡安全与性能
     try:
         yield conn                                        # 返回连接给调用方
@@ -47,6 +114,31 @@ def get_conn():
         raise                                             # 继续抛出异常
     finally:
         conn.close()                                      # 关闭连接
+
+
+# ============================================================
+# 数据库完整性检查
+# ============================================================
+
+def check_db_integrity() -> dict:
+    """检查 SQLite 数据库完整性
+
+    使用 PRAGMA quick_check 快速验证数据库文件是否损坏。
+    比 full integrity_check 更快，适合启动时调用。
+
+    Returns:
+        {"ok": True/False, "message": "详细描述"}
+    """
+    try:
+        with get_conn() as conn:
+            row = conn.execute("PRAGMA quick_check").fetchone()
+            result = row[0] if row else "unknown"
+            if result == "ok":
+                return {"ok": True, "message": "数据库完整性正常"}
+            else:
+                return {"ok": False, "message": f"数据库可能损坏: {result}"}
+    except Exception as e:
+        return {"ok": False, "message": f"无法访问数据库: {e}"}
 
 
 # ============================================================
@@ -157,9 +249,6 @@ def init_db():
                 note       TEXT,                  -- 备注
                 group_name TEXT DEFAULT ''         -- 分组（如"长线池"、"短线池"）
             );
-
-            -- 兼容旧数据库：尝试添加 group_name 列（已存在则忽略）
-            ALTER TABLE watchlist ADD COLUMN group_name TEXT DEFAULT '';
 
             -- 大盘指数日线表（上证/深证/创业板）
             CREATE TABLE IF NOT EXISTS index_daily (

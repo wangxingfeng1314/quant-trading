@@ -81,7 +81,7 @@ def clean_daily(df: pd.DataFrame) -> pd.DataFrame:
             # Amt在"千元"单位下数值偏小 → amount × 1000 转为"元"
             is_old = ratio < OLD_FORMAT_RATIO_THRESHOLD
             if is_old.any():
-                idx = mask_ok[mask_ok].index[is_old[is_old].index]
+                idx = ratio[is_old].index
                 df.loc[idx, "volume"] *= 100
                 df.loc[idx, "amount"] *= 1000
                 logger.info(f"规范化{len(idx)}条旧格式数据: V手→V股(×100), Amt千元→Amt元(×1000)")
@@ -91,7 +91,7 @@ def clean_daily(df: pd.DataFrame) -> pd.DataFrame:
             # Amt已经是"元"单位 → 不变
             is_mixed = ratio > MIXED_FORMAT_RATIO_THRESHOLD
             if is_mixed.any():
-                idx = mask_ok[mask_ok].index[is_mixed[is_mixed].index]
+                idx = ratio[is_mixed].index
                 df.loc[idx, "volume"] *= 100
                 logger.info(f"规范化{len(idx)}条混合格式数据: V手→V股(×100), Amt不变")
 

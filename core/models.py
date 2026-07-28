@@ -61,6 +61,7 @@ class BacktestResult:
     calmar_ratio: float = 0.0
     win_rate: float = 0.0
     trade_count: int = 0
+    sell_count: int = 0  # 卖出次数（平仓笔数，用于计算胜率）
     equity_curve: list = field(default_factory=list)  # [{date, equity}, ...]
     trades: list = field(default_factory=list)  # Trade列表
 
