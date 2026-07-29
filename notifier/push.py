@@ -21,6 +21,7 @@ PUSHPLUS_TOKEN = os.getenv("PUSHPLUS_TOKEN", "")
 WECOM_WEBHOOK = os.getenv("WECOM_WEBHOOK", "")    # 企业微信机器人 Webhook URL
 DINGTALK_WEBHOOK = os.getenv("DINGTALK_WEBHOOK", "")  # 钉钉机器人 Webhook URL
 DINGTALK_SECRET = os.getenv("DINGTALK_SECRET", "")     # 钉钉加签密钥（可选）
+FEISHU_WEBHOOK = os.getenv("FEISHU_WEBHOOK", "")       # 飞书机器人 Webhook URL
 
 
 def send_notification(title: str, content: str, msg_type: str = "markdown") -> bool:
@@ -52,9 +53,14 @@ def send_notification(title: str, content: str, msg_type: str = "markdown") -> b
     if DINGTALK_WEBHOOK:
         success = _send_dingtalk(title, content) or success
 
+    # 飞书
+    if FEISHU_WEBHOOK:
+        success = _send_feishu(title, content) or success
+
     if not success:
         logger.info("未配置推送通道（SERVER_CHAN_KEY / PUSHPLUS_TOKEN / "
-                     "WECOM_WEBHOOK / DINGTALK_WEBHOOK），请在 .env 中配置任一通道")
+                     "WECOM_WEBHOOK / DINGTALK_WEBHOOK / FEISHU_WEBHOOK），"
+                     "请在 .env 中配置任一通道")
 
     return success
 
@@ -183,6 +189,62 @@ def _send_dingtalk(title: str, content: str) -> bool:
             return False
     except Exception as e:
         logger.error(f"钉钉推送异常: {e}")
+        return False
+
+
+def _send_feishu(title: str, content: str) -> bool:
+    """通过飞书机器人推送
+
+    配置: 在 .env 中设置 FEISHU_WEBHOOK（群机器人 Webhook URL）
+
+    飞书自定义机器人文档: https://open.feishu.cn/document/client-docs/bot-v2/add-custom-bot
+
+    Args:
+        title: 消息标题
+        content: Markdown 内容
+
+    Returns:
+        是否发送成功
+    """
+    try:
+        # 飞书 interactive 卡片消息，支持 Markdown
+        payload = {
+            "msg_type": "interactive",
+            "card": {
+                "header": {
+                    "title": {"tag": "plain_text", "content": title},
+                    "template": "blue",
+                },
+                "elements": [
+                    {
+                        "tag": "markdown",
+                        "content": content,
+                    },
+                    {
+                        "tag": "hr",
+                    },
+                    {
+                        "tag": "note",
+                        "elements": [
+                            {
+                                "tag": "plain_text",
+                                "content": f"A股量化交易系统 · {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+                            }
+                        ],
+                    },
+                ],
+            },
+        }
+        resp = requests.post(FEISHU_WEBHOOK, json=payload, timeout=10)
+        data = resp.json()
+        if data.get("code") == 0:
+            logger.info(f"飞书推送成功: {title}")
+            return True
+        else:
+            logger.error(f"飞书推送失败: {data}")
+            return False
+    except Exception as e:
+        logger.error(f"飞书推送异常: {e}")
         return False
 
 
