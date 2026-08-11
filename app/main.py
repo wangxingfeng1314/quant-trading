@@ -43,8 +43,43 @@ if APP_AUTH_ENABLED:
         st.stop()
 
 # 启动时确保数据库表结构是最新的（含迁移）
-from data.storage import init_db
+from data.storage import init_db, get_daily_count, get_watchlist, check_db_integrity
 init_db()
+
+# ------------------------------------------------------------
+# 缓存：减少每次切换页面的重跑开销（DB 概览 + 定时任务状态）
+# ------------------------------------------------------------
+@st.cache_data(ttl=30)
+def _cached_db_overview():
+    return get_daily_count(), len(get_watchlist()), check_db_integrity()
+
+@st.cache_data(ttl=60)
+def _cached_schtasks_caption():
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["schtasks", "/query", "/tn", "QuantTrading-DataUpdate", "/fo", "LIST", "/v"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            for line in result.stdout.split("\n"):
+                if "下次运行时间" in line or "状态" in line:
+                    return f"⏰ {line.strip()}"
+            return "⏰ 定时任务: 17:00 每日执行"
+        return "⏰ 定时任务: 未配置"
+    except Exception:
+        return "⏰ 定时任务: 17:00 每日执行"
+
+# 页面路由表
+PAGES = {
+    "🏠 首页看板": "app.dashboard",
+    "📈 数据浏览": "app.data_viewer",
+    "🔬 回测中心": "app.backtest",
+    "📚 策略百科": "app.strategy_intro",
+    "🔍 选股筛选": "app.screener",
+    "📡 信号中心": "app.signal",
+    "💼 持仓管理": "app.portfolio",
+}
 
 st.sidebar.title("📊 A股量化交易系统")
 st.sidebar.markdown("---")
@@ -56,16 +91,29 @@ page = st.sidebar.radio(
     index=0,
 )
 
+# ============================================================
+# 主区域：切换页面时先清空旧页面，再显示「加载中」，避免旧画面残留
+# page_slot 为 st.empty()，每次重跑复用同一占位 → 进入 container 即清空旧内容
+# （把主页面渲染提前到侧边栏状态计算之前，让旧画面尽早被清掉）
+# ============================================================
+page_slot = st.empty()
+with page_slot.container():
+    with st.spinner("⏳ 页面加载中..."):
+        try:
+            module = __import__(PAGES[page], fromlist=["show"])
+            module.show()
+        except Exception as e:
+            st.error(f"🚨 页面加载失败: {e}")
+            with st.expander("查看错误详情"):
+                st.code(traceback.format_exc())
+
+# ============================================================
+# 侧边栏其余状态（独立于主区域，主页面渲染后再填充）
+# ============================================================
 st.sidebar.markdown("---")
 
-# 数据库状态
-from data.storage import get_daily_count, get_watchlist, check_db_integrity
-db_count = get_daily_count()
-watchlist = get_watchlist()
-watchlist_count = len(watchlist)
-
-# 数据库完整性检查
-db_health = check_db_integrity()
+# 数据库状态（缓存 30s，减少每次切换的重跑开销）
+db_count, watchlist_count, db_health = _cached_db_overview()
 if not db_health["ok"]:
     st.sidebar.error(f"🔴 **数据库异常**: {db_health['message']}")
 else:
@@ -84,24 +132,8 @@ if APP_AUTH_ENABLED:
         st.session_state["authenticated"] = False
         st.rerun()
 
-# 定时任务状态
-import subprocess
-try:
-    result = subprocess.run(
-        ["schtasks", "/query", "/tn", "QuantTrading-DataUpdate", "/fo", "LIST", "/v"],
-        capture_output=True, text=True, timeout=5
-    )
-    if result.returncode == 0:
-        for line in result.stdout.split("\n"):
-            if "下次运行时间" in line or "状态" in line:
-                st.sidebar.caption(f"⏰ {line.strip()}")
-                break
-        else:
-            st.sidebar.caption("⏰ 定时任务: 17:00 每日执行")
-    else:
-        st.sidebar.caption("⏰ 定时任务: 未配置")
-except Exception:
-    st.sidebar.caption("⏰ 定时任务: 17:00 每日执行")
+# 定时任务状态（缓存结果，避免每次切换都调用 schtasks 造成卡顿）
+st.sidebar.caption(_cached_schtasks_caption())
 
 # 一键更新数据按钮
 st.sidebar.markdown("---")
@@ -158,23 +190,3 @@ if backups:
                 st.rerun()
             except Exception as e:
                 st.error(f"❌ 恢复失败: {e}")
-
-# 页面路由（带错误隔离）
-PAGES = {
-    "🏠 首页看板": "app.dashboard",
-    "📈 数据浏览": "app.data_viewer",
-    "🔬 回测中心": "app.backtest",
-    "📚 策略百科": "app.strategy_intro",
-    "🔍 选股筛选": "app.screener",
-    "📡 信号中心": "app.signal",
-    "💼 持仓管理": "app.portfolio",
-}
-
-if page in PAGES:
-    try:
-        module = __import__(PAGES[page], fromlist=["show"])
-        module.show()
-    except Exception as e:
-        st.error(f"🚨 页面加载失败: {e}")
-        with st.expander("查看错误详情"):
-            st.code(traceback.format_exc())
