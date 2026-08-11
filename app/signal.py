@@ -107,6 +107,30 @@ def _show_scan():
         buy_signals = [s for s in signals if s.direction == "BUY"]
         sell_signals = [s for s in signals if s.direction == "SELL"]
 
+        # 导出全部信号为 CSV
+        if signals:
+            export_rows = []
+            stock_df = get_instrument_list()
+            stock_map = dict(zip(stock_df["ts_code"], stock_df["name"])) if not stock_df.empty else {}
+            for sig in signals:
+                export_rows.append({
+                    "ts_code": sig.ts_code,
+                    "name": stock_map.get(sig.ts_code, ""),
+                    "trade_date": sig.trade_date,
+                    "strategy": sig.strategy,
+                    "direction": sig.direction,
+                    "score": sig.score,
+                    "price_ref": sig.price_ref,
+                    "reason": sig.reason,
+                })
+            csv_data = pd.DataFrame(export_rows).to_csv(index=False).encode("utf-8-sig")
+            st.download_button(
+                "📥 导出全部信号 CSV",
+                data=csv_data,
+                file_name=f"信号扫描_{scan_date_str}_{datetime.now().strftime('%H%M')}.csv",
+                mime="text/csv",
+            )
+
         if buy_signals:
             st.subheader(f"🟢 买入信号 ({len(buy_signals)})")
             _show_signal_table(buy_signals[:50])
@@ -172,6 +196,15 @@ def _show_history():
             "direction": "方向", "score": "评分", "price_ref": "参考价", "reason": "原因",
         })
         chinese_dataframe(display_df)
+
+        # 导出 CSV
+        csv_data = display_df.to_csv(index=False).encode("utf-8-sig")
+        st.download_button(
+            "📥 导出历史信号 CSV",
+            data=csv_data,
+            file_name=f"历史信号_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+            mime="text/csv",
+        )
 
 
 def _show_signal_validation():

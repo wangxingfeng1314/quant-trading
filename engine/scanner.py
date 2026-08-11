@@ -1,20 +1,66 @@
 """信号扫描器 - 全市场扫描，输出今日买卖信号"""
 import logging
+import concurrent.futures
 from typing import List, Callable
 from datetime import datetime
 
-from data.storage import get_daily, get_instrument_list, save_signal, get_signals
+from data.storage import (
+    get_daily, get_instrument_list, save_signal, save_signals_batch,
+    get_signals, get_conn,
+)
 from data.indicators import apply_indicators
 from data.cleaner import clean_daily
 from strategies import STRATEGY_REGISTRY
 from core.models import Signal
+from core.config import (
+    SCANNER_CACHE_THRESHOLD, SCANNER_MIN_DATA_DAYS, SCANNER_PARALLEL_WORKERS,
+)
 
 logger = logging.getLogger(__name__)
 
 
+def _scan_single_stock(ts_code: str, end_date: str, strategy_instances: list) -> list:
+    """扫描单只股票的所有策略信号（可作为并行任务单元）
+
+    Args:
+        ts_code: 股票代码
+        end_date: 扫描截止日期
+        strategy_instances: 已初始化的策略实例列表
+
+    Returns:
+        该股票产生的 Signal 列表
+    """
+    df = get_daily(ts_code)
+    if df.empty or len(df) < SCANNER_MIN_DATA_DAYS:
+        return []
+
+    df = clean_daily(df)
+    if df.empty:
+        return []
+
+    # 只取到 end_date 的数据
+    df = df[df["trade_date"] <= end_date]
+    if df.empty:
+        return []
+
+    df = apply_indicators(df, ["ma", "macd", "rsi", "boll", "vol_ma"])
+    data_dict = {ts_code: df}
+
+    signals = []
+    for strategy in strategy_instances:
+        try:
+            sigs = strategy.on_bar(end_date, data_dict)
+            signals.extend(sigs)
+        except Exception as e:
+            logger.warning(f"{ts_code} {strategy.name} 扫描异常: {e}")
+
+    return signals
+
+
 def scan_signals(universe: list = None, strategy_names: list = None,
                  end_date: str = "", save: bool = True,
-                 progress_callback: Callable = None) -> List[Signal]:
+                 progress_callback: Callable = None,
+                 parallel: bool = True) -> List[Signal]:
     """扫描全市场信号
 
     Args:
@@ -22,6 +68,8 @@ def scan_signals(universe: list = None, strategy_names: list = None,
         strategy_names: 要运行的策略名列表，None则运行所有策略
         end_date: 扫描日期，默认今天
         save: 是否保存到数据库
+        progress_callback: 进度回调函数(completed, total)
+        parallel: 是否使用并行扫描（默认True，少量股票时可选False）
 
     Returns:
         Signal列表，按score降序排列
@@ -41,15 +89,12 @@ def scan_signals(universe: list = None, strategy_names: list = None,
         universe = stock_df["ts_code"].tolist()
 
     # ---------- 缓存检查：当天已扫描过的直接返回 ----------
-    # 防止同一天内多次点击「扫描」重复计算
     cached = get_signals(trade_date=end_date)
     if not cached.empty:
-        # 过滤出匹配当前股票和策略的信号
         cached = cached[cached["ts_code"].isin(universe)]
         cached = cached[cached["strategy"].isin(strategy_names)]
         cached_stocks = cached["ts_code"].nunique()
-        # 如果所有股票都已扫过，直接返回缓存
-        if cached_stocks >= len(universe) * 0.9:  # 90% 以上已缓存则认为够用
+        if cached_stocks >= len(universe) * SCANNER_CACHE_THRESHOLD:
             logger.info(f"缓存命中: {len(cached)} 条信号 (日期={end_date}), 跳过全量扫描")
             signals_list = []
             for _, row in cached.iterrows():
@@ -63,16 +108,14 @@ def scan_signals(universe: list = None, strategy_names: list = None,
             signals_list.sort(key=lambda s: s.score, reverse=True)
             return signals_list
         else:
-            logger.info(f"部分缓存: {cached_stocks}/{len(universe)} 只股票, "
-                         f"补扫剩余部分")
+            logger.info(f"部分缓存: {cached_stocks}/{len(universe)} 只股票, 补扫剩余部分")
 
     # 预过滤：只扫描有数据且数据量足够的股票
-    from data.storage import get_conn
     with get_conn() as conn:
         valid = set()
         cur = conn.execute(
-            "SELECT ts_code, COUNT(*) as cnt FROM daily_price "
-            "GROUP BY ts_code HAVING cnt >= 60"
+            f"SELECT ts_code, COUNT(*) as cnt FROM daily_price "
+            f"GROUP BY ts_code HAVING cnt >= {SCANNER_MIN_DATA_DAYS}"
         )
         for row in cur.fetchall():
             valid.add(row[0])
@@ -81,56 +124,56 @@ def scan_signals(universe: list = None, strategy_names: list = None,
     logger.info(f"扫描 {len(universe)} 只股票(预过滤), "
                 f"策略: {strategy_names}, 日期: {end_date}")
 
-    all_signals = []
-
-    # 初始化策略
-    strategies = []
+    # 初始化策略实例
+    strategy_instances = []
     for name in strategy_names:
         if name in STRATEGY_REGISTRY:
-            strategies.append(STRATEGY_REGISTRY[name]())
+            strategy_instances.append(STRATEGY_REGISTRY[name]())
 
-    # 逐只股票扫描
-    for i, ts_code in enumerate(universe):
-        df = get_daily(ts_code)
-        if df.empty or len(df) < 60:
-            continue
+    all_signals = []
 
-        df = clean_daily(df)
-        if df.empty:
-            continue
+    # 并行扫描（>= 50 只股票时启用并行）
+    use_parallel = parallel and len(universe) >= 50
 
-        # 只取到end_date的数据
-        df = df[df["trade_date"] <= end_date]
-        if df.empty:
-            continue
+    if use_parallel:
+        max_workers = SCANNER_PARALLEL_WORKERS or None  # None = 自动检测 CPU 核心数
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(_scan_single_stock, ts_code, end_date, strategy_instances): ts_code
+                for ts_code in universe
+            }
+            completed = 0
+            for future in concurrent.futures.as_completed(futures):
+                ts_code = futures[future]
+                try:
+                    sigs = future.result()
+                    all_signals.extend(sigs)
+                except Exception as e:
+                    logger.warning(f"{ts_code} 扫描异常: {e}")
 
-        df = apply_indicators(df, ["ma", "macd", "rsi", "boll", "vol_ma"])
+                completed += 1
+                if completed % 100 == 0:
+                    logger.info(f"已扫描 {completed}/{len(universe)}")
+                if progress_callback:
+                    progress_callback(completed, len(universe))
+    else:
+        # 串行扫描（少量股票时更高效，无进程开销）
+        for i, ts_code in enumerate(universe):
+            sigs = _scan_single_stock(ts_code, end_date, strategy_instances)
+            all_signals.extend(sigs)
 
-        # 构造data_dict
-        data_dict = {ts_code: df}
+            if (i + 1) % 100 == 0:
+                logger.info(f"已扫描 {i + 1}/{len(universe)}")
+            if progress_callback:
+                progress_callback(i + 1, len(universe))
 
-        # 运行每个策略
-        for strategy in strategies:
-            try:
-                signals = strategy.on_bar(end_date, data_dict)
-                all_signals.extend(signals)
-            except Exception as e:
-                logger.warning(f"{ts_code} {strategy.name} 扫描异常: {e}")
-
-        if (i + 1) % 100 == 0:
-            logger.info(f"已扫描 {i + 1}/{len(universe)}")
-
-        if progress_callback:
-            progress_callback(i + 1, len(universe))
-
-    # 按score降序排列
+    # 按 score 降序排列
     all_signals.sort(key=lambda s: s.score, reverse=True)
 
-    # 保存
+    # 批量保存（一次 executemany 替代逐条 INSERT）
     if save and all_signals:
-        for sig in all_signals:
-            save_signal(sig)
-        logger.info(f"已保存 {len(all_signals)} 条信号")
+        save_signals_batch(all_signals)
+        logger.info(f"已批量保存 {len(all_signals)} 条信号")
 
     logger.info(f"扫描完成，共 {len(all_signals)} 条信号")
     return all_signals

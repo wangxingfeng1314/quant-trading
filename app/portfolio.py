@@ -149,6 +149,15 @@ def _show_watchlist():
     df = pd.DataFrame(rows)
     chinese_dataframe(df)
 
+    # 导出自选股 CSV
+    csv_data = df.to_csv(index=False).encode("utf-8-sig")
+    st.download_button(
+        "📥 导出自选股 CSV",
+        data=csv_data,
+        file_name=f"自选股_{datetime.now().strftime('%Y%m%d')}.csv",
+        mime="text/csv",
+    )
+
     # 删除自选股（带二次确认）
     with st.expander("移除自选股"):
         remove_code = st.selectbox(

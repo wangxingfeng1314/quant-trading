@@ -1,5 +1,9 @@
 # A股量化交易系统 - 依赖列表（版本锁定）
 # 更新方式: py -m pip install -r requirements.txt --upgrade
+#
+# 版本规范:
+#   - 主依赖使用 == 精确锁定（保证可重现）
+#   - 如需兼容范围，使用 >=,< 格式（如 pandas>=2.0,<3.0）
 
 # Web框架
 streamlit==1.58.0

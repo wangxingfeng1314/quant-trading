@@ -15,12 +15,39 @@ st.set_page_config(
 from app.theme import inject_theme_css
 inject_theme_css()
 
-st.sidebar.title("📊 A股量化交易系统")
-st.sidebar.markdown("---")
+# ============================================================
+# 登录认证（可选，通过 APP_AUTH_ENABLED 环境变量启用）
+# ============================================================
+from core.config import APP_AUTH_ENABLED, APP_AUTH_PASSWORD
+
+if APP_AUTH_ENABLED:
+    # 检查是否已登录
+    if "authenticated" not in st.session_state:
+        st.session_state["authenticated"] = False
+
+    if not st.session_state["authenticated"]:
+        st.title("🔐 A股量化交易系统 - 登录")
+        st.markdown("---")
+
+        col1, col2, col3 = st.columns([1, 2, 1])
+        with col2:
+            password = st.text_input("请输入密码", type="password", key="auth_pwd")
+            if st.button("登录", type="primary", use_container_width=True):
+                expected = APP_AUTH_PASSWORD or "quant123"
+                if password == expected:
+                    st.session_state["authenticated"] = True
+                    st.rerun()
+                else:
+                    st.error("❌ 密码错误")
+            st.caption("💡 默认密码: quant123（请在 .env 中设置 APP_AUTH_PASSWORD 修改）")
+        st.stop()
 
 # 启动时确保数据库表结构是最新的（含迁移）
 from data.storage import init_db
 init_db()
+
+st.sidebar.title("📊 A股量化交易系统")
+st.sidebar.markdown("---")
 
 # 导航
 page = st.sidebar.radio(
@@ -48,8 +75,14 @@ st.sidebar.markdown(
     f"**系统状态**\n\n"
     f"⭐ 自选股: {watchlist_count} 只\n\n"
     f"📊 日线数据: {db_count:,} 条\n\n"
-    f"版本: **v0.3.0**"
+    f"版本: **v0.3.1**"
 )
+
+# 登出按钮（仅认证模式下显示）
+if APP_AUTH_ENABLED:
+    if st.sidebar.button("🚪 登出", use_container_width=True):
+        st.session_state["authenticated"] = False
+        st.rerun()
 
 # 定时任务状态
 import subprocess
@@ -116,7 +149,9 @@ if backups:
         selected = st.selectbox("选择备份文件",
                                 [b.name for b in backups[:10]],
                                 key="restore_select")
-        if st.button("⚠️ 恢复此备份", type="secondary"):
+        st.warning("⚠️ 恢复将覆盖当前数据库，此操作不可撤销！")
+        confirm = st.checkbox("我确认要恢复", key="restore_confirm")
+        if st.button("⚠️ 恢复此备份", type="secondary", disabled=not confirm):
             try:
                 shutil.copy2(backup_dir / selected, DB_PATH)
                 st.success(f"✅ 已恢复: {selected}")

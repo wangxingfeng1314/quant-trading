@@ -12,7 +12,10 @@ from datetime import datetime, date
 from app.st_utils import chinese_dataframe, chinese_date_picker, strategy_label
 from strategies import STRATEGY_REGISTRY, list_strategies
 from engine.backtester import Backtester, grid_search
-from data.storage import get_instrument_list, get_daily, get_backtest_results, get_backtest_trades, get_stocks_with_data, get_watchlist
+from data.storage import (
+    get_instrument_list, get_daily, get_backtest_results, get_backtest_trades,
+    get_stocks_with_data, get_watchlist, get_backtest_result_by_id,
+)
 from data.indicators import apply_indicators
 from core.config import DEFAULT_CAPITAL
 
@@ -1126,15 +1129,40 @@ def _get_benchmark_curve(start_date: str, end_date: str) -> list:
 
 
 def _show_history():
-    """历史回测记录"""
-    results_df = get_backtest_results(limit=20)
+    """历史回测记录 + 多记录对比"""
+    results_df = get_backtest_results(limit=50)
     if results_df.empty:
         st.info("暂无回测记录")
         return
 
-    for _, row in results_df.iterrows():
+    st.subheader("📋 历史回测记录")
+
+    # 对比模式
+    st.markdown("**勾选要对比的记录（最多 5 条）**")
+    col_chk, col_btn = st.columns([4, 1])
+    with col_chk:
+        # 用 checkbox 选 ID
+        selected_ids = []
+        for idx, row in results_df.head(20).iterrows():
+            label = (f"#{row['id']} {row['strategy']} | "
+                     f"{row['start_date']}~{row['end_date']} | "
+                     f"收益 {row['total_return']:.2f}%")
+            if st.checkbox(label, key=f"hist_chk_{row['id']}"):
+                selected_ids.append(row["id"])
+
+    with col_btn:
+        compare_clicked = st.button("📊 对比选中", type="primary",
+                                     disabled=len(selected_ids) < 2,
+                                     use_container_width=True)
+
+    if compare_clicked and len(selected_ids) >= 2:
+        _show_comparison(selected_ids[:5])
+        st.markdown("---")
+
+    # 详细记录展示
+    for _, row in results_df.head(20).iterrows():
         with st.expander(
-            f"{row['strategy']} | {row['start_date']}~{row['end_date']} | "
+            f"#{row['id']} {row['strategy']} | {row['start_date']}~{row['end_date']} | "
             f"收益 {row['total_return']:.2f}% | 回撤 {row['max_drawdown']:.2f}%"
         ):
             c1, c2, c3, c4 = st.columns(4)
@@ -1148,3 +1176,72 @@ def _show_history():
             if not trades_df.empty:
                 chinese_dataframe(trades_df[["trade_date", "ts_code", "direction",
                                         "price", "volume", "pnl", "holding_days"]])
+
+
+def _show_comparison(backtest_ids: list):
+    """并排展示多条回测结果的权益曲线和指标"""
+    st.subheader("📊 回测结果对比")
+
+    results = []
+    for bt_id in backtest_ids:
+        r = get_backtest_result_by_id(bt_id)
+        if r and r.get("equity_curve"):
+            results.append(r)
+
+    if len(results) < 2:
+        st.warning("有效记录不足 2 条，无法对比")
+        return
+
+    # 权益曲线叠加图
+    fig = go.Figure()
+    for r in results:
+        eq = r["equity_curve"]
+        if not eq:
+            continue
+        df_eq = pd.DataFrame(eq)
+        total_ret = (df_eq["equity"].iloc[-1] / df_eq["equity"].iloc[0] - 1) * 100
+        label = f"#{r['id']} {r['strategy']} ({total_ret:+.1f}%)"
+        fig.add_trace(go.Scatter(
+            x=df_eq["date"], y=df_eq["equity"],
+            mode="lines", name=label, line=dict(width=2),
+        ))
+
+    fig.update_layout(
+        title="权益曲线对比",
+        template="plotly_dark", height=450,
+        xaxis_title="日期", yaxis_title="权益(元)",
+        xaxis=dict(type="category", nticks=20),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    # 指标对比表格
+    compare_rows = []
+    for r in results:
+        compare_rows.append({
+            "ID": r["id"],
+            "策略": r["strategy"],
+            "日期范围": f"{r['start_date']}~{r['end_date']}",
+            "总收益%": f"{r.get('total_return', 0):+.2f}",
+            "年化%": f"{r.get('annual_return', 0):+.2f}",
+            "夏普": f"{r.get('sharpe_ratio', 0):.2f}",
+            "最大回撤%": f"{r.get('max_drawdown', 0):.2f}",
+            "胜率%": f"{r.get('win_rate', 0):.1f}",
+            "交易次数": r.get("trade_count", 0),
+        })
+    df_compare = pd.DataFrame(compare_rows)
+    st.dataframe(
+        df_compare.style.highlight_max(
+            subset=["总收益%", "年化%", "夏普", "胜率%"], color="#90EE90"
+        ).highlight_min(subset=["最大回撤%"], color="#FFB3B3"),
+        hide_index=True, use_container_width=True,
+    )
+
+    # 导出对比结果
+    csv_data = df_compare.to_csv(index=False).encode("utf-8-sig")
+    st.download_button(
+        "📥 导出对比结果 CSV",
+        data=csv_data,
+        file_name=f"回测对比_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+        mime="text/csv",
+    )

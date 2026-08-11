@@ -1,5 +1,39 @@
 # Changelog
 
+## [v0.3.1] - 2026-08-11
+
+### 性能优化
+- `engine/backtester.py` — 回测引擎零拷贝：`df.iloc[:idx+1]` 视图替代 `copy()`，消除 O(n²) 内存拷贝
+- `data/storage.py` — 新增 `save_signals_batch()` + `executemany` 批量写入，消除 N+1 写入
+- `data/storage.py` — `threading.local()` SQLite 连接池，线程级连接复用
+- `engine/scanner.py` — `ThreadPoolExecutor` 并行信号扫描（≥50 只股票自动并行）
+
+### 架构优化
+- `core/exceptions.py`（新）— 自定义异常体系：`QuantError` 基类 + `DataFetchError`/`BacktestError`/`ValidationError`/`StorageError`
+- `data/fetcher_base.py`（新）— `DataSource(ABC)` 抽象基类 + `DAILY_COLUMNS` 常量
+- `data/fetcher_circuit.py`（新）— 从 fetcher.py 抽取 `CircuitBreaker` 熔断 + `TokenBucket` 限流
+- `services/`（新包）— `DataService` / `BacktestService` / `SignalService` + `validators.py` 服务层
+- `data/storage.py` — `PRAGMA user_version` 版本化数据库迁移系统
+
+### 安全优化
+- `notifier/push.py` — Webhook URL 脱敏 `_mask_url()` + `_safe_log()`，防密钥泄露
+- `services/validators.py`（新）— 股票代码/日期/资金输入校验
+- `app/main.py` — Streamlit 登录认证（`APP_AUTH_ENABLED`）+ 数据库恢复二次确认
+
+### 可维护性优化
+- `core/config.py` — 集中化配置（扫描/回测/熔断/认证等散落魔法数字）
+- `app/main.py` — 数据库恢复危险操作增加 checkbox 二次确认
+
+### 用户体验优化
+- `app/backtest.py` — 回测结果对比（多结果叠加曲线 + 指标对比表 + CSV 导出）
+- `app/signal.py` / `app/portfolio.py` — CSV 导出（信号扫描/历史信号/持仓清单）
+- `app/theme.py` — 响应式 CSS 移动端适配
+
+### 测试
+- 单元测试调整至 **89 个**，全部通过，零回归
+
+---
+
 ## [v0.3.0] - 2026-07-15
 
 ### 自选股中心化重构

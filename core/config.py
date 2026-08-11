@@ -113,3 +113,45 @@ LOG_DIR = PROJECT_ROOT / "logs"
 
 LOG_DIR.mkdir(exist_ok=True)
 # 自动创建日志目录（如果不存在）
+
+# ============================================================
+# 扫描器配置（原 scanner.py 硬编码）
+# ============================================================
+SCANNER_CACHE_THRESHOLD = float(os.getenv("SCANNER_CACHE_THRESHOLD", "0.9"))
+# 缓存命中阈值：已扫描股票数达到总量的此比例时跳过全量扫描
+
+SCANNER_MIN_DATA_DAYS = int(os.getenv("SCANNER_MIN_DATA_DAYS", "60"))
+# 最少数据天数：少于此天数的股票跳过扫描
+
+SCANNER_PARALLEL_WORKERS = int(os.getenv("SCANNER_PARALLEL_WORKERS", "0"))
+# 并行扫描进程数（0=自动检测CPU核心数）
+
+# ============================================================
+# 回测引擎配置（原 backtester.py 硬编码）
+# ============================================================
+BACKTEST_MIN_POSITION_PCT = float(os.getenv("BACKTEST_MIN_POSITION_PCT", "0.05"))
+# 最低仓位比例（score=0 时）
+
+BACKTEST_MAX_POSITION_PCT = float(os.getenv("BACKTEST_MAX_POSITION_PCT", "0.20"))
+# 最高仓位比例（score=1 时）
+
+BACKTEST_POSITION_STEP = BACKTEST_MAX_POSITION_PCT - BACKTEST_MIN_POSITION_PCT
+# 仓位步进 = max - min（score 乘以此值加 min）
+
+# ============================================================
+# 数据源熔断配置（原 fetcher.py 硬编码）
+# ============================================================
+FETCHER_CIRCUIT_THRESHOLD = int(os.getenv("FETCHER_CIRCUIT_THRESHOLD", "20"))
+# 连续失败次数阈值，达到后触发熔断
+
+FETCHER_CIRCUIT_COOLDOWN = int(os.getenv("FETCHER_CIRCUIT_COOLDOWN", "300"))
+# 熔断冷却时间（秒）
+
+# ============================================================
+# 应用安全配置
+# ============================================================
+APP_AUTH_ENABLED = os.getenv("APP_AUTH_ENABLED", "false").lower() == "true"
+# 是否启用 Streamlit 应用登录认证（默认关闭，部署到公网时建议开启）
+
+APP_AUTH_PASSWORD = os.getenv("APP_AUTH_PASSWORD", "")
+# 应用登录密码（为空且 AUTH_ENABLED=true 时使用默认密码 "quant123"）

@@ -8,6 +8,11 @@
   日线数据:   AKShare(前复权,免费) → TickFlow(前复权,需Key) → Tushare(未复权+复权因子) → Baostock(前复权,免费)
   股票列表:   Tushare(含行业) → AKShare(无行业) → Baostock(无行业)
   指数成分股: AKShare → Baostock → Tushare
+
+架构说明:
+  熔断器和令牌桶已提取到 data/fetcher_circuit.py
+  数据源 ABC 接口定义在 data/fetcher_base.py
+  本模块负责具体实现和级联调度
 """
 import time          # 休眠等待，用于API限速控制
 import random        # 随机数，用于请求间隔抖动(避免集中触发限流)
@@ -18,7 +23,11 @@ import io            # 字节流处理（备用）
 import pandas as pd  # 数据处理核心库
 
 # 从配置模块加载 Tushare Token（用于访问 Tushare Pro API）
-from core.config import TUSHARE_TOKEN
+from core.config import TUSHARE_TOKEN, TICKFLOW_API_KEY, TICKFLOW_BASE_URL
+# 从提取的模块导入熔断器和令牌桶
+from data.fetcher_circuit import CircuitBreaker, TokenBucket
+# 从提取的模块导入统一列定义
+from data.fetcher_base import DAILY_COLUMNS
 
 # ============================================================
 # AKShare 重试配置
@@ -33,50 +42,23 @@ AKSHARE_BATCH_SLEEP = 0.5      # 每只股票首次请求前的最小休眠间�
 logger = logging.getLogger(__name__)
 
 # ============================================================
-# 日线数据统一列定义（所有数据源输出格式一致）
-#   所有获取日线的函数（AKShare/Tushare/Baostock）
-#   最终输出的列顺序和名称必须与此一致
+# 熔断器实例（从 fetcher_circuit.py 创建）
 # ============================================================
-DAILY_COLUMNS = [
-    "ts_code", "trade_date", "open", "high", "low", "close",
-    "volume", "amount", "pct_chg", "turnover", "adj_factor",
-]
+_akshare_breaker = CircuitBreaker("AKShare")
+_tushare_bucket = TokenBucket(rate=0.35)  # Tushare 限频：0.35s/次
 
-# ============================================================
-# AKShare 熔断机制
-#   当连续失败达到阈值时，临时跳过AKShare一段时间
-#   防止API故障时无意义的重试浪费大量时间
-# ============================================================
-_akshare_consecutive_failures = 0   # 连续失败计数
-_akshare_circuit_open_until = 0.0   # 熔断解锁时间戳（time.time）
-AKSHARE_CIRCUIT_BREAK_THRESHOLD = 20   # 连续失败次数阈值，达到后熔断
-AKSHARE_CIRCUIT_BREAK_SECONDS = 300    # 熔断持续时间（秒）
-
-
+# 兼容旧代码的别名（内部函数委托给熔断器实例）
 def _is_akshare_circuit_open() -> bool:
-    """检查 AKShare 熔断是否已打开（为True则跳过AKShare）"""
-    global _akshare_circuit_open_until
-    if _akshare_circuit_open_until > time.time():
-        return True
-    return False
-
+    """检查 AKShare 熔断是否已打开"""
+    return _akshare_breaker.is_open()
 
 def _akshare_success():
-    """AKShare 请求成功后：重置连续失败计数"""
-    global _akshare_consecutive_failures
-    _akshare_consecutive_failures = 0
-
+    """AKShare 请求成功后：重置计数"""
+    _akshare_breaker.success()
 
 def _akshare_failure():
-    """AKShare 请求失败后：累计计数，达到阈值则打开熔断"""
-    global _akshare_consecutive_failures, _akshare_circuit_open_until
-    _akshare_consecutive_failures += 1
-    if _akshare_consecutive_failures >= AKSHARE_CIRCUIT_BREAK_THRESHOLD:
-        _akshare_circuit_open_until = time.time() + AKSHARE_CIRCUIT_BREAK_SECONDS
-        logger.warning(
-            f"AKShare 连续 {_akshare_consecutive_failures} 次失败，"
-            f"熔断 {AKSHARE_CIRCUIT_BREAK_SECONDS}s"
-        )
+    """AKShare 请求失败后：累计计数"""
+    _akshare_breaker.failure()
 
 
 # ============================================================
@@ -680,6 +662,7 @@ def _fetch_daily_tickflow(ts_code: str, start_date: str,
                 params={
                     "symbol": ts_code,          # 与系统 ts_code 格式一致
                     "period": "1d",             # 日线
+                    "count": 10000,             # 最大10000，覆盖完整历史（默认仅100）
                     "start_time": start_ms,
                     "end_time": end_ms,
                     "adjust": "forward",        # 前复权

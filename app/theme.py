@@ -187,6 +187,24 @@ MAIN_EXTRA = """
     /* ===== 标题点缀 ===== */
     h1, h2, h3 { color: #e8edf7; letter-spacing: 0.3px; }
     h1 { border-bottom: 2px solid rgba(239,83,80,0.4); padding-bottom: 8px; }
+
+    /* ===== 移动端响应式适配 ===== */
+    @media (max-width: 768px) {
+        /* 表格横向滚动 */
+        [data-testid="stDataFrame"] { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+        /* 指标卡片缩小间距 */
+        [data-testid="stMetric"] { padding: 8px 10px; }
+        [data-testid="stMetricValue"] { font-size: 1.1rem !important; }
+        /* 图表高度自适应 */
+        .stPlotlyChart, .js-plotly-plot { height: 300px !important; }
+        /* 侧边栏收窄 */
+        section[data-testid="stSidebar"] { min-width: 200px; }
+        /* 标题缩小 */
+        h1 { font-size: 1.5rem; }
+        h2 { font-size: 1.25rem; }
+        /* 按钮全宽 */
+        .stButton > button { width: 100%; }
+    }
 </style>
 """
 

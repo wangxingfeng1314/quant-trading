@@ -11,6 +11,7 @@ from data.storage import get_daily, save_backtest_result, save_backtest_trades
 from data.indicators import apply_indicators
 from data.cleaner import clean_daily
 from core.models import BacktestResult
+from core.config import BACKTEST_MIN_POSITION_PCT, BACKTEST_POSITION_STEP
 
 logger = logging.getLogger(__name__)
 
@@ -108,8 +109,9 @@ class Backtester:
                 if date in date_index[ts_code]:
                     idx = date_index[ts_code][date]
                     prices[ts_code] = df.loc[idx, "close"]
-                    # 数据切片：从开始到当日（含），防止未来数据泄露
-                    data_slice[ts_code] = df.loc[:idx].copy()
+                    # 零拷贝优化：传视图而非 copy()，策略内部按需读取
+                    # df.iloc[:idx+1] 返回视图，不复制数据
+                    data_slice[ts_code] = df.iloc[:idx + 1]
 
             if not prices:
                 continue
@@ -123,8 +125,8 @@ class Backtester:
             # 执行信号 - 按评分分配仓位
             for sig in signals:
                 if sig.direction == "BUY":
-                    # 评分决定仓位比例：score=0.5 → 5%, score=1.0 → 20%
-                    position_pct = 0.05 + sig.score * 0.15  # 5%~20%
+                    # 评分决定仓位比例：score=0 → min_pct, score=1 → min_pct+step
+                    position_pct = BACKTEST_MIN_POSITION_PCT + sig.score * BACKTEST_POSITION_STEP
                     budget = portfolio.cash * position_pct
                     volume = int(budget / max(sig.price_ref, 1)) // 100 * 100
                     if volume > 0:

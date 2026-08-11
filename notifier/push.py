@@ -1,4 +1,4 @@
-"""消息推送模块 - Server酱 / PushPlus / 企业微信 / 钉钉 通知"""
+"""消息推送模块 - Server酱 / PushPlus / 企业微信 / 钉钉 / 飞书 通知"""
 import json
 import logging
 from typing import List
@@ -9,6 +9,24 @@ import requests
 from core.config import PROJECT_ROOT
 
 logger = logging.getLogger(__name__)
+
+
+def _mask_url(url: str) -> str:
+    """脱敏 URL（保留前 30 字符 + ***，防止 Webhook 密钥泄露到日志）"""
+    if not url:
+        return ""
+    if len(url) <= 30:
+        return url[:10] + "***"
+    return url[:30] + "***"
+
+
+def _safe_log(channel: str, error: Exception):
+    """记录推送异常，脱敏可能包含 URL 的错误信息"""
+    err_str = str(error)
+    # 如果异常消息中包含 http，做脱敏处理
+    if "http" in err_str.lower():
+        err_str = "请求异常（URL已脱敏）"
+    logger.error(f"{channel}推送异常: {err_str}")
 
 
 # 尝试从 .env 读取推送配置
@@ -81,7 +99,7 @@ def _send_server_chan(title: str, content: str, msg_type: str = "markdown") -> b
             logger.error(f"Server酱推送失败: {data}")
             return False
     except Exception as e:
-        logger.error(f"Server酱推送异常: {e}")
+        _safe_log("Server酱", e)
         return False
 
 
@@ -103,7 +121,7 @@ def _send_pushplus(title: str, content: str, msg_type: str = "markdown") -> bool
             logger.error(f"PushPlus推送失败: {data}")
             return False
     except Exception as e:
-        logger.error(f"PushPlus推送异常: {e}")
+        _safe_log("PushPlus", e)
         return False
 
 
@@ -135,7 +153,7 @@ def _send_wecom(title: str, content: str) -> bool:
             logger.error(f"企业微信推送失败: {data}")
             return False
     except Exception as e:
-        logger.error(f"企业微信推送异常: {e}")
+        _safe_log("企业微信", e)
         return False
 
 
@@ -188,7 +206,7 @@ def _send_dingtalk(title: str, content: str) -> bool:
             logger.error(f"钉钉推送失败: {data}")
             return False
     except Exception as e:
-        logger.error(f"钉钉推送异常: {e}")
+        _safe_log("钉钉", e)
         return False
 
 
@@ -244,7 +262,7 @@ def _send_feishu(title: str, content: str) -> bool:
             logger.error(f"飞书推送失败: {data}")
             return False
     except Exception as e:
-        logger.error(f"飞书推送异常: {e}")
+        _safe_log("飞书", e)
         return False
 
 
@@ -392,5 +410,5 @@ def notify_position_summary() -> bool:
                      f"总盈亏 {total_pnl:+.0f}元")
         return True
     except Exception as e:
-        logger.error(f"持仓日报推送失败: {e}")
+        logger.error(f"持仓日报推送失败: {type(e).__name__}")
         return False

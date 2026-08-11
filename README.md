@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-v0.3.0-blue" alt="version" />
+  <img src="https://img.shields.io/badge/version-v0.3.1-blue" alt="version" />
   <img src="https://img.shields.io/badge/python-3.11-green" alt="python" />
   <img src="https://img.shields.io/badge/tests-89%20passed-brightgreen" alt="tests" />
   <img src="https://img.shields.io/badge/streamlit-1.58-red" alt="streamlit" />
@@ -254,6 +254,10 @@ DATA_START_DATE=20210701     # 数据起始日期
 SCHEDULER_ENABLED=true
 SCHEDULER_HOUR=17
 
+# 安全
+APP_AUTH_ENABLED=false       # 启用登录认证（true/false）
+APP_AUTH_PASSWORD=           # 认证密码（APP_AUTH_ENABLED=true 时生效）
+
 # 推送通道（可选，5通道任一）
 WECOM_WEBHOOK=               # 企业微信机器人 Webhook
 DINGTALK_WEBHOOK=            # 钉钉机器人 Webhook
@@ -381,28 +385,37 @@ py -m pytest tests/test_commission.py -v
 ```
 quant-trading/
 ├── app/                      # Streamlit 7 个功能页面
-│   ├── main.py               # 主入口 + 侧边栏
+│   ├── main.py               # 主入口 + 侧边栏（登录认证 + 数据库恢复确认）
 │   ├── dashboard.py          # 🏠 首页看板（含数据健康面板）
 │   ├── data_viewer.py        # 📈 数据浏览/K线（同花顺风格）
-│   ├── backtest.py           # 🔬 回测中心（+ 并行网格搜索 UI）
-│   ├── signal.py             # 📡 信号中心
-│   ├── portfolio.py          # 💼 持仓管理
+│   ├── backtest.py           # 🔬 回测中心（+ 并行网格搜索 + 结果对比 UI）
+│   ├── signal.py             # 📡 信号中心（含 CSV 导出）
+│   ├── portfolio.py          # 💼 持仓管理（含 CSV 导出）
 │   ├── screener.py           # 🔍 选股筛选（股票+ETF）
+│   ├── theme.py              # 主题样式（响应式移动端适配）
 │   └── strategy_intro.py     # 📚 策略百科（按风格分组）
-├── core/                     # 配置 + 数据模型
-│   ├── config.py             # .env 配置加载
-│   └── models.py             # Signal/Trade/BacktestResult/StockInfo
+├── core/                     # 配置 + 数据模型 + 自定义异常
+│   ├── config.py             # .env 配置加载（集中化配置，消除魔法数字）
+│   ├── models.py             # Signal/Trade/BacktestResult/StockInfo
+│   └── exceptions.py         # 自定义异常体系（QuantError 及子类）
 ├── data/                     # 数据层
 │   ├── fetcher.py            # 多源级联（TickFlow→AKShare→Tushare→Baostock）+ ETF
-│   ├── storage.py            # SQLite CRUD（含 etf_basic / get_instrument_list）
+│   ├── fetcher_base.py       # DataSource 抽象基类 + DAILY_COLUMNS 常量
+│   ├── fetcher_circuit.py    # CircuitBreaker 熔断 + TokenBucket 限流
+│   ├── storage.py            # SQLite CRUD（连接池 + 版本化迁移 + 批量写入）
 │   ├── indicators.py         # 技术指标（MA/MACD/RSI/BOLL/KDJ/ATR）
 │   └── cleaner.py            # 数据清洗（OHLC校验/停牌过滤/去重）
 ├── engine/                   # 回测引擎
-│   ├── backtester.py         # 回测主循环 + grid_search(串行+并行)
+│   ├── backtester.py         # 回测主循环 + grid_search(串行+并行) + 零拷贝
 │   ├── portfolio.py          # 组合管理（滑点/费用）
 │   ├── position.py           # 持仓类（T+1规则）
 │   ├── commission.py         # A股费用模型（佣金/印花税/过户费）
-│   └── scanner.py            # 信号扫描器（含缓存，支持股票+ETF）
+│   └── scanner.py            # 信号扫描器（并行扫描 + 缓存，支持股票+ETF）
+├── services/                 # 服务层（解耦 UI 与数据访问）
+│   ├── data_service.py       # 数据查询/更新服务
+│   ├── backtest_service.py   # 回测/网格搜索/对比服务
+│   ├── signal_service.py     # 信号扫描/通知服务
+│   └── validators.py         # 输入校验（股票代码/日期/资金）
 ├── strategies/               # 17 个策略（自动发现注册，按风格分类）
 ├── scripts/                  # 运维脚本（init_data 含 ETF 列表同步）
 ├── scheduler/                # APScheduler 定时调度（更新→扫描→推送闭环）
@@ -457,6 +470,23 @@ class MyStrategy(BaseStrategy):
 
 详见 [CHANGELOG.md](./CHANGELOG.md)
 
+### v0.3.1 关键更新（2026-08-11）
+
+- ⚡ **回测引擎零拷贝** — `iloc` 视图替代 `copy()`，消除 O(n²) 内存拷贝
+- 📦 **批量数据库写入** — 新增 `save_signals_batch()` + `executemany`，消除 N+1 写入
+- 🔗 **SQLite 连接池** — `threading.local()` 线程级连接复用，避免频繁建连
+- 🚀 **并行信号扫描** — `ThreadPoolExecutor`，≥50 只股票自动并行扫描
+- 🧱 **自定义异常体系** — 新增 `core/exceptions.py`（`QuantError` 基类 + 5 子类）
+- 🔌 **数据源抽象接口** — 新增 `data/fetcher_base.py`（`DataSource(ABC)` 统一接入）
+- 🛡️ **熔断/限流组件** — 新增 `data/fetcher_circuit.py`（`CircuitBreaker` + `TokenBucket`）
+- 🏗️ **服务层** — 新增 `services/`（DataService / BacktestService / SignalService + validators）
+- 🗃️ **数据库迁移系统** — `PRAGMA user_version` 版本化 schema 平滑迁移
+- 🔐 **安全加固** — Webhook URL 脱敏 + 输入校验（`validators.py`）+ Streamlit 登录认证
+- 📊 **回测结果对比** — 多结果叠加曲线 + 指标对比表 + CSV 导出
+- 📋 **CSV 导出** — 信号扫描 / 历史信号 / 持仓清单全面支持
+- 📱 **移动端适配** — `app/theme.py` 新增响应式 CSS
+- ✅ **89 个单元测试全部通过**，零回归
+
 ### v0.3.0 关键更新
 - 🔄 **自选股中心化重构** — 所有功能围绕自选股
 - 🧩 **17个策略** — 短线(4)/震荡(5)/中长线(6)/综合(2)，按风格分类展示
@@ -474,5 +504,5 @@ class MyStrategy(BaseStrategy):
 ---
 
 <p align="center">
-  Made with ❤️ for A股量化 | v0.3.0
+  Made with ❤️ for A股量化 | v0.3.1
 </p>
