@@ -11,6 +11,10 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# 注入全局深色金融主题
+from app.theme import inject_theme_css
+inject_theme_css()
+
 st.sidebar.title("📊 A股量化交易系统")
 st.sidebar.markdown("---")
 

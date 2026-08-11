@@ -14,6 +14,7 @@ class RSIOversoldStrategy(BaseStrategy):
     """
     name = "rsi_oversold"
     description = "RSI超买超卖策略（超卖买入、超买卖出）"
+    style = "震荡"
     param_schema = {
         "rsi_period": {"default": 14, "desc": "RSI计算周期"},
         "oversold": {"default": 30, "desc": "超卖线"},

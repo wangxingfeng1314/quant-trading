@@ -1,22 +1,22 @@
-"""选股因子筛选器 - 技术 + 基本面因子筛选股票"""
+"""选股因子筛选器 - 技术 + 行情因子筛选股票/ETF"""
 import app  # noqa: F401
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 
-from data.storage import get_stock_list, get_daily, get_stocks_with_data
+from data.storage import get_instrument_list, get_daily, get_stocks_with_data
 from app.st_utils import chinese_dataframe
 from data.indicators import apply_indicators
 
 
 def show():
     st.title("🔍 选股因子筛选器")
-    st.caption("按技术指标 + 基本面因子筛选股票，快速定位符合条件的标的")
+    st.caption("按技术指标 + 行情因子筛选股票/ETF，快速定位符合条件的标的")
 
-    stock_df = get_stock_list()
+    stock_df = get_instrument_list()
     if stock_df.empty:
-        st.warning("暂无股票数据")
+        st.warning("暂无标的（股票/ETF）数据")
         return
 
     # 上方筛选区
@@ -26,10 +26,10 @@ def show():
         with tab_a:
             col1, col2, col3, col4 = st.columns(4)
             with col1:
-                # 显示实际可扫描的股票数量（只读提示，不再让用户选N只）
+                # 显示实际可扫描的标数量（只读提示）
                 stocks_with_data = get_stocks_with_data(min_days=60)
                 max_stocks = len(stocks_with_data)
-                st.caption(f"📊 本次可扫描: {max_stocks} 只股票")
+                st.caption(f"📊 本次可扫描: {max_stocks} 个标的")
                 ma_bullish = st.checkbox("均线多头排列 (MA5>MA20>MA60)", value=False)
                 breakout_ma20 = st.checkbox("价格突破MA20", value=False)
                 macd_golden = st.checkbox("MACD金叉 (DIF上穿DEA)", value=False)
@@ -69,7 +69,7 @@ def show():
         return
 
     actual_scan = codes_with_data
-    with st.spinner(f"正在扫描 {len(actual_scan)} 只自选股..."):
+    with st.spinner(f"正在扫描 {len(actual_scan)} 个标的..."):
         codes = actual_scan
         name_map = dict(zip(stock_df["ts_code"], stock_df["name"]))
         results = []
@@ -179,6 +179,8 @@ def show():
                 results.append({
                     "代码": ts_code,
                     "名称": name_map.get(ts_code, ""),
+                    "类型": stock_df.loc[stock_df["ts_code"] == ts_code, "type"].iloc[0]
+                            if (stock_df["ts_code"] == ts_code).any() else "",
                     "最新价": latest["close"],
                     "涨跌幅%": round(chg, 2) if pd.notna(chg) else 0,
                     "成交量(万手)": round(latest["volume"] / 10000, 0) if latest["volume"] else 0,
@@ -192,18 +194,18 @@ def show():
                 })
 
     if not results:
-        st.warning("未找到符合条件的股票，请放宽筛选条件")
+        st.warning("未找到符合条件的标的，请放宽筛选条件")
         return
 
     # 综合评分（因子命中数 × 10 + RSI加分）
     df_result = pd.DataFrame(results)
     df_result = df_result.sort_values(["命中因子", "综合评分"], ascending=False).reset_index(drop=True)
 
-    st.success(f"筛选完成，共 {len(df_result)} 只股票符合条件")
+    st.success(f"筛选完成，共 {len(df_result)} 个标的符合条件")
 
     # 指标卡
     col1, col2, col3 = st.columns(3)
-    col1.metric("符合条件的股票", len(df_result))
+    col1.metric("符合条件的标的", len(df_result))
     col2.metric("平均涨幅", f"{df_result['涨跌幅%'].mean():.2f}%")
     col3.metric("平均RSI", f"{df_result['RSI14'].mean():.1f}")
 
@@ -222,6 +224,6 @@ def show():
     st.download_button(
         "📥 导出CSV",
         data=csv,
-        file_name=f"选股结果_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.csv",
+        file_name=f"筛选结果_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.csv",
         mime="text/csv",
     )

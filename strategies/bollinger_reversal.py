@@ -14,6 +14,7 @@ class BollingerReversalStrategy(BaseStrategy):
     """
     name = "bollinger_reversal"
     description = "布林带反转策略（触下轨买、触上轨卖）"
+    style = "震荡"
     param_schema = {
         "boll_period": {"default": 20, "desc": "布林带周期"},
         "boll_std": {"default": 2.0, "desc": "标准差倍数"},

@@ -6,7 +6,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 
-from data.storage import get_stock_list, get_daily, get_watchlist, get_daily_count, get_signals, batch_get_latest, get_index_daily, get_stocks_with_data, get_latest_date, get_index_latest_date
+from data.storage import get_instrument_list, get_daily, get_watchlist, get_daily_count, get_signals, batch_get_latest, get_index_daily, get_stocks_with_data, get_latest_date, get_index_latest_date
 from app.st_utils import chinese_dataframe
 from data.indicators import apply_indicators
 from data.fetcher import check_data_freshness
@@ -312,7 +312,7 @@ def _show_watchlist_snapshot():
         st.info("暂无自选股，请前往「持仓管理」添加")
         return
 
-    stock_df = get_stock_list()
+    stock_df = get_instrument_list()
     name_map = {}
     if not stock_df.empty:
         name_map = dict(zip(stock_df["ts_code"], stock_df["name"]))
@@ -368,7 +368,7 @@ def _show_today_signals():
         st.info("今日暂无交易信号，请前往「信号中心」扫描")
         return
 
-    stock_df = get_stock_list()
+    stock_df = get_instrument_list()
     name_map = {}
     if not stock_df.empty:
         name_map = dict(zip(stock_df["ts_code"], stock_df["name"]))
@@ -397,7 +397,7 @@ def _show_hot_stocks():
         st.info("暂无自选股，请前往「持仓管理」添加")
         return
 
-    stock_df = get_stock_list()
+    stock_df = get_instrument_list()
     name_map = {}
     if not stock_df.empty:
         name_map = dict(zip(stock_df["ts_code"], stock_df["name"]))
@@ -443,7 +443,7 @@ def _generate_daily_report():
     """生成每日复盘报告"""
     today = datetime.now().strftime("%Y-%m-%d")
     watchlist = get_watchlist()
-    stock_df = get_stock_list()
+    stock_df = get_instrument_list()
     name_map = dict(zip(stock_df["ts_code"], stock_df["name"]))
     signals = get_signals(trade_date=datetime.now().strftime("%Y%m%d"), limit=50)
 

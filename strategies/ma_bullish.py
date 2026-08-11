@@ -15,6 +15,7 @@ class MABullishStrategy(BaseStrategy):
     """
     name = "ma_bullish"
     description = "均线多头排列策略（多头排列买入、死叉卖出）"
+    style = "中长线"
     param_schema = {
         "fast_period": {"default": 5, "desc": "短期均线"},
         "mid_period": {"default": 20, "desc": "中期均线"},

@@ -73,7 +73,8 @@ def list_strategies() -> list:
     if not STRATEGY_REGISTRY:
         _discover_and_register()
     return [
-        {"name": name, "desc": cls.description, "params": cls.param_schema}
+        {"name": name, "desc": cls.description, "params": cls.param_schema,
+         "style": getattr(cls, "style", "综合")}
         for name, cls in STRATEGY_REGISTRY.items()
     ]
 

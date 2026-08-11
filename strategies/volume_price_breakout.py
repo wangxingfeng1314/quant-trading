@@ -16,6 +16,7 @@ class VolumePriceBreakoutStrategy(BaseStrategy):
     """
     name = "volume_price_breakout"
     description = "量价突破策略（放量突破买、缩量反弹卖）"
+    style = "短线"
     param_schema = {
         "ma_period": {"default": 20, "desc": "参考均线周期"},
         "vol_ratio": {"default": 1.5, "desc": "放量倍数（成交额/均量）"},

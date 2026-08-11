@@ -3,7 +3,7 @@ import logging
 from typing import List, Callable
 from datetime import datetime
 
-from data.storage import get_daily, get_stock_list, save_signal, get_signals
+from data.storage import get_daily, get_instrument_list, save_signal, get_signals
 from data.indicators import apply_indicators
 from data.cleaner import clean_daily
 from strategies import STRATEGY_REGISTRY
@@ -32,11 +32,11 @@ def scan_signals(universe: list = None, strategy_names: list = None,
     if strategy_names is None:
         strategy_names = list(STRATEGY_REGISTRY.keys())
 
-    # 获取股票列表
+    # 获取标的列表（股票 + ETF）
     if universe is None:
-        stock_df = get_stock_list()
+        stock_df = get_instrument_list()
         if stock_df.empty:
-            logger.error("无股票数据")
+            logger.error("无标的数据")
             return []
         universe = stock_df["ts_code"].tolist()
 

@@ -316,11 +316,14 @@ def notify_backtest_result(result):
     send_notification(title, content)
 
 
-def notify_position_summary():
+def notify_position_summary() -> bool:
     """推送持仓盈亏日报
 
     计算当前所有模拟持仓的浮动盈亏，生成日报推送。
     数据来源：storage.get_positions() + 最新收盘价。
+
+    返回:
+        True=已推送, False=跳过（无持仓或推送失败）
     """
     try:
         from data.storage import get_positions, get_daily
@@ -328,7 +331,7 @@ def notify_position_summary():
         positions = get_positions()
         if not positions:
             logger.info("持仓为空，跳过盈亏推送")
-            return
+            return False
 
         today = datetime.now().strftime("%Y-%m-%d")
         total_cost = 0.0
@@ -387,5 +390,7 @@ def notify_position_summary():
         send_notification(title, content)
         logger.info(f"持仓日报推送完成: 共 {len(positions)} 只持仓, "
                      f"总盈亏 {total_pnl:+.0f}元")
+        return True
     except Exception as e:
         logger.error(f"持仓日报推送失败: {e}")
+        return False

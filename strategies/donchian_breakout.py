@@ -16,6 +16,7 @@ class DonchianBreakoutStrategy(BaseStrategy):
     """
     name = "donchian_breakout"
     description = "唐奇安通道突破（趋势跟踪，通道上轨买、下轨卖）"
+    style = "中长线"
     param_schema = {
         "entry_period": {"default": 20, "desc": "入场通道周期"},
         "exit_period": {"default": 10, "desc": "出场通道周期"},

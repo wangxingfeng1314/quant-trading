@@ -42,6 +42,19 @@ TUSHARE_RATE_LIMIT = float(os.getenv("TUSHARE_RATE_LIMIT", "0.35"))
 # 付费用户可调小此值以加快数据获取
 
 # ============================================================
+# TickFlow 数据源配置
+# ============================================================
+TICKFLOW_API_KEY = os.getenv("TICKFLOW_API_KEY", "")
+# TickFlow API Key（可选）
+# 在 https://tickflow.org 控制台生成
+# 为空时不使用 TickFlow 数据源
+
+TICKFLOW_BASE_URL = os.getenv("TICKFLOW_BASE_URL", "https://api.tickflow.org")
+# TickFlow 服务地址
+# 完整服务: https://api.tickflow.org（需 API Key）
+# 免费服务: https://free-api.tickflow.org（无需 Key，仅历史日K）
+
+# ============================================================
 # 数据获取配置
 # ============================================================
 DATA_START_DATE = os.getenv("DATA_START_DATE", "20210701")

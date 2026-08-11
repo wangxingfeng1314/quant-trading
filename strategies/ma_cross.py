@@ -14,6 +14,7 @@ class MACrossStrategy(BaseStrategy):
     """
     name = "ma_cross"
     description = "双均线交叉策略（金叉买、死叉卖）"
+    style = "中长线"
     param_schema = {
         "fast_period": {"default": 5, "desc": "短期均线周期"},
         "slow_period": {"default": 20, "desc": "长期均线周期"},

@@ -1,0 +1,21 @@
+# Streamlit 深色金融主题 — A股量化交易系统
+# 风格参考：同花顺/东方财富 深蓝黑底 + 红涨绿跌
+
+[server]
+headless = true
+maxUploadSize = 50
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+# 深蓝黑主背景
+backgroundColor = "#0a0e17"
+# 侧边栏/次级区域背景
+secondaryBackgroundColor = "#111a2c"
+# 主文字色
+textColor = "#dbe2ee"
+# 主强调色：A股红色（涨）
+primaryColor = "#ef5350"
+# 字体
+font = "sans serif"

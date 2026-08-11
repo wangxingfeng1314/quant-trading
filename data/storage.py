@@ -190,6 +190,16 @@ def init_db():
             );
             CREATE INDEX IF NOT EXISTS idx_daily_date ON daily_price(trade_date);  -- 按日期查索引
 
+            -- ETF基本信息表
+            CREATE TABLE IF NOT EXISTS etf_basic (
+                ts_code      TEXT PRIMARY KEY,    -- ETF代码 e.g. "510300.SH"
+                symbol       TEXT NOT NULL,       -- 纯数字代码 e.g. "510300"
+                name         TEXT NOT NULL,       -- ETF名称 e.g. "沪深300ETF"
+                market       TEXT NOT NULL,       -- 市场 "SH" 或 "SZ"
+                list_date    TEXT,                -- 上市日期 "YYYYMMDD"
+                updated_at   TEXT                 -- 数据更新时间
+            );
+
             -- 交易信号表
             -- 同一只股票、同一天、同一策略、同一方向只能有一条信号
             CREATE TABLE IF NOT EXISTS signal (
@@ -330,6 +340,73 @@ def get_stock_name(ts_code: str) -> str:
             "SELECT name FROM stock_basic WHERE ts_code = ?", (ts_code,)
         ).fetchone()
         return row[0] if row else ts_code          # 找不到则返回代码
+
+
+# ============================================================
+# ETF基本信息 (etf_basic) 表操作
+# ============================================================
+
+def save_etf_list(df: pd.DataFrame):
+    """增量更新 ETF 列表到 etf_basic 表（INSERT OR REPLACE）
+
+    参数:
+        df: 包含 ts_code, symbol, name, market 等列的 DataFrame
+    """
+    from datetime import datetime
+    now = datetime.now().isoformat()              # 生成当前时间戳
+    df = df.copy()                                 # 不修改原始数据
+    df["updated_at"] = now                          # 追加更新时间列
+    cols = ["ts_code", "symbol", "name", "market", "list_date", "updated_at"]
+    placeholders = ",".join(["?"] * len(cols))
+    col_names = ",".join(cols)
+    sql = f"INSERT OR REPLACE INTO etf_basic ({col_names}) VALUES ({placeholders})"
+    rows = df[cols].values.tolist()
+    with get_conn() as conn:
+        conn.executemany(sql, rows)
+
+
+def get_etf_list() -> pd.DataFrame:
+    """获取所有 ETF 列表（按代码排序）
+
+    表不存在时返回空 DataFrame（兼容旧库未迁移的场景）。
+    """
+    with get_conn() as conn:
+        try:
+            return pd.read_sql("SELECT * FROM etf_basic ORDER BY ts_code", conn)
+        except Exception:
+            return pd.DataFrame()
+
+
+def get_etf_name(ts_code: str) -> str:
+    """根据 ETF 代码查询名称，查不到则返回代码本身"""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT name FROM etf_basic WHERE ts_code = ?", (ts_code,)
+        ).fetchone()
+        return row[0] if row else ts_code
+
+
+def get_instrument_list() -> pd.DataFrame:
+    """获取可交易标的总列表（股票 + ETF，含 type 标记）
+
+    用于页面搜索：把 A股 与 ETF 合并为统一列表。
+    返回列: ts_code, symbol, name, market, type（"股票"/"ETF"）
+    """
+    parts = []
+    stocks = get_stock_list()
+    if not stocks.empty:
+        s = stocks[["ts_code", "symbol", "name", "market"]].copy()
+        s["type"] = "股票"
+        parts.append(s)
+    etfs = get_etf_list()
+    if not etfs.empty:
+        e = etfs[["ts_code", "symbol", "name", "market"]].copy()
+        e["type"] = "ETF"
+        parts.append(e)
+    if not parts:
+        return pd.DataFrame(columns=["ts_code", "symbol", "name", "market", "type"])
+    return (pd.concat(parts, ignore_index=True)
+            .sort_values("ts_code").reset_index(drop=True))
 
 
 # ============================================================

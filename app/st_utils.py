@@ -6,7 +6,13 @@ import pandas as pd
 
 def chinese_date_input(label: str, default_start: date = None,
                        default_end: date = None, key: str = None) -> tuple:
-    """中文日期范围 — 纯数字输入，无日历控件，绝无英文"""
+    """中文日期范围 — 快捷范围按钮 + 年月日数字输入，无日历控件，绝无英文
+
+    优化：顶部提供「近1月/近3月/近半年/近1年/全部」快捷按钮，
+    点击自动设置下方年月日输入框并刷新，无需手动逐年月日。
+    """
+    from datetime import timedelta
+
     if default_start is None:
         default_start = date(date.today().year - 2, 1, 1)
     if default_end is None:
@@ -14,7 +20,32 @@ def chinese_date_input(label: str, default_start: date = None,
 
     st.markdown(f"**📅 {label}**")
 
-    # 开始日期
+    # ---------- 快捷范围按钮 ----------
+    # 点击后写入年月日输入框的 session_state 并 rerun
+    from core.config import DATA_START_DATE
+    today = date.today()
+    all_start = datetime.strptime(DATA_START_DATE, "%Y%m%d").date()
+    presets = {
+        "近1月": (today - timedelta(days=30), today),
+        "近3月": (today - timedelta(days=90), today),
+        "近半年": (today - timedelta(days=180), today),
+        "近1年": (today - timedelta(days=365), today),
+        "全部": (all_start, today),
+    }
+    pc = st.columns(len(presets))
+    for col, (label_p, (s, e)) in zip(pc, presets.items()):
+        with col:
+            if st.button(label_p, key=f"{key}_preset_{label_p}",
+                         use_container_width=True):
+                st.session_state[f"{key}_sy"] = s.year
+                st.session_state[f"{key}_sm"] = s.month
+                st.session_state[f"{key}_sd"] = s.day
+                st.session_state[f"{key}_ey"] = e.year
+                st.session_state[f"{key}_em"] = e.month
+                st.session_state[f"{key}_ed"] = e.day
+                st.rerun()
+
+    # ---------- 开始日期 ----------
     st.caption("开始日期")
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -27,7 +58,7 @@ def chinese_date_input(label: str, default_start: date = None,
         sd = st.number_input("日", min_value=1, max_value=31, step=1,
                              value=default_start.day, key=f"{key}_sd", label_visibility="collapsed")
 
-    # 结束日期
+    # ---------- 结束日期 ----------
     st.caption("结束日期")
     c4, c5, c6 = st.columns(3)
     with c4:
@@ -67,21 +98,21 @@ def chinese_date_picker(label: str, default_val: date = None,
 
 
 def chinese_dataframe(df: pd.DataFrame, height: int = 400):
-    """中文数据表格（替代 st.dataframe 的英文 AG Grid）"""
+    """中文数据表格（替代 st.dataframe 的英文 AG Grid）— 深色金融主题"""
     table_html = df.to_html(index=False, escape=False, na_rep="-")
 
     html = f"""
-    <div style="overflow-x: auto; overflow-y: auto; height: {height}px; border: 1px solid #ddd; border-radius: 4px; background-color: #FFFFFF;">
+    <div style="overflow-x: auto; overflow-y: auto; height: {height}px; border: 1px solid #1e2a44; border-radius: 10px; background-color: #0d1526;">
         <style>
             table {{ width: 100%; border-collapse: collapse; font-size: 14px; }}
-            th {{ background-color: #f0f2f6; color: #000000; padding: 8px 12px; text-align: left !important;
-                 position: sticky; top: 0; z-index: 1; border-bottom: 2px solid #ddd; }}
-            td {{ padding: 6px 12px; border-bottom: 1px solid #eee; color: #000000; background-color: #FFFFFF; }}
-            tr:hover td {{ background-color: #f5f5f5; }}
+            th {{ background-color: #131c30; color: #8b98b8; padding: 8px 12px; text-align: left !important;
+                 position: sticky; top: 0; z-index: 1; border-bottom: 2px solid #2a3a5e; font-weight: 600; }}
+            td {{ padding: 6px 12px; border-bottom: 1px solid #1e2a44; color: #dbe2ee; background-color: #0d1526; }}
+            tr:hover td {{ background-color: #182338; }}
         </style>
         {table_html}
     </div>
-    <div style="text-align: right; font-size: 12px; color: #666; margin-top: 4px;">
+    <div style="text-align: right; font-size: 12px; color: #8b98b8; margin-top: 4px;">
         共 {len(df)} 条记录
     </div>
     """
@@ -99,3 +130,26 @@ def chinese_metric_grid(metrics: dict, columns: int = 4):
     for i, (label, value) in enumerate(metrics.items()):
         with cols[i % columns]:
             st.metric(label=label, value=value)
+
+
+# 策略风格 → 图标/颜色映射
+STYLE_META = {
+    "短线": ("⚡", "#ef5350"),
+    "震荡": ("↔️", "#ffd54f"),
+    "中长线": ("📈", "#4fc3f7"),
+    "综合": ("🧩", "#ab47bc"),
+}
+
+
+def strategy_label(name: str, desc: str, style: str = "综合") -> str:
+    """策略下拉标签：带风格图标与名称，如 "⚡[短线] kdj_cross - KDJ金叉死叉" """
+    icon, _ = STYLE_META.get(style, ("📌", "#8b98b8"))
+    return f"{icon}[{style}] {name} - {desc}"
+
+
+def strategy_style_badge(style: str) -> str:
+    """策略风格徽章 HTML（用于卡片展示）"""
+    icon, color = STYLE_META.get(style, ("📌", "#8b98b8"))
+    return (f'<span style="background:{color}22;color:{color};border:1px solid '
+            f'{color}55;border-radius:6px;padding:1px 8px;font-size:0.8rem;'
+            f'margin-right:6px;">{icon}{style}</span>')

@@ -10,7 +10,7 @@
     ·
     <a href="#-功能页面"><strong>📖 功能指南 »</strong></a>
     ·
-    <a href="#-策略体系"><strong>🧩 11个策略 »</strong></a>
+    <a href="#-策略体系"><strong>🧩 17个策略 »</strong></a>
   </p>
 </p>
 
@@ -46,8 +46,8 @@
 # 1. 安装依赖
 pip install -r requirements.txt
 
-# 2. 配置（可选，缺省用 AKShare 免费数据源）
-cp .env.example .env
+# 2. 配置（TickFlow 为日线/指数/ETF 主力数据源，需填 API Key）
+cp .env.example .env   # 然后在 .env 填入 TICKFLOW_API_KEY
 
 # 3. 首次初始化（先加自选股，然后只下载自选股数据）
 py scripts/init_data.py --watchlist
@@ -101,9 +101,10 @@ py run.py
 > **数据健康面板**：5 个指标卡片 + 数据源状态 + 自选股健康度明细 + 一键更新 + 导出健康报告 + 数据库完整性检查。
 
 ### 📈 数据浏览
-搜索股票 → 选日期范围 → 勾选指标 → 看K线 + 顶部指标卡片。
+搜索股票/ETF → 选日期范围 → 勾选指标 → 看K线 + 顶部指标卡片。
 - 支持：均线(MA5/20/60)、MACD、布林带、RSI
-- 默认只列出有数据的股票
+- 默认只列出有数据的标的（股票 + ETF）
+- **同花顺风格 K线**：红涨绿跌、四色均线、十字光标联动、昨收/最新价虚线
 
 ### 🔬 回测中心（4个Tab）
 
@@ -126,8 +127,8 @@ py run.py
 - 🚀 **网格搜索并行化**：多核 CPU 加速参数搜索
 
 ### 🔍 选股筛选
-按技术因子筛选：均线多头/MACD金叉/RSI范围/放量/布林带/KDJ金叉/涨跌幅。
-→ 综合评分排序 → 导出 CSV
+按技术因子筛选股票/ETF：均线多头/MACD金叉/RSI范围/放量/布林带/KDJ金叉/涨跌幅。
+→ 综合评分排序（含类型标记） → 导出 CSV
 
 ### 📡 信号中心（4个Tab）
 
@@ -151,34 +152,40 @@ py run.py
 
 ---
 
-## 🧩 策略体系
+## 🧩 策略体系（17个，按风格分类）
 
-### 趋势跟踪（4个）
+### ⚡ 短线（4个）
+| 策略 | 文件 | 核心逻辑 |
+|:-----|:-----|:---------|
+| **KDJ金叉死叉** | `kdj_cross.py` | 低位金叉买入，高位死叉卖出 |
+| **量价突破** | `volume_price_breakout.py` | 放量突破均线买入，缩量反弹卖出 |
+| **MACD金叉死叉** | `macd_cross.py` | DIF上穿DEA买/下穿卖，低位金叉加分 |
+| **均线回踩** | `ma_pullback.py` | 强势股回踩MA10不破重新站上买入 |
+
+### ↔️ 震荡（5个）
+| 策略 | 文件 | 核心逻辑 |
+|:-----|:-----|:---------|
+| **RSI超买超卖** | `rsi_oversold.py` | RSI < 30 买入，> 70 卖出 |
+| **布林带反转** | `bollinger_reversal.py` | 触下轨买入，触上轨卖出 |
+| **双底形态识别** | `double_bottom.py` | 自动检测 W 底 + 突破颈线买入 |
+| **RSI背离** | `rsi_divergence.py` | 价创新低但RSI抬高（底背离）买 |
+| **布林带收口** | `boll_squeeze.py` | 带宽压缩至历史低位后放量突破跟随 |
+
+### 📈 中长线（6个）
 | 策略 | 文件 | 核心逻辑 |
 |:-----|:-----|:---------|
 | **双均线交叉** | `ma_cross.py` | 快线上穿慢线买入，下穿卖出 |
 | **均线多头排列** | `ma_bullish.py` | MA5 > MA20 > MA60 确认上升趋势入场 |
 | **海龟突破** | `turtle.py` | 突破 N 日高点买入，跌破 N 日低点卖出 |
 | **唐奇安通道突破** | `donchian_breakout.py` | 通道突破 + ATR 动态止损 |
-
-### 反转交易（4个）
-| 策略 | 文件 | 核心逻辑 |
-|:-----|:-----|:---------|
 | **MACD背离** | `macd_divergence.py` | 价格新低 + MACD 底背离买入 |
-| **RSI超买超卖** | `rsi_oversold.py` | RSI < 30 买入，> 70 卖出 |
-| **布林带反转** | `bollinger_reversal.py` | 触下轨买入，触上轨卖出 |
-| **双底形态识别** | `double_bottom.py` | 自动检测 W 底 + 突破颈线买入 |
+| **长期均线突破** | `ma60_breakout.py` | 放量突破MA60 + 均线走平向上 |
 
-### 动量（2个）
-| 策略 | 文件 | 核心逻辑 |
-|:-----|:-----|:---------|
-| **KDJ金叉死叉** | `kdj_cross.py` | 低位金叉买入，高位死叉卖出 |
-| **量价突破** | `volume_price_breakout.py` | 放量突破均线买入，缩量反弹卖出 |
-
-### 组合（1个）
+### 🧩 综合（2个）
 | 策略 | 文件 | 核心逻辑 |
 |:-----|:-----|:---------|
 | **多因子综合评分** | `multi_factor.py` | 5 因子加权打分（均线+MACD+RSI+量能+布林） |
+| **信号共振** | `signal_combo.py` | 趋势+动量+量能+强度四维度共振评分 |
 
 ---
 
@@ -187,16 +194,20 @@ py run.py
 ### 数据源级联
 
 ```
-AKShare（主力，免费前复权）
-  └─ 失败 → Tushare Pro（备用，需Token）
-       └─ 失败 → Baostock（兜底，免费无限量）
+TickFlow（主力，RESTful + 前复权）
+  └─ 失败 → AKShare（备用，免费前复权）
+       └─ 失败 → Tushare Pro（备用，需Token）
+            └─ 失败 → Baostock（兜底，免费无限量）
 ```
 
 | 数据源 | 用途 | Token | 熔断保护 | 重试策略 |
 |:------:|:-----|:-----:|:---------|:---------|
-| **AKShare** 🏆 | 日线/指数/成分股 | ❌ | 连续20次失败→熔断300s | 3次，指数退避+随机 |
+| **TickFlow** 🏆 | 日线/指数/ETF（前复权） | ✅ | — | 2次重试 |
+| **AKShare** | 日线/指数/成分股 | ❌ | 连续20次失败→熔断300s | 3次，指数退避+随机 |
 | **Tushare Pro** | 股票列表(含行业)/复权因子 | ✅ | — | 2次重试 |
 | **Baostock** | 日线最后兜底 | ❌ | — | 级联自然兜底 |
+
+> **ETF 数据源**：ETF 列表（1600+ 只）与日线均来自 TickFlow（`/v1/exchanges/*/instruments?type=etf` + `/v1/klines`），与股票共用 `daily_price` 表；选股筛选/回测/信号扫描/持仓管理等全功能支持 ETF。
 
 ### 常用命令
 
@@ -228,7 +239,9 @@ schtasks /run /tn QuantTrading-DataUpdate   # 手动触发
 
 ```
 # 数据源
-TUSHARE_TOKEN=               # 可选，AKShare不需要
+TICKFLOW_API_KEY=             # TickFlow API Key（https://tickflow.org 控制台生成）
+TICKFLOW_BASE_URL=            # TickFlow 服务地址（默认 https://api.tickflow.org）
+TUSHARE_TOKEN=                # 可选，AKShare不需要
 
 # 回测参数
 SLIPPAGE_RATE=0.001          # 滑点千分之一
@@ -241,12 +254,13 @@ DATA_START_DATE=20210701     # 数据起始日期
 SCHEDULER_ENABLED=true
 SCHEDULER_HOUR=17
 
-# 推送通道（可选）
+# 推送通道（可选，5通道任一）
 WECOM_WEBHOOK=               # 企业微信机器人 Webhook
 DINGTALK_WEBHOOK=            # 钉钉机器人 Webhook
 DINGTALK_SECRET=             # 钉钉加签密钥
 SERVER_CHAN_KEY=             # Server酱 Key
 PUSHPLUS_TOKEN=              # PushPlus Token
+FEISHU_WEBHOOK=              # 飞书机器人 Webhook
 ```
 
 ---
@@ -280,7 +294,7 @@ results = grid_search_parallel(
 
 ## 📡 消息推送
 
-支持 **4 通道** 自动选择（至少一个成功即返回 True）：
+支持 **5 通道** 自动选择（至少一个成功即返回 True）：
 
 | 通道 | 环境变量 | 配置位置 |
 |:-----|:---------|:---------|
@@ -288,12 +302,14 @@ results = grid_search_parallel(
 | 📱 PushPlus | `PUSHPLUS_TOKEN` | .env |
 | 💬 企业微信机器人 | `WECOM_WEBHOOK` | .env |
 | 🤖 钉钉机器人 | `DINGTALK_WEBHOOK` + `DINGTALK_SECRET` | .env |
+| ✈️ 飞书机器人 | `FEISHU_WEBHOOK` | .env |
 
 推送内容：信号日报（TOP5买入/卖出）、回测结果通知、**每日持仓盈亏日报**。
 
 ### 数据源 & API 限速
 - **Tushare**：令牌桶算法限速（`_TokenBucket`），支持突发请求，长期平均速率稳定
 - **AKShare**：指数退避重试（3次）+ 熔断保护（连续20次失败→跳过300s）
+- **TickFlow**：`x-api-key` 请求头鉴权，429 限流按异常重试（2次）
 
 ---
 
@@ -325,7 +341,7 @@ py -m pytest tests/test_commission.py -v
 
 ```
 ✅ 语法检查（py_compile 全量扫描 50+ 文件）
-✅ pytest 全部 49 个测试
+✅ pytest 全部 89 个测试
 ✅ 关键模块 import 一致性验证
 ```
 
@@ -367,18 +383,18 @@ quant-trading/
 ├── app/                      # Streamlit 7 个功能页面
 │   ├── main.py               # 主入口 + 侧边栏
 │   ├── dashboard.py          # 🏠 首页看板（含数据健康面板）
-│   ├── data_viewer.py        # 📈 数据浏览/K线
+│   ├── data_viewer.py        # 📈 数据浏览/K线（同花顺风格）
 │   ├── backtest.py           # 🔬 回测中心（+ 并行网格搜索 UI）
 │   ├── signal.py             # 📡 信号中心
 │   ├── portfolio.py          # 💼 持仓管理
-│   ├── screener.py           # 🔍 选股筛选
-│   └── strategy_intro.py     # 📚 策略百科
+│   ├── screener.py           # 🔍 选股筛选（股票+ETF）
+│   └── strategy_intro.py     # 📚 策略百科（按风格分组）
 ├── core/                     # 配置 + 数据模型
 │   ├── config.py             # .env 配置加载
 │   └── models.py             # Signal/Trade/BacktestResult/StockInfo
 ├── data/                     # 数据层
-│   ├── fetcher.py            # 多源级联 + 熔断保护 + 自动重试
-│   ├── storage.py            # SQLite CRUD
+│   ├── fetcher.py            # 多源级联（TickFlow→AKShare→Tushare→Baostock）+ ETF
+│   ├── storage.py            # SQLite CRUD（含 etf_basic / get_instrument_list）
 │   ├── indicators.py         # 技术指标（MA/MACD/RSI/BOLL/KDJ/ATR）
 │   └── cleaner.py            # 数据清洗（OHLC校验/停牌过滤/去重）
 ├── engine/                   # 回测引擎
@@ -386,12 +402,12 @@ quant-trading/
 │   ├── portfolio.py          # 组合管理（滑点/费用）
 │   ├── position.py           # 持仓类（T+1规则）
 │   ├── commission.py         # A股费用模型（佣金/印花税/过户费）
-│   └── scanner.py            # 信号扫描器（异常可见的 warn 级别日志）
-├── strategies/               # 11 个策略（插件式注册）
-├── scripts/                  # 运维脚本
-├── scheduler/                # APScheduler 定时调度
-├── notifier/                 # 消息推送（4通道：Server酱/PushPlus/企微/钉钉）
-├── tests/                    # 49 个单元测试
+│   └── scanner.py            # 信号扫描器（含缓存，支持股票+ETF）
+├── strategies/               # 17 个策略（自动发现注册，按风格分类）
+├── scripts/                  # 运维脚本（init_data 含 ETF 列表同步）
+├── scheduler/                # APScheduler 定时调度（更新→扫描→推送闭环）
+├── notifier/                 # 消息推送（5通道：Server酱/PushPlus/企微/钉钉/飞书）
+├── tests/                    # 89 个单元测试
 ├── .github/workflows/        # CI/CD
 ├── CHANGELOG.md              # 更新日志
 └── requirements.txt          # 版本锁定
@@ -443,12 +459,13 @@ class MyStrategy(BaseStrategy):
 
 ### v0.3.0 关键更新
 - 🔄 **自选股中心化重构** — 所有功能围绕自选股
-- 🧩 **11个策略** — 趋势跟踪(4)/反转(4)/动量(2)/组合(1)
+- 🧩 **17个策略** — 短线(4)/震荡(5)/中长线(6)/综合(2)，按风格分类展示
 - 🚀 **并行网格搜索** — 多核 CPU 加速参数优化
 - 🧪 **89个单元测试+集成测试** — 7个测试文件全覆盖
 - 🩺 **数据健康面板 + 数据库完整性检查** — 启动时自动校验
-- 💬 **4通道推送 + 持仓日报** — 信号推送 + 每日盈亏推送
-- 🔧 **数据获取增强** — Tushare/指数自动重试 + 令牌桶限速
+- 💬 **5通道推送 + 持仓日报** — 信号推送 + 每日盈亏推送（新增飞书）
+- 🏆 **TickFlow 数据源** — 日线/指数/ETF 主力数据源（前复权，RESTful）
+- 📊 **ETF 全功能支持** — 列表+日线+筛选+回测+信号+持仓全链路
 - 🔐 **SQLite 锁优化** — WAL模式 + timeout + 文件锁防双写
 - ⚡ **信号扫描缓存** — 当天已扫过的直接返回数据库结果
 - 🤖 **策略自动发现** — importlib 扫描目录，新增策略零配置

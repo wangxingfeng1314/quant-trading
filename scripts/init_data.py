@@ -35,8 +35,10 @@ sys.path.insert(0, str(PROJECT_ROOT))  # 确保能 import 项目模块
 
 # ---------- 导入数据模块 ----------
 from core.config import DATA_START_DATE                     # 数据起始日期
-from data.storage import init_db, save_stock_list, save_daily, get_stock_list, get_latest_date, get_watchlist
-from data.fetcher import fetch_stock_list, fetch_daily, fetch_index_components, check_data_freshness, update_all_indices, INDEX_CODES, fetch_index_daily
+from data.storage import init_db, save_stock_list, save_daily, get_instrument_list, get_latest_date, get_watchlist, save_etf_list
+from data.fetcher import (fetch_stock_list, fetch_daily, fetch_index_components,
+                          check_data_freshness, update_all_indices, INDEX_CODES,
+                          fetch_index_daily, fetch_etf_list, fetch_instrument_daily)
 from data.cleaner import clean_daily                        # 数据清洗
 from data.storage import save_index_daily                   # 指数数据存储
 
@@ -145,17 +147,17 @@ def main():
         start_date = start_dt.strftime("%Y%m%d")
         logger.info(f"拉取范围: {start_date} ~ {end_date}")
 
-        # 从数据库获取所有股票列表
-        stock_df = get_stock_list()
+        # 从数据库获取所有标的列表（股票 + ETF）
+        stock_df = get_instrument_list()
         if stock_df.empty:
-            logger.error("数据库中无股票列表，请先运行完整初始化")
+            logger.error("数据库中无标的数据，请先运行完整初始化")
             sys.exit(1)
 
         # 自选股模式：只更新自选股
         if args.watchlist:
             watchlist_df = get_watchlist()
             if watchlist_df.empty:
-                logger.warning("自选股列表为空，将更新所有股票")
+                logger.warning("自选股列表为空，将更新所有标的")
             else:
                 stock_df = stock_df[stock_df["ts_code"].isin(watchlist_df["ts_code"])]
                 logger.info(f"自选股模式: 只更新 {len(stock_df)} 只自选股")
@@ -197,8 +199,8 @@ def main():
             try:
                 # 从14天前开始拉取，覆盖最近14天的数据
                 fetch_start = skip_threshold
-                # 调用数据源级联获取（AKShare → Tushare → Baostock）
-                df = fetch_daily(ts_code, fetch_start, end_date)
+                # 按标类型路由：ETF 走 TickFlow，股票走多源级联
+                df = fetch_instrument_daily(ts_code, fetch_start, end_date)
                 if df.empty:
                     continue    # 所有数据源均无数据，跳过
 
@@ -230,6 +232,18 @@ def main():
         except Exception as e:
             logger.warning(f"指数更新失败: {e}")
 
+        # ---------- 同步更新 ETF 列表 ----------
+        logger.info("同步更新 ETF 列表...")
+        try:
+            etf_df = fetch_etf_list()
+            if not etf_df.empty:
+                save_etf_list(etf_df)
+                logger.info(f"ETF 列表更新完成，共 {len(etf_df)} 只")
+            else:
+                logger.warning("ETF 列表获取失败（已跳过）")
+        except Exception as e:
+            logger.warning(f"ETF 列表更新失败: {e}")
+
         logger.info(f"建议将此命令加入每日定时任务")
         return  # 增量更新模式结束
 
@@ -259,6 +273,19 @@ def main():
         logger.error("获取股票列表失败，请检查网络连接或AKShare是否正常")
         sys.exit(1)
     logger.info(f"共获取 {len(stock_df)} 只股票")
+
+    # ---------- Step 2.5: 获取 ETF 列表 ----------
+    logger.info("=" * 50)
+    logger.info("Step 2.5: 获取 ETF 列表（TickFlow）")
+    try:
+        etf_df = fetch_etf_list()
+        if not etf_df.empty:
+            save_etf_list(etf_df)
+            logger.info(f"ETF 列表: {len(etf_df)} 只")
+        else:
+            logger.warning("ETF 列表获取失败（可稍后通过增量更新补充）")
+    except Exception as e:
+        logger.warning(f"ETF 列表获取异常: {e}")
 
     # ---------- Step 3: 确定要下载的股票池 ----------
     logger.info("=" * 50)

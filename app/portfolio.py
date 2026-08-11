@@ -3,16 +3,17 @@ import app  # noqa: F401
 
 import streamlit as st
 import pandas as pd
-import plotly.graph_objects as go
 from datetime import date, datetime, timedelta
 
 from data.storage import (get_watchlist, add_to_watchlist, remove_from_watchlist,
                           get_stock_list, get_daily, get_signals, get_latest_date,
-                          save_daily, get_positions, add_position, remove_position)
-from data.fetcher import fetch_daily
+                          save_daily, get_positions, add_position, remove_position,
+                          get_instrument_list)
+from data.fetcher import fetch_daily, fetch_instrument_daily
 from data.cleaner import clean_daily
 from core.config import DATA_START_DATE
 from app.st_utils import chinese_dataframe, chinese_date_picker
+from app.data_viewer import create_candlestick_chart
 from data.indicators import apply_indicators
 from strategies import STRATEGY_REGISTRY
 from engine.scanner import scan_signals
@@ -35,12 +36,12 @@ def _show_watchlist():
     """自选股管理"""
     st.subheader("自选股列表")
 
-    stock_df = get_stock_list()
+    stock_df = get_instrument_list()  # 股票 + ETF 合并列表
 
     # 添加自选股
     col1, col2 = st.columns([3, 1])
     with col1:
-        search = st.text_input("搜索股票", placeholder="输入代码或名称搜索", key="wl_search")
+        search = st.text_input("搜索股票/ETF", placeholder="输入代码或名称搜索", key="wl_search")
     with col2:
         st.markdown("")  # 占位对齐
         note = st.text_input("备注", placeholder="如: 看好新能源", key="wl_note")
@@ -51,27 +52,28 @@ def _show_watchlist():
         filtered = stock_df[mask].head(10)
         if not filtered.empty:
             options = filtered.apply(
-                lambda r: f"{r['ts_code']} {r['name']}", axis=1
+                lambda r: f"[{r['type']}] {r['ts_code']} {r['name']}", axis=1
             ).tolist()
             col_a, col_b = st.columns([3, 1])
             with col_a:
-                selected = st.selectbox("选择要添加的股票", options, key="wl_select",
+                selected = st.selectbox("选择要添加的标的", options, key="wl_select",
                                         label_visibility="collapsed")
                 download_data = st.checkbox("同时下载历史数据", value=True, key="wl_download",
                                             help="勾选后将自动下载近5年的历史数据并扫描信号")
             with col_b:
                 if st.button("✅ 确认添加", key="wl_add"):
-                    ts_code = selected.split(" ")[0]
+                    parts = selected.split(" ")
+                    ts_code = parts[1] if len(parts) >= 2 else parts[0]
                     add_to_watchlist(ts_code, st.session_state.wl_note)
 
-                    # 自动下载该股票的历史数据（如果用户勾选）
+                    # 自动下载该标的的历史数据（如果用户勾选）
                     if download_data:
                         latest = get_latest_date(ts_code)
                         end = datetime.now().strftime("%Y%m%d")
                         data_ready = False
                         if not latest or latest < end:
                             with st.spinner(f"⏳ 正在下载 {selected} 的历史数据..."):
-                                df = fetch_daily(ts_code, DATA_START_DATE, end)
+                                df = fetch_instrument_daily(ts_code, DATA_START_DATE, end)
                                 if not df.empty:
                                     df = clean_daily(df)
                                     save_daily(df)
@@ -189,25 +191,11 @@ def _show_watchlist():
         if selected_code:
             df = get_daily(selected_code)
             if not df.empty:
-                df = apply_indicators(df, ["ma"])
-                fig = go.Figure()
-                fig.add_trace(go.Candlestick(
-                    x=df["trade_date"], open=df["open"], high=df["high"],
-                    low=df["low"], close=df["close"],
-                    increasing_line_color="red", decreasing_line_color="green",
-                    increasing_fillcolor="red", decreasing_fillcolor="green",
-                ))
-                if "ma20" in df.columns:
-                    fig.add_trace(go.Scatter(
-                        x=df["trade_date"], y=df["ma20"],
-                        mode="lines", name="MA20",
-                        line=dict(color="#45B7D1", width=1),
-                    ))
-                fig.update_layout(
-                    height=350, template="plotly_dark",
-                    xaxis_rangeslider_visible=False,
-                    xaxis=dict(type="category", nticks=15),
-                    margin=dict(l=30, r=10, t=30, b=30),
+                df = apply_indicators(df, ["ma", "vol_ma"])
+                fig = create_candlestick_chart(
+                    df, selected_code, selected_code,
+                    show_volume=True, show_macd=False, show_boll=False,
+                    height=400,
                 )
                 st.plotly_chart(fig, width='stretch')
 
@@ -217,7 +205,7 @@ def _show_portfolio():
     st.subheader("模拟持仓")
     st.caption("记录你的实际持仓，跟踪盈亏（数据持久化到数据库）")
 
-    stock_df = get_stock_list()
+    stock_df = get_instrument_list()  # 股票 + ETF 合并列表（用于持仓名称显示）
 
     # 添加持仓
     with st.form("add_position", clear_on_submit=True):
@@ -326,7 +314,7 @@ def _show_auto_trade():
             st.info(f"最近{auto_days}天无评分≥{min_score}的信号")
             return
 
-        stock_df = get_stock_list()
+        stock_df = get_instrument_list()
         name_map = {}
         if not stock_df.empty:
             name_map = dict(zip(stock_df["ts_code"], stock_df["name"]))
@@ -411,45 +399,18 @@ def _show_auto_trade():
         if pos_code:
             df = get_daily(pos_code)
             if not df.empty:
-                df = apply_indicators(df, ["ma"])
-                fig = go.Figure()
-                fig.add_trace(go.Candlestick(
-                    x=df["trade_date"], open=df["open"], high=df["high"],
-                    low=df["low"], close=df["close"],
-                    increasing_line_color="red", decreasing_line_color="green",
-                    increasing_fillcolor="red", decreasing_fillcolor="green",
-                    name="K线",
-                ))
-                if "ma20" in df.columns:
-                    fig.add_trace(go.Scatter(
-                        x=df["trade_date"], y=df["ma20"],
-                        mode="lines", name="MA20",
-                        line=dict(color="#45B7D1", width=1),
-                    ))
+                df = apply_indicators(df, ["ma", "vol_ma"])
 
-                # 标注买卖点
-                for p in current_positions:
-                    if p["ts_code"] == pos_code:
-                        buy_date = p["buy_date"]
-                        if buy_date in df["trade_date"].values:
-                            buy_row = df[df["trade_date"] == buy_date].iloc[0]
-                            fig.add_annotation(
-                                x=buy_date,
-                                y=buy_row["low"],
-                                text="🟢 买入",
-                                showarrow=True,
-                                arrowhead=2,
-                                arrowsize=1.5,
-                                arrowcolor="green",
-                                font=dict(color="green", size=12),
-                            )
-
-                fig.update_layout(
-                    height=400,
-                    template="plotly_dark",
-                    xaxis_rangeslider_visible=False,
-                    xaxis=dict(type="category", nticks=15),
-                    margin=dict(l=30, r=10, t=30, b=30),
+                # 收集该股票的买入日期（买卖点标注）
+                buy_dates = [
+                    p["buy_date"] for p in current_positions
+                    if p["ts_code"] == pos_code and p.get("buy_date")
+                ]
+                fig = create_candlestick_chart(
+                    df, pos_code, pos_code,
+                    show_volume=True, show_macd=False, show_boll=False,
+                    buy_dates=buy_dates,
+                    height=420,
                 )
                 st.plotly_chart(fig, width='stretch')
     else:

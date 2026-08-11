@@ -12,6 +12,7 @@ class MACDDivergenceStrategy(BaseStrategy):
     """
     name = "macd_divergence"
     description = "MACD背离策略（底背离买、顶背离卖）"
+    style = "中长线"
     param_schema = {
         "lookback": {"default": 60, "desc": "回看周期（天）"},
     }

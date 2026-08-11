@@ -9,10 +9,10 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime, date
 
-from app.st_utils import chinese_dataframe, chinese_date_picker
+from app.st_utils import chinese_dataframe, chinese_date_picker, strategy_label
 from strategies import STRATEGY_REGISTRY, list_strategies
 from engine.backtester import Backtester, grid_search
-from data.storage import get_stock_list, get_daily, get_backtest_results, get_backtest_trades, get_stocks_with_data, get_watchlist
+from data.storage import get_instrument_list, get_daily, get_backtest_results, get_backtest_trades, get_stocks_with_data, get_watchlist
 from data.indicators import apply_indicators
 from core.config import DEFAULT_CAPITAL
 
@@ -34,16 +34,16 @@ def show():
 
 def _show_run_backtest():
     """运行回测（单次）"""
-    stock_df = get_stock_list()
+    stock_df = get_instrument_list()
     stocks_with_data = get_stocks_with_data(min_days=60)
     if stock_df.empty:
-        st.warning("暂无股票数据，请先运行初始化脚本")
+        st.warning("暂无标的数据，请先运行初始化脚本")
         return
 
-    # 过滤：只保留有数据的股票（避免用户选到无数据的股票）
+    # 过滤：只保留有数据的标的（避免用户选到无数据的标的）
     stock_df_data = stock_df[stock_df["ts_code"].isin(stocks_with_data)].copy()
     if stock_df_data.empty:
-        st.warning("暂无足够行情数据的股票（需至少60条日线），请先下载数据")
+        st.warning("暂无足够行情数据的标的（需至少60条日线），请先下载数据")
         return
 
     col1, col2 = st.columns(2)
@@ -57,7 +57,10 @@ def _show_run_backtest():
         selected_strategy = st.selectbox(
             "选择策略",
             strategy_names,
-            format_func=lambda x: f"{x} - {strategy_descs[x]}",
+            format_func=lambda x: strategy_label(
+                x, strategy_descs[x],
+                getattr(STRATEGY_REGISTRY[x], "style", "综合"),
+            ),
             key="bt_strategy"
         )
 
@@ -138,7 +141,7 @@ def _show_run_backtest():
         mode = st.radio("股票范围", ["单只股票", "多只股票(手动)", "全部自选股"], horizontal=True, key="bt_mode")
 
         if mode == "单只股票":
-            search = st.text_input("搜索股票", placeholder="代码或名称", key="bt_search")
+            search = st.text_input("搜索标的", placeholder="代码或名称", key="bt_search")
             if search:
                 mask = (stock_df_data["ts_code"].str.contains(search, case=False) |
                         stock_df_data["name"].str.contains(search, case=False))
@@ -147,15 +150,16 @@ def _show_run_backtest():
                 filtered = stock_df_data.head(50)
 
             options = filtered.apply(
-                lambda r: f"{r['ts_code']} {r['name']}", axis=1
+                lambda r: f"[{r['type']}] {r['ts_code']} {r['name']}", axis=1
             ).tolist()
 
             if options:
-                selected = st.selectbox("选择股票", options, key="bt_stock")
-                ts_code = selected.split(" ")[0]
+                selected = st.selectbox("选择标的", options, key="bt_stock")
+                parts = selected.split(" ")
+                ts_code = parts[1] if len(parts) >= 2 else parts[0]
                 universe = [ts_code]
             else:
-                st.warning(f"未找到匹配股票（当前仅有 {len(stock_df_data)} 只股票有数据）")
+                st.warning(f"未找到匹配标的（当前仅有 {len(stock_df_data)} 个标的有数据）")
                 return
         elif mode == "全部自选股":
             watchlist = get_watchlist()
@@ -219,7 +223,7 @@ def _show_run_backtest():
             st.success(f"回测完成！{len(results)}/{len(universe)} 只自选股产生交易")
 
             # 对比表格
-            stock_df = get_stock_list()
+            stock_df = get_instrument_list()
             name_map = dict(zip(stock_df["ts_code"], stock_df["name"]))
             compare_rows = []
             for r in results:
@@ -274,16 +278,16 @@ def _show_run_backtest():
 
 def _show_grid_search():
     """参数优化（网格搜索）"""
-    stock_df = get_stock_list()
+    stock_df = get_instrument_list()
     stocks_with_data = get_stocks_with_data(min_days=60)
     if stock_df.empty:
-        st.warning("暂无股票数据")
+        st.warning("暂无标的数据")
         return
 
-    # 只保留有数据的股票
+    # 只保留有数据的标的
     stock_df_data = stock_df[stock_df["ts_code"].isin(stocks_with_data)].copy()
     if stock_df_data.empty:
-        st.warning("暂无足够行情数据的股票（需至少60条日线），请先下载数据")
+        st.warning("暂无足够行情数据的标的（需至少60条日线），请先下载数据")
         return
 
     st.subheader("⚙️ 参数优化")
@@ -299,7 +303,10 @@ def _show_grid_search():
         selected_strategy = st.selectbox(
             "选择策略",
             strategy_names,
-            format_func=lambda x: f"{x} - {strategy_descs[x]}",
+            format_func=lambda x: strategy_label(
+                x, strategy_descs[x],
+                getattr(STRATEGY_REGISTRY[x], "style", "综合"),
+            ),
             key="gs_strategy"
         )
         strategy_cls = STRATEGY_REGISTRY[selected_strategy]
@@ -343,14 +350,17 @@ def _show_grid_search():
                 param_grid[pname] = [round(min_v + i * (max_v - min_v) / (steps - 1), 1) for i in range(steps)]
 
     # 股票选择
-    mode = st.radio("股票", ["单只股票", "多只股票(手动)"], horizontal=True, key="gs_mode")
-    if mode == "单只股票":
-        options = stock_df_data.apply(lambda r: f"{r['ts_code']} {r['name']}", axis=1).head(100).tolist()
-        selected = st.selectbox("选择股票", options, key="gs_stock")
-        universe = [selected.split(" ")[0]]
+    mode = st.radio("标的", ["单只标的", "多只标的(手动)"], horizontal=True, key="gs_mode")
+    if mode == "单只标的":
+        options = stock_df_data.apply(
+            lambda r: f"[{r['type']}] {r['ts_code']} {r['name']}", axis=1
+        ).head(100).tolist()
+        selected = st.selectbox("选择标的", options, key="gs_stock")
+        parts = selected.split(" ")
+        universe = [parts[1] if len(parts) >= 2 else parts[0]]
     else:
-        codes_input = st.text_area("股票代码（每行一个）", height=80, key="gs_codes",
-                                    placeholder="000001.SZ\n600519.SH")
+        codes_input = st.text_area("标的代码（每行一个）", height=80, key="gs_codes",
+                                    placeholder="000001.SZ\n600519.SH\n510300.SH")
         universe = [c.strip() for c in codes_input.strip().split("\n") if c.strip()]
 
     date_col1, date_col2 = st.columns(2)
@@ -467,10 +477,10 @@ def _draw_heatmap(results, param_grid, metric):
 
 def _show_multi_strategy():
     """多策略对比"""
-    stock_df = get_stock_list()
+    stock_df = get_instrument_list()
     stocks_with_data = get_stocks_with_data(min_days=60)
     if stock_df.empty:
-        st.warning("暂无股票数据")
+        st.warning("暂无标的数据")
         return
 
     st.subheader("📊 多策略权益曲线对比")
@@ -483,7 +493,10 @@ def _show_multi_strategy():
         "选择要对比的策略",
         strategy_names,
         default=strategy_names,
-        format_func=lambda x: f"{x} - {strategy_descs[x]}",
+        format_func=lambda x: strategy_label(
+                x, strategy_descs[x],
+                getattr(STRATEGY_REGISTRY[x], "style", "综合"),
+            ),
     )
 
     if not selected_strategies:
@@ -512,7 +525,7 @@ def _show_multi_strategy():
                 st.warning("自选股列表为空，请先添加自选股")
                 return
 
-            stock_df = get_stock_list()
+            stock_df = get_instrument_list()
             name_map = dict(zip(stock_df["ts_code"], stock_df["name"]))
 
             # 构建矩阵数据

@@ -17,6 +17,7 @@ class DoubleBottomStrategy(BaseStrategy):
     """
     name = "double_bottom"
     description = "双底形态识别（W底突破颈线买入）"
+    style = "震荡"
     param_schema = {
         "lookback": {"default": 30, "desc": "形态搜索周期"},
         "neck_break_vol_ratio": {"default": 1.3, "desc": "突破颈线放量倍数"},

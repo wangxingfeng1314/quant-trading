@@ -6,8 +6,8 @@ import pandas as pd
 from datetime import datetime, date
 
 from engine.scanner import scan_signals
-from data.storage import get_signals, get_stock_list, get_daily, get_stocks_with_data, get_watchlist
-from app.st_utils import chinese_dataframe, chinese_date_picker
+from data.storage import get_signals, get_instrument_list, get_daily, get_stocks_with_data, get_watchlist
+from app.st_utils import chinese_dataframe, chinese_date_picker, strategy_label
 from strategies import STRATEGY_REGISTRY
 from notifier.push import notify_signals
 
@@ -36,7 +36,10 @@ def _show_scan():
         strategy_names = list(STRATEGY_REGISTRY.keys())
         selected_strategies = st.multiselect(
             "选择策略", strategy_names, default=strategy_names,
-            format_func=lambda x: f"{x} - {STRATEGY_REGISTRY[x].description}",
+            format_func=lambda x: strategy_label(
+                x, STRATEGY_REGISTRY[x].description,
+                getattr(STRATEGY_REGISTRY[x], "style", "综合"),
+            ),
         )
     with col2:
         scan_date = chinese_date_picker("扫描日期", default_val=date.today(), key="scan_date")
@@ -115,7 +118,7 @@ def _show_scan():
 
 def _show_signal_table(signals):
     """显示信号表格"""
-    stock_df = get_stock_list()
+    stock_df = get_instrument_list()
     stock_map = {}
     if not stock_df.empty:
         stock_map = dict(zip(stock_df["ts_code"], stock_df["name"]))
@@ -124,8 +127,8 @@ def _show_signal_table(signals):
     for sig in signals:
         name = stock_map.get(sig.ts_code, "")
         rows.append({
-            "股票代码": sig.ts_code,
-            "股票名称": name,
+            "代码": sig.ts_code,
+            "名称": name,
             "策略": sig.strategy,
             "方向": sig.direction,
             "评分": sig.score,
@@ -201,7 +204,7 @@ def _show_signal_validation():
         st.info("无匹配的信号记录")
         return
 
-    stock_df = get_stock_list()
+    stock_df = get_instrument_list()
     name_map = {}
     if not stock_df.empty:
         name_map = dict(zip(stock_df["ts_code"], stock_df["name"]))
@@ -314,7 +317,7 @@ def _show_composite():
         st.info(f"最近{days}天无评分≥{min_score}的信号")
         return
 
-    stock_df = get_stock_list()
+    stock_df = get_instrument_list()
     name_map = dict(zip(stock_df["ts_code"], stock_df["name"]))
 
     # 按股票+方向聚合

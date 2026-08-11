@@ -31,14 +31,51 @@ logger = logging.getLogger(__name__)
 _scheduler: BackgroundScheduler | None = None
 
 
+def scan_and_notify():
+    """扫描自选股信号并推送通知（数据更新完成后调用）
+
+    供 APScheduler（update_data_job）与 Windows 计划任务
+    （run_scheduled_update.py）两个入口复用，保证闭环一致。
+
+    流程:
+      1. 扫描自选股信号（写入数据库）
+      2. 有信号则推送信号通知
+      3. 推送持仓盈亏日报
+    """
+    from data.storage import get_watchlist
+    from engine.scanner import scan_signals
+    from notifier.push import notify_signals, notify_position_summary
+
+    # ---------- 扫描自选股信号 ----------
+    watchlist = get_watchlist()
+    if not watchlist.empty:
+        stocks = watchlist["ts_code"].tolist()
+        logger.info(f"开始扫描 {len(stocks)} 只自选股信号...")
+        signals = scan_signals(universe=stocks, save=True)
+        logger.info(f"信号扫描完成：共 {len(signals)} 条信号")
+
+        # ---------- 推送信号通知 ----------
+        if signals:
+            notify_signals(signals)
+            logger.info(f"已推送 {len(signals)} 条信号通知")
+    else:
+        logger.info("自选股为空，跳过信号扫描")
+
+    # ---------- 推送持仓盈亏日报 ----------
+    pushed = notify_position_summary()
+    if pushed:
+        logger.info("持仓盈亏日报已推送")
+    else:
+        logger.info("本次未推送持仓日报（无持仓或推送失败）")
+
+
 def update_data_job():
     """执行数据更新任务（由 APScheduler 定时触发）
 
     完整流程:
       1. 尝试获取更新锁（防与 Windows 计划任务冲突）
       2. 增量更新数据（日线 + 指数）
-      3. 扫描自选股信号
-      4. 推送信号通知到配置的通道
+      3. 扫描自选股信号 + 推送通知（复用 scan_and_notify）
     """
     logger.info("=" * 50)
     logger.info("定时任务触发：开始增量更新数据...")
@@ -47,33 +84,15 @@ def update_data_job():
     try:
         # 延迟导入，避免循环依赖
         from scripts.init_data import run_update
-        from data.storage import update_lock, get_watchlist
-        from engine.scanner import scan_signals
-        from notifier.push import notify_signals, notify_position_summary
+        from data.storage import update_lock
 
         with update_lock(timeout=300):
             # ---------- Step 1: 更新数据 ----------
             run_update(days=5, watchlist=True)
             logger.info("定时任务完成：数据更新成功")
 
-            # ---------- Step 2: 扫描自选股信号 ----------
-            watchlist = get_watchlist()
-            if not watchlist.empty:
-                stocks = watchlist["ts_code"].tolist()
-                logger.info(f"开始扫描 {len(stocks)} 只自选股信号...")
-                signals = scan_signals(universe=stocks, save=True)
-                logger.info(f"信号扫描完成：共 {len(signals)} 条信号")
-
-                # ---------- Step 3: 推送通知 ----------
-                if signals:
-                    notify_signals(signals)
-                    logger.info(f"已推送 {len(signals)} 条信号通知")
-            else:
-                logger.info("自选股为空，跳过信号扫描")
-
-            # ---------- Step 4: 推送持仓盈亏日报 ----------
-            notify_position_summary()
-            logger.info("持仓盈亏日报已推送")
+            # ---------- Step 2: 扫描信号 + 推送通知 ----------
+            scan_and_notify()
 
     except Exception as e:
         logger.error(f"定时任务失败: {e}", exc_info=True)

@@ -10,9 +10,13 @@ class BaseStrategy(ABC):
     子类必须实现:
         - name: 类属性，策略名称
         - on_bar(): 每个交易日调用，返回信号列表
+
+    可选类属性:
+        - style: 策略风格分类（短线/震荡/中长线/综合），用于页面分组
     """
     name: str = "base"
     description: str = ""
+    style: str = "综合"  # 策略风格: 短线 / 震荡 / 中长线 / 综合
     param_schema: dict = {}  # {参数名: {'default': 默认值, 'desc': '说明'}}
 
     @abstractmethod

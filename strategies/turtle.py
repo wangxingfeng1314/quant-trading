@@ -13,6 +13,7 @@ class TurtleStrategy(BaseStrategy):
     """
     name = "turtle"
     description = "海龟突破策略（突破N日高点买、跌破N日低点卖）"
+    style = "中长线"
     param_schema = {
         "entry_period": {"default": 20, "desc": "入场突破周期"},
         "exit_period": {"default": 10, "desc": "出场突破周期"},

@@ -1,11 +1,11 @@
 """数据获取 - 多数据源级联兜底
 
 本模块负责从多个数据源获取A股数据，按优先级依次尝试：
-  AKShare(主力) → Tushare Pro(备用) → Baostock(最后兜底)
+  AKShare(主力) → TickFlow(备用) → Tushare Pro(备用) → Baostock(最后兜底)
 所有数据源统一输出「前复权」价格，保证回测一致性。
 
 优先级策略:
-  日线数据:   AKShare(前复权,免费) → Tushare(未复权+复权因子) → Baostock(前复权,免费)
+  日线数据:   AKShare(前复权,免费) → TickFlow(前复权,需Key) → Tushare(未复权+复权因子) → Baostock(前复权,免费)
   股票列表:   Tushare(含行业) → AKShare(无行业) → Baostock(无行业)
   指数成分股: AKShare → Baostock → Tushare
 """
@@ -161,13 +161,13 @@ class _TokenBucket:
 # ============================================================
 # 股票列表获取（含多源级联）
 #   fetch_stock_list() 是外部入口
-#   _fetch_stock_list_akshare()   / _fetch_stock_list_baostock() 是内部实现
+#   _fetch_stock_list_tickflow() / _fetch_stock_list_akshare() / _fetch_stock_list_baostock() 是内部实现
 # ============================================================
 
 def fetch_stock_list() -> pd.DataFrame:
     """获取A股股票列表，多源级联兜底
 
-    优先级: Tushare(含行业) → AKShare(无行业) → Baostock(无行业)
+    优先级: Tushare(含行业) → TickFlow(含上市日期) → AKShare(无行业) → Baostock(无行业)
     统一返回列: ts_code, symbol, name, market, list_date, industry, is_st, delist_date
     """
     # ---------- 方案1: Tushare ----------
@@ -188,13 +188,19 @@ def fetch_stock_list() -> pd.DataFrame:
     except Exception as e:                          # 失败则降级到下一个方案
         logger.warning(f"Tushare获取股票列表失败: {e}")
 
-    # ---------- 方案2: AKShare ----------
+    # ---------- 方案2: TickFlow ----------
+    # 优势: 含上市日期，无需Token，需 API Key
+    df = _fetch_stock_list_tickflow()
+    if not df.empty:
+        return df
+
+    # ---------- 方案3: AKShare ----------
     # 优势: 免费无需Token，但无行业信息
     df = _fetch_stock_list_akshare()
     if not df.empty:
         return df
 
-    # ---------- 方案3: Baostock ----------
+    # ---------- 方案4: Baostock ----------
     # 兜底方案，完全免费无限频
     df = _fetch_stock_list_baostock()
     if not df.empty:
@@ -203,6 +209,59 @@ def fetch_stock_list() -> pd.DataFrame:
     # 所有方案均失败
     logger.error("所有数据源获取股票列表均失败")
     return pd.DataFrame()  # 返回空DataFrame
+
+
+def _fetch_stock_list_tickflow() -> pd.DataFrame:
+    """TickFlow获取A股股票列表（含上市日期，无行业）
+
+    通过交易所标的列表接口按 SH/SZ/BJ 三个交易所分页获取，
+    仅保留 type=stock（过滤 ETF/债券/指数等）。
+    """
+    from core.config import TICKFLOW_API_KEY, TICKFLOW_BASE_URL
+
+    # 未配置 API Key 则跳过此数据源
+    if not TICKFLOW_API_KEY or TICKFLOW_API_KEY == "your_key_here":
+        return pd.DataFrame()
+
+    try:
+        all_rows = []
+        # 沪深京三个交易所的股票
+        for exchange in ("SH", "SZ", "BJ"):
+            url = f"{TICKFLOW_BASE_URL.rstrip('/')}/v1/exchanges/{exchange}/instruments"
+            resp = requests.get(
+                url,
+                params={"type": "stock"},
+                headers={"x-api-key": TICKFLOW_API_KEY},
+                timeout=15,
+            )
+            resp.raise_for_status()                 # 非 2xx 抛异常（含 429 限流）
+            data = resp.json().get("data") or []    # 标的列表
+            all_rows.extend(data)
+
+        if not all_rows:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(all_rows)                 # 全市场标的元数据
+
+        # ---------- 字段映射：TickFlow → 系统标准列 ----------
+        # ext 为市场扩展字段，含 listing_date（上市日期），可能为 None
+        df["list_date"] = df["ext"].apply(
+            lambda x: (x or {}).get("listing_date") or ""
+        )
+        df["ts_code"] = df["symbol"]                # "600000.SH"
+        df["symbol"] = df["code"]                   # "600000"
+        df["market"] = df["exchange"]               # "SH"/"SZ"/"BJ"
+        df["name"] = df["name"].fillna("")          # 名称可能缺失
+        df["industry"] = ""                         # TickFlow 不提供行业
+        df["is_st"] = df["name"].str.contains(r"ST|\*ST", na=False).astype(int)
+        df["delist_date"] = ""
+
+        logger.info(f"股票列表: TickFlow ✓ ({len(df)}只)")
+        return df[["ts_code", "symbol", "name", "market", "list_date",
+                    "industry", "is_st", "delist_date"]]
+    except Exception as e:
+        logger.warning(f"TickFlow获取股票列表失败: {e}")
+        return pd.DataFrame()
 
 
 def _fetch_stock_list_akshare() -> pd.DataFrame:
@@ -262,6 +321,101 @@ def _fetch_stock_list_baostock() -> pd.DataFrame:
 
 
 # ============================================================
+# ETF 列表获取（TickFlow 数据源）
+#   ETF 日线复用 _fetch_daily_tickflow（symbol 格式一致，无需转换）
+# ============================================================
+
+def fetch_etf_list() -> pd.DataFrame:
+    """获取 ETF 列表（从 TickFlow 拉取 SH/SZ/BJ 三市 ETF）
+
+    返回列: ts_code, symbol, name, market, list_date
+    与股票列表列结构对齐，便于页面统一展示。
+    """
+    from core.config import TICKFLOW_API_KEY, TICKFLOW_BASE_URL
+
+    # 未配置 API Key 则跳过
+    if not TICKFLOW_API_KEY or TICKFLOW_API_KEY == "your_key_here":
+        logger.warning("未配置 TICKFLOW_API_KEY，无法获取 ETF 列表")
+        return pd.DataFrame()
+
+    try:
+        all_rows = []
+        for exchange in ("SH", "SZ", "BJ"):
+            url = f"{TICKFLOW_BASE_URL.rstrip('/')}/v1/exchanges/{exchange}/instruments"
+            resp = requests.get(
+                url,
+                params={"type": "etf"},
+                headers={"x-api-key": TICKFLOW_API_KEY},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            data = resp.json().get("data") or []
+            all_rows.extend(data)
+
+        if not all_rows:
+            logger.warning("TickFlow ETF 列表为空")
+            return pd.DataFrame()
+
+        df = pd.DataFrame(all_rows)
+        df["list_date"] = df["ext"].apply(
+            lambda x: (x or {}).get("listing_date") or ""
+        )
+        df["ts_code"] = df["symbol"]
+        df["symbol"] = df["code"]
+        df["market"] = df["exchange"]
+        df["name"] = df["name"].fillna("")
+
+        logger.info(f"ETF列表: TickFlow ✓ ({len(df)}只)")
+        return df[["ts_code", "symbol", "name", "market", "list_date"]]
+    except Exception as e:
+        logger.warning(f"TickFlow获取ETF列表失败: {e}")
+        return pd.DataFrame()
+
+
+def fetch_etf_daily(ts_code: str, start_date: str = "",
+                    end_date: str = "") -> pd.DataFrame:
+    """获取单只 ETF 日线数据（TickFlow，前复权）
+
+    ETF 无需多源级联（AKShare/Tushare 股票接口不支持 ETF），
+    直接走 TickFlow klines，失败返回空。
+
+    参数:
+        ts_code:    ETF代码 e.g. "510300.SH"
+        start_date: 起始日期 "YYYYMMDD"（空=默认数据起始日）
+        end_date:   结束日期 "YYYYMMDD"（空=今天）
+
+    返回:
+        DAILY_COLUMNS 列结构的 DataFrame
+    """
+    from datetime import datetime
+    if not start_date:
+        from core.config import DATA_START_DATE
+        start_date = DATA_START_DATE
+    if not end_date:
+        end_date = datetime.now().strftime("%Y%m%d")
+    return _fetch_daily_tickflow(ts_code, start_date, end_date)
+
+
+def fetch_instrument_daily(ts_code: str, start_date: str,
+                           end_date: str) -> pd.DataFrame:
+    """按标类型拉取日线：ETF 走 TickFlow，股票走多源级联
+
+    参数:
+        ts_code:    标的代码 e.g. "510300.SH"(ETF) 或 "000001.SZ"(股票)
+        start_date: 起始日期 "YYYYMMDD"
+        end_date:   结束日期 "YYYYMMDD"
+
+    返回:
+        DAILY_COLUMNS 列结构的 DataFrame
+    """
+    from data.storage import get_etf_list
+    etf_df = get_etf_list()
+    if not etf_df.empty and ts_code in set(etf_df["ts_code"]):
+        return fetch_etf_daily(ts_code, start_date, end_date)
+    return fetch_daily(ts_code, start_date, end_date)
+
+
+# ============================================================
 # 日线数据获取核心（含三源级联）
 #   fetch_daily()                    — 外部统一入口
 #   _fetch_daily_akshare()           — 主力数据源
@@ -282,13 +436,19 @@ def fetch_daily(ts_code: str, start_date: str, end_date: str) -> pd.DataFrame:
                         volume, amount, pct_chg, turnover, adj_factor
 
     优先级:
-        AKShare(前复权) → Tushare(未复权+复权因子) → Baostock(前复权)
+        TickFlow(前复权) → AKShare(前复权) → Tushare(未复权+复权因子) → Baostock(前复权)
 
     熔断保护:
         - 当 AKShare 连续失败 ≥20 次时自动熔断 300 秒
         - 避免 API 故障时对所有股票无意义重试
     """
-    # ---------- 方案1: AKShare（主力数据源）----------
+    # ---------- 方案1: TickFlow（主力数据源）----------
+    # 优势: 稳定易用的 RESTful API，直接返回前复权，需 API Key
+    df = _fetch_daily_tickflow(ts_code, start_date, end_date)
+    if not df.empty:
+        return df
+
+    # ---------- 方案2: AKShare（备用数据源）----------
     # 优势: 免费、直接返回前复权、数据更新及时
     if not _is_akshare_circuit_open():                   # 熔断未打开才尝试AKShare
         df = _fetch_daily_akshare(ts_code, start_date, end_date)
@@ -299,21 +459,21 @@ def fetch_daily(ts_code: str, start_date: str, end_date: str) -> pd.DataFrame:
     else:
         logger.debug(f"{ts_code} AKShare 已熔断，跳过")
 
-    # ---------- 方案2: Tushare（备用数据源）----------
+    # ---------- 方案3: Tushare（备用数据源）----------
     # 优势: 数据质量高，但需要Token且有频率限制
     # 注意: Tushare返回未复权数据，需要额外获取复权因子手动计算前复权
     df = _fetch_daily_tushare(ts_code, start_date, end_date)
     if not df.empty:
         return df
 
-    # ---------- 方案3: Baostock（最后兜底）----------
+    # ---------- 方案4: Baostock（最后兜底）----------
     # 优势: 完全免费，无限频，但数据更新可能慢半天
     df = _fetch_daily_baostock(ts_code, start_date, end_date)
     if not df.empty:
         return df
 
     # 所有数据源均失败
-    logger.warning(f"{ts_code} 所有数据源均失败 (AKShare→Tushare→Baostock)")
+    logger.warning(f"{ts_code} 所有数据源均失败 (TickFlow→AKShare→Tushare→Baostock)")
     return pd.DataFrame()
 
 
@@ -462,6 +622,99 @@ def _fetch_daily_tushare(ts_code: str, start_date: str,
         except Exception as e:
             logger.debug(f"{ts_code} Tushare第{attempt}次失败: {e}")
             if attempt < MAX_TUSHARE_RETRIES:
+                continue
+            return pd.DataFrame()
+    return pd.DataFrame()
+
+
+# ============================================================
+# TickFlow 数据源（备用，需 API Key）
+#   官方文档: https://docs.tickflow.org
+#   RESTful API: https://api.tickflow.org/v1/klines
+#   鉴权: 请求头 x-api-key
+#   返回: 紧凑列式数据（毫秒时间戳 + OHLCV + amount）
+# ============================================================
+
+def _fetch_daily_tickflow(ts_code: str, start_date: str,
+                          end_date: str) -> pd.DataFrame:
+    """TickFlow获取日线数据（前复权）- 备用数据源
+
+    TickFlow 是稳定易用的行情数据服务，支持 A股/ETF/美股/港股。
+    通过 x-api-key 请求头鉴权，period=1d + adjust=forward 返回前复权。
+
+    注意：
+      - symbol 格式与系统 ts_code 一致（"600519.SH"），无需转换
+      - 时间参数需毫秒时间戳（Asia/Shanghai 时区）
+      - 已前复权，adj_factor 置 1.0
+      - 不返回换手率，置 0.0（与 Tushare 一致）
+      - 超限流返回 429，按异常重试处理
+    """
+    from core.config import TICKFLOW_API_KEY, TICKFLOW_BASE_URL
+
+    # 未配置 API Key 则跳过此数据源
+    if not TICKFLOW_API_KEY or TICKFLOW_API_KEY == "your_key_here":
+        return pd.DataFrame()
+
+    MAX_TICKFLOW_RETRIES = 2
+    for attempt in range(1, MAX_TICKFLOW_RETRIES + 1):
+        try:
+            if attempt > 1:
+                wait = 1.0 + random.uniform(0, 1)
+                logger.debug(f"{ts_code} TickFlow 第{attempt}次重试，等待{wait:.1f}s")
+                time.sleep(wait)
+
+            # ---------- 日期转毫秒时间戳 ----------
+            # 系统日期 "20250101" → 毫秒（Asia/Shanghai UTC+8）
+            from datetime import datetime, timezone, timedelta
+            tz = timezone(timedelta(hours=8))                      # Asia/Shanghai
+            start_ms = int(datetime.strptime(start_date, "%Y%m%d").replace(
+                tzinfo=tz).timestamp() * 1000)                     # 起始日 00:00:00
+            end_ms = int((datetime.strptime(end_date, "%Y%m%d")
+                          + timedelta(days=1)).replace(
+                              tzinfo=tz).timestamp() * 1000) - 1   # 结束日 23:59:59.999
+
+            # ---------- 调用 TickFlow API ----------
+            url = f"{TICKFLOW_BASE_URL.rstrip('/')}/v1/klines"
+            resp = requests.get(
+                url,
+                params={
+                    "symbol": ts_code,          # 与系统 ts_code 格式一致
+                    "period": "1d",             # 日线
+                    "start_time": start_ms,
+                    "end_time": end_ms,
+                    "adjust": "forward",        # 前复权
+                },
+                headers={"x-api-key": TICKFLOW_API_KEY},
+                timeout=15,
+            )
+            resp.raise_for_status()             # 非 2xx 抛异常（含 429 限流）
+
+            payload = resp.json()
+            data = payload.get("data") or {}
+            ts_list = data.get("timestamp") or []
+            if not ts_list:
+                if attempt < MAX_TICKFLOW_RETRIES:
+                    continue                    # 偶发空数据则重试
+                return pd.DataFrame()
+
+            # ---------- 列式数据 → DataFrame ----------
+            df = pd.DataFrame(data)
+            df["trade_date"] = pd.to_datetime(
+                df["timestamp"], unit="ms", utc=True
+            ).dt.tz_convert("Asia/Shanghai").dt.strftime("%Y%m%d")  # 毫秒→YYYYMMDD
+
+            # ---------- 补充系统字段 ----------
+            df["ts_code"] = ts_code                                  # 标记股票代码
+            df["pct_chg"] = (df["close"].pct_change() * 100).fillna(0.0)  # 计算涨跌幅
+            df["turnover"] = 0.0                                     # TickFlow 无换手率
+            df["adj_factor"] = 1.0                                   # 已前复权
+
+            logger.info(f"{ts_code} TickFlow ✓ ({len(df)}条)")
+            return df[DAILY_COLUMNS].sort_values("trade_date").reset_index(drop=True)
+
+        except Exception as e:
+            logger.debug(f"{ts_code} TickFlow第{attempt}次失败: {e}")
+            if attempt < MAX_TICKFLOW_RETRIES:
                 continue
             return pd.DataFrame()
     return pd.DataFrame()
@@ -734,9 +987,86 @@ INDEX_CODES = {
 }
 
 
+def _fetch_index_daily_tickflow(index_code: str, start_date: str = "",
+                                end_date: str = "") -> pd.DataFrame:
+    """TickFlow获取指数日线数据（主力数据源）
+
+    TickFlow 的 klines 接口同样支持指数（如 "000001.SH"），
+    symbol 格式与系统 index_code 完全一致，无需转换。
+    指数无除权概念，adjust 用 none。
+    """
+    from core.config import TICKFLOW_API_KEY, TICKFLOW_BASE_URL
+
+    # 未配置 API Key 则跳过此数据源
+    if not TICKFLOW_API_KEY or TICKFLOW_API_KEY == "your_key_here":
+        return pd.DataFrame()
+
+    try:
+        # ---------- 日期转毫秒时间戳 ----------
+        # start_date 为空时省略（返回全部历史），需用 count 覆盖
+        from datetime import datetime, timezone, timedelta
+        tz = timezone(timedelta(hours=8))                      # Asia/Shanghai
+        params = {
+            "symbol": index_code,        # 与系统指数代码一致: "000001.SH"
+            "period": "1d",              # 日线
+            "count": 10000,              # 最大10000，覆盖全部历史
+            "adjust": "none",            # 指数无需复权
+        }
+        if start_date:
+            params["start_time"] = int(datetime.strptime(
+                start_date, "%Y%m%d").replace(tzinfo=tz).timestamp() * 1000)
+        if end_date:
+            params["end_time"] = int((datetime.strptime(
+                end_date, "%Y%m%d") + timedelta(days=1)).replace(
+                    tzinfo=tz).timestamp() * 1000) - 1
+
+        # ---------- 调用 TickFlow API ----------
+        url = f"{TICKFLOW_BASE_URL.rstrip('/')}/v1/klines"
+        resp = requests.get(
+            url,
+            params=params,
+            headers={"x-api-key": TICKFLOW_API_KEY},
+            timeout=15,
+        )
+        resp.raise_for_status()          # 非 2xx 抛异常（含 429 限流）
+
+        data = resp.json().get("data") or {}
+        ts_list = data.get("timestamp") or []
+        if not ts_list:
+            return pd.DataFrame()
+
+        # ---------- 列式数据 → DataFrame ----------
+        df = pd.DataFrame(data)
+        df["trade_date"] = pd.to_datetime(
+            df["timestamp"], unit="ms", utc=True
+        ).dt.tz_convert("Asia/Shanghai").dt.strftime("%Y%m%d")  # 毫秒→YYYYMMDD
+        df["ts_code"] = index_code                           # 标记指数代码
+        df["pct_chg"] = (df["close"].pct_change() * 100).fillna(0.0)  # 计算涨跌幅
+
+        # 按标准列序整理
+        cols = ["ts_code", "trade_date", "open", "high", "low", "close",
+                "volume", "pct_chg"]
+        df = df[cols].sort_values("trade_date").reset_index(drop=True)
+
+        # 按日期范围过滤（服务端已过滤，此处兜底）
+        if start_date:
+            df = df[df["trade_date"] >= start_date]
+        if end_date:
+            df = df[df["trade_date"] <= end_date]
+
+        logger.info(f"指数 {index_code} TickFlow ✓ ({len(df)}条)")
+        return df
+    except Exception as e:
+        logger.debug(f"指数 {index_code} TickFlow失败: {e}")
+        return pd.DataFrame()
+
+
 def fetch_index_daily(index_code: str, start_date: str = "",
                       end_date: str = "") -> pd.DataFrame:
-    """获取大盘指数日线数据（从 AKShare 实时拉取），内置重试
+    """获取大盘指数日线数据，多源级联
+
+    优先级: TickFlow → AKShare
+    内置重试（AKShare 路径保留 2 次重试）。
 
     参数:
         index_code: 指数代码，如 "000001.SH"
@@ -746,6 +1076,12 @@ def fetch_index_daily(index_code: str, start_date: str = "",
     返回:
         DataFrame 列: ts_code, trade_date, open, high, low, close, volume, pct_chg
     """
+    # ---------- 方案1: TickFlow（主力数据源）----------
+    df = _fetch_index_daily_tickflow(index_code, start_date, end_date)
+    if not df.empty:
+        return df
+
+    # ---------- 方案2: AKShare（备用数据源）----------
     MAX_INDEX_RETRIES = 2
     for attempt in range(1, MAX_INDEX_RETRIES + 1):
         try:

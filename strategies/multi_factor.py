@@ -18,6 +18,7 @@ class MultiFactorStrategy(BaseStrategy):
     """
     name = "multi_factor"
     description = "多因子综合评分（均线+MACD+RSI+量能+布林带）"
+    style = "综合"
     param_schema = {
         "buy_threshold": {"default": 3.0, "desc": "买入阈值（总分5分）"},
         "sell_threshold": {"default": -3.0, "desc": "卖出阈值（总分-5分）"},
