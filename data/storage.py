@@ -190,13 +190,20 @@ def _run_migrations(conn):
             ALTER TABLE backtest_result ADD COLUMN calmar_ratio REAL;
             ALTER TABLE backtest_result ADD COLUMN sell_count INTEGER;
         """),
+        # v3: 为 backtest_trade 表添加 context_snapshot 列（决策与风控快照）
+        (3, """
+            ALTER TABLE backtest_trade ADD COLUMN context_snapshot TEXT;
+        """),
     ]
 
     for version, sql in MIGRATIONS:
         if current < version:
             if sql.strip():
-                conn.executescript(sql)
-                logger.info(f"数据库迁移: v{current} -> v{version}")
+                try:
+                    conn.executescript(sql)
+                    logger.info(f"数据库迁移: v{current} -> v{version}")
+                except Exception as e:
+                    logger.warning(f"数据库迁移警告 (v{version}): {e}")
             _set_db_version(conn, version)
             current = version
 
@@ -308,7 +315,8 @@ def init_db():
                 commission      REAL,              -- 佣金
                 tax             REAL,              -- 税费
                 pnl             REAL,              -- 盈亏
-                holding_days    INTEGER            -- 持有天数
+                holding_days    INTEGER,           -- 持有天数
+                context_snapshot TEXT              -- 交易决策/风控上下文快照（JSON）
             );
             CREATE INDEX IF NOT EXISTS idx_bt_trade ON backtest_trade(backtest_id);  -- 按回测查交易
 
@@ -449,6 +457,22 @@ def get_etf_name(ts_code: str) -> str:
         return row[0] if row else ts_code
 
 
+def get_instrument_name(ts_code: str) -> str:
+    """根据代码查询标的中文名称（股票 + ETF 统一查询）
+
+    先查股票表，再查 ETF 表，都查不到则返回代码本身。
+
+    参数:
+        ts_code: 标的代码 e.g. "000001.SZ" / "510300.SH"
+    返回:
+        标的中文名称，如 "平安银行" / "沪深300ETF"
+    """
+    name = get_stock_name(ts_code)
+    if name != ts_code:
+        return name
+    return get_etf_name(ts_code)
+
+
 def get_instrument_list() -> pd.DataFrame:
     """获取可交易标的总列表（股票 + ETF，含 type 标记）
 
@@ -551,6 +575,68 @@ def get_daily(ts_code: str, start_date: str = "", end_date: str = "",
     if not df.empty:
         df["trade_date"] = df["trade_date"].astype(str)  # 确保日期为字符串
     return df
+
+
+def clear_daily(ts_code: str):
+    """清空单只标的的所有日线数据（用于除权送配异常时的全量重置）"""
+    with get_conn() as conn:
+        conn.execute("DELETE FROM daily_price WHERE ts_code = ?", (ts_code,))
+        logger.info(f"已清空标的 {ts_code} 的本地日线缓存")
+
+
+def check_split_dividend_anomaly(ts_code: str, new_df: pd.DataFrame) -> bool:
+    """检测增量日线数据是否与本地历史数据发生除权除息断层 (Tier 2 优化)
+
+    当股票分红送配导致前复权基准发生迁移时，增量数据的新价格会与库中历史价格脱节。
+    比对逻辑：比较增量数据的推算前收盘价与本地库中最新一根K线的收盘价，
+    若差异显著（>8%）且当日真实涨跌幅无法解释，则判定存在除权除息价格跳空。
+
+    Returns:
+        True: 检测到除权断层，建议清除旧数据全量重新抓取覆写
+        False: 数据连续平稳
+    """
+    if new_df is None or new_df.empty or "trade_date" not in new_df.columns:
+        return False
+
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT trade_date, close FROM daily_price WHERE ts_code = ? ORDER BY trade_date DESC LIMIT 1",
+            (ts_code,)
+        ).fetchone()
+
+    if not row:
+        return False
+
+    db_latest_date, db_latest_close = row
+    if not db_latest_close or db_latest_close <= 0:
+        return False
+
+    # 提取新数据中大于数据库最新日期的记录
+    incoming = new_df[new_df["trade_date"] > str(db_latest_date)].sort_values("trade_date")
+    if incoming.empty:
+        return False
+
+    first_row = incoming.iloc[0]
+    curr_close = float(first_row.get("close", 0))
+    pct_chg = float(first_row.get("pct_chg", 0)) if pd.notna(first_row.get("pct_chg")) else 0.0
+
+    if curr_close <= 0:
+        return False
+
+    # 根据收盘价和涨跌幅推导前一日理论收盘价
+    denom = 1 + pct_chg / 100.0
+    implied_prev_close = curr_close / denom if denom > 0.01 else curr_close
+
+    # 比对差异比率
+    ratio = db_latest_close / implied_prev_close
+    if abs(ratio - 1.0) > 0.08:
+        logger.warning(
+            f"[{ts_code}] 检测到除权除息跳空断层: 本地最新价={db_latest_close}, "
+            f"增量推导前收={implied_prev_close:.2f}, 差异比率={ratio:.3f}, 触发全量覆写保护"
+        )
+        return True
+
+    return False
 
 
 def batch_get_latest(codes: list, limit: int = 2) -> pd.DataFrame:
@@ -715,7 +801,7 @@ def save_backtest_result(result) -> int:
 
 
 def save_backtest_trades(backtest_id: int, trades: list):
-    """保存回测的交易明细（批量写入 executemany）
+    """保存回测的交易明细（批量写入 executemany，含决策快照）
 
     参数:
         backtest_id: 关联的回测结果 ID
@@ -725,15 +811,16 @@ def save_backtest_trades(backtest_id: int, trades: list):
         return
     rows = [
         (backtest_id, t.ts_code, t.direction, t.trade_date,
-         t.price, t.volume, t.commission, t.tax, t.pnl, t.holding_days)
+         t.price, t.volume, t.commission, t.tax, t.pnl, t.holding_days,
+         json.dumps(getattr(t, "context_snapshot", {}) or {}, ensure_ascii=False))
         for t in trades
     ]
     with get_conn() as conn:
         conn.executemany(
             """INSERT INTO backtest_trade
                (backtest_id, ts_code, direction, trade_date, price,
-                volume, commission, tax, pnl, holding_days)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                volume, commission, tax, pnl, holding_days, context_snapshot)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             rows
         )
 

@@ -6,7 +6,7 @@ import pandas as pd
 import numpy as np
 
 from data.storage import get_instrument_list, get_daily, get_stocks_with_data
-from app.st_utils import chinese_dataframe
+from app.st_utils import chinese_dataframe, cached_get_stocks_with_data, cached_instrument_list
 from data.indicators import apply_indicators
 
 
@@ -14,7 +14,7 @@ def show():
     st.title("🔍 选股因子筛选器")
     st.caption("按技术指标 + 行情因子筛选股票/ETF，快速定位符合条件的标的")
 
-    stock_df = get_instrument_list()
+    stock_df = cached_instrument_list()
     if stock_df.empty:
         st.warning("暂无标的（股票/ETF）数据")
         return
@@ -27,7 +27,7 @@ def show():
             col1, col2, col3, col4 = st.columns(4)
             with col1:
                 # 显示实际可扫描的标数量（只读提示）
-                stocks_with_data = get_stocks_with_data(min_days=60)
+                stocks_with_data = cached_get_stocks_with_data(min_days=60)
                 max_stocks = len(stocks_with_data)
                 st.caption(f"📊 本次可扫描: {max_stocks} 个标的")
                 ma_bullish = st.checkbox("均线多头排列 (MA5>MA20>MA60)", value=False)
@@ -63,7 +63,7 @@ def show():
 
     # 执行筛选
     # 只扫描有日线数据的股票（不再从全市场前N只硬编码）
-    codes_with_data = get_stocks_with_data(min_days=60)
+    codes_with_data = cached_get_stocks_with_data(min_days=60)
     if not codes_with_data:
         st.warning("暂无足够的行情数据（需至少60条日线）")
         return

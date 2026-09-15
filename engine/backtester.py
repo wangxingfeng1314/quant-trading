@@ -26,7 +26,11 @@ class Backtester:
 
     def __init__(self, strategy_cls, params: dict,
                  universe: list, start_date: str, end_date: str,
-                 initial_capital: float = 100000):
+                 initial_capital: float = 100000,
+                 execution_mode: str = "current_close",
+                 risk_manager = None,
+                 preloaded_data: dict = None,
+                 max_active_positions: int = 0):
         """
         Args:
             strategy_cls: 策略类（不是实例）
@@ -35,6 +39,10 @@ class Backtester:
             start_date: 回测开始日期 'YYYYMMDD'
             end_date: 回测结束日期 'YYYYMMDD'
             initial_capital: 初始资金
+            execution_mode: 撮合模式，"current_close"（当日收盘价撮合）或 "next_open"（次日开盘价撮合，更贴近真实实盘）
+            risk_manager: 可选的 RiskManager 风控拦截器实例
+            preloaded_data: 预先加载并计算好指标的数据字典 {ts_code: DataFrame}，用于网格搜索加速
+            max_active_positions: 最大并发持仓股票只数，0 表示不限制
         """
         self.strategy_cls = strategy_cls
         self.params = params
@@ -42,6 +50,10 @@ class Backtester:
         self.start_date = start_date
         self.end_date = end_date
         self.initial_capital = initial_capital
+        self.execution_mode = execution_mode
+        self.risk_manager = risk_manager
+        self.preloaded_data = preloaded_data
+        self.max_active_positions = max_active_positions
 
     def run(self, save: bool = True) -> BacktestResult:
         """执行回测
@@ -51,20 +63,26 @@ class Backtester:
         """
         import numpy as np
 
-        # 1. 加载并预处理所有股票数据
-        logger.info(f"加载数据: {len(self.universe)} 只股票, "
-                     f"{self.start_date} ~ {self.end_date}")
-
-        stock_data = {}  # {ts_code: DataFrame}
-        for ts_code in self.universe:
-            df = get_daily(ts_code, self.start_date, self.end_date)
-            if df.empty:
-                continue
-            df = clean_daily(df)
-            if df.empty:
-                continue
-            df = apply_indicators(df, ["ma", "macd", "rsi", "boll", "vol_ma"])
-            stock_data[ts_code] = df
+        # 1. 加载并预处理所有股票数据（若已传入 preloaded_data 则免重复 I/O）
+        if self.preloaded_data is not None and self.preloaded_data:
+            stock_data = {
+                ts_code: self.preloaded_data[ts_code]
+                for ts_code in self.universe
+                if ts_code in self.preloaded_data and not self.preloaded_data[ts_code].empty
+            }
+        else:
+            logger.info(f"加载数据: {len(self.universe)} 只股票, "
+                         f"{self.start_date} ~ {self.end_date}")
+            stock_data = {}  # {ts_code: DataFrame}
+            for ts_code in self.universe:
+                df = get_daily(ts_code, self.start_date, self.end_date)
+                if df.empty:
+                    continue
+                df = clean_daily(df)
+                if df.empty:
+                    continue
+                df = apply_indicators(df, ["ma", "macd", "rsi", "boll", "vol_ma", "kdj", "atr"])
+                stock_data[ts_code] = df
 
         if not stock_data:
             logger.error("没有可用数据")
@@ -99,8 +117,13 @@ class Backtester:
                 for i, row in df.iterrows()
             }
 
+        pending_signals = []
+
         # 4. 逐日迭代
         for date in trade_dates:
+            # 每日开盘前触发持仓日结（T+1结转）
+            portfolio.on_new_day(date)
+
             # 收集当日价格
             prices = {}
             data_slice = {}  # 传给策略的数据切片
@@ -108,43 +131,131 @@ class Backtester:
             for ts_code, df in stock_data.items():
                 if date in date_index[ts_code]:
                     idx = date_index[ts_code][date]
-                    prices[ts_code] = df.loc[idx, "close"]
+                    prices[ts_code] = df.iloc[idx]["close"]
                     # 零拷贝优化：传视图而非 copy()，策略内部按需读取
-                    # df.iloc[:idx+1] 返回视图，不复制数据
                     data_slice[ts_code] = df.iloc[:idx + 1]
 
             if not prices:
                 continue
 
-            # 记录权益
-            portfolio.record_equity(date, prices)
+            # next_open 模式：次日开盘时撮合前一交易日生成的 pending_signals
+            if self.execution_mode == "next_open" and pending_signals:
+                # 横截面排序：卖出优先，买入按 score 降序
+                pending_signals.sort(key=lambda s: (0 if s.direction == "SELL" else 1, -s.score))
+                for sig in pending_signals:
+                    ts_code = sig.ts_code
+                    if ts_code not in stock_data or date not in date_index[ts_code]:
+                        continue
+                    curr_idx = date_index[ts_code][date]
+                    df_stock = stock_data[ts_code]
+                    open_price = float(df_stock.iloc[curr_idx]["open"])
+                    prev_close = float(df_stock.iloc[curr_idx - 1]["close"]) if curr_idx > 0 else 0.0
+                    is_st = "ST" in ts_code
+                    is_cy = ts_code.startswith(("300", "301", "688"))
+                    snapshot = self._build_snapshot(sig, df_stock, curr_idx)
+
+                    if sig.direction == "BUY":
+                        # 最大持仓只数控制：若非已有持仓且已达上限，则跳过
+                        curr_pos = portfolio.get_position(ts_code)
+                        if self.max_active_positions > 0 and (curr_pos is None or curr_pos.is_empty):
+                            if portfolio.active_position_count >= self.max_active_positions:
+                                continue
+
+                        position_pct = BACKTEST_MIN_POSITION_PCT + sig.score * BACKTEST_POSITION_STEP
+                        budget = portfolio.cash * position_pct
+                        volume = int(budget / max(open_price, 1)) // 100 * 100
+                        if volume > 0:
+                            portfolio.buy(
+                                ts_code=ts_code,
+                                price=open_price,
+                                volume=volume,
+                                trade_date=date,
+                                prev_close=prev_close,
+                                is_st=is_st,
+                                is_cy=is_cy,
+                                context_snapshot=snapshot,
+                            )
+                    elif sig.direction == "SELL":
+                        pos = portfolio.get_position(ts_code)
+                        if pos and not pos.is_empty:
+                            sell_vol = pos.available_shares if pos.available_shares > 0 else pos.shares
+                            portfolio.sell(
+                                ts_code=ts_code,
+                                price=open_price,
+                                volume=sell_vol,
+                                trade_date=date,
+                                prev_close=prev_close,
+                                is_st=is_st,
+                                is_cy=is_cy,
+                                context_snapshot=snapshot,
+                            )
+                pending_signals = []
 
             # 策略产生信号
             signals = strategy.on_bar(date, data_slice, portfolio)
 
-            # 执行信号 - 按评分分配仓位
-            for sig in signals:
-                if sig.direction == "BUY":
-                    # 评分决定仓位比例：score=0 → min_pct, score=1 → min_pct+step
-                    position_pct = BACKTEST_MIN_POSITION_PCT + sig.score * BACKTEST_POSITION_STEP
-                    budget = portfolio.cash * position_pct
-                    volume = int(budget / max(sig.price_ref, 1)) // 100 * 100
-                    if volume > 0:
-                        portfolio.buy(
-                            ts_code=sig.ts_code,
-                            price=sig.price_ref,
-                            volume=volume,
-                            trade_date=date,
-                        )
-                elif sig.direction == "SELL":
-                    pos = portfolio.get_position(sig.ts_code)
-                    if pos and not pos.is_empty:
-                        portfolio.sell(
-                            ts_code=sig.ts_code,
-                            price=sig.price_ref,
-                            volume=pos.shares,
-                            trade_date=date,
-                        )
+            # 风控拦截器检查（止损/跟踪止盈/到期强制平仓）
+            if self.risk_manager is not None:
+                risk_signals = self.risk_manager.check_risks(date, portfolio, prices)
+                if risk_signals:
+                    risk_sell_codes = {s.ts_code for s in risk_signals}
+                    filtered_signals = [s for s in signals if s.ts_code not in risk_sell_codes]
+                    signals = risk_signals + filtered_signals
+
+            # 横截面优先级排序：卖出优先（释放资金），买入按 score 降序排列
+            signals.sort(key=lambda s: (0 if s.direction == "SELL" else 1, -s.score))
+
+            if self.execution_mode == "next_open":
+                pending_signals = signals
+            else:
+                # current_close 模式：当日收盘价撮合
+                for sig in signals:
+                    ts_code = sig.ts_code
+                    df_stock = stock_data.get(ts_code)
+                    curr_idx = date_index[ts_code][date] if (df_stock is not None and date in date_index.get(ts_code, {})) else 0
+                    prev_close = float(df_stock.iloc[curr_idx - 1]["close"]) if (df_stock is not None and curr_idx > 0) else 0.0
+                    is_st = "ST" in ts_code
+                    is_cy = ts_code.startswith(("300", "301", "688"))
+                    snapshot = self._build_snapshot(sig, df_stock, curr_idx)
+
+                    if sig.direction == "BUY":
+                        # 最大持仓只数控制
+                        curr_pos = portfolio.get_position(ts_code)
+                        if self.max_active_positions > 0 and (curr_pos is None or curr_pos.is_empty):
+                            if portfolio.active_position_count >= self.max_active_positions:
+                                continue
+
+                        position_pct = BACKTEST_MIN_POSITION_PCT + sig.score * BACKTEST_POSITION_STEP
+                        budget = portfolio.cash * position_pct
+                        volume = int(budget / max(sig.price_ref, 1)) // 100 * 100
+                        if volume > 0:
+                            portfolio.buy(
+                                ts_code=sig.ts_code,
+                                price=sig.price_ref,
+                                volume=volume,
+                                trade_date=date,
+                                prev_close=prev_close,
+                                is_st=is_st,
+                                is_cy=is_cy,
+                                context_snapshot=snapshot,
+                            )
+                    elif sig.direction == "SELL":
+                        pos = portfolio.get_position(sig.ts_code)
+                        if pos and not pos.is_empty:
+                            sell_vol = pos.available_shares if pos.available_shares > 0 else pos.shares
+                            portfolio.sell(
+                                ts_code=sig.ts_code,
+                                price=sig.price_ref,
+                                volume=sell_vol,
+                                trade_date=date,
+                                prev_close=prev_close,
+                                is_st=is_st,
+                                is_cy=is_cy,
+                                context_snapshot=snapshot,
+                            )
+
+            # 记录权益
+            portfolio.record_equity(date, prices)
 
         # 5. 最终权益记录
         if trade_dates:
@@ -194,31 +305,63 @@ class Backtester:
 
         return result
 
+    def _build_snapshot(self, sig, df_stock, curr_idx) -> dict:
+        """构建交易决策与风控执行的上下文快照"""
+        snap = {
+            "score": getattr(sig, "score", 0.0),
+            "reason": getattr(sig, "reason", ""),
+            "execution_mode": self.execution_mode,
+        }
+        if hasattr(sig, "context_snapshot") and sig.context_snapshot:
+            snap.update(sig.context_snapshot)
+        if df_stock is not None and curr_idx is not None and curr_idx < len(df_stock):
+            row = df_stock.iloc[curr_idx]
+            for col in ["close", "open", "high", "low", "ma5", "ma20", "ma60", "rsi14", "dif", "dea", "kdj_k", "atr14"]:
+                if col in row and pd.notna(row[col]):
+                    snap[col] = round(float(row[col]), 2)
+        return snap
+
+
+def preload_backtest_data(universe: list, start_date: str, end_date: str) -> dict:
+    """预加载行情并预计算常用指标，用于多组回测与网格搜索共享内存（消除重复 I/O）"""
+    data = {}
+    for ts_code in universe:
+        df = get_daily(ts_code, start_date, end_date)
+        if df.empty:
+            continue
+        df = clean_daily(df)
+        if df.empty:
+            continue
+        df = apply_indicators(df, ["ma", "macd", "rsi", "boll", "vol_ma", "kdj", "atr"])
+        data[ts_code] = df
+    return data
+
+
+def _execute_single_grid_combo(args):
+    """顶层并行网格搜索执行函数（支持 Windows 跨进程序列化）"""
+    strategy_cls, params, universe, start_date, end_date, initial_capital, preloaded_data = args
+    bt = Backtester(
+        strategy_cls=strategy_cls,
+        params=params,
+        universe=universe,
+        start_date=start_date,
+        end_date=end_date,
+        initial_capital=initial_capital,
+        preloaded_data=preloaded_data,
+    )
+    return bt.run(save=False)
+
 
 def grid_search(strategy_cls, universe: list, start_date: str, end_date: str,
                 initial_capital: float = 100000, param_grid: dict = None,
                 metric: str = "total_return", progress_callback: Callable = None) -> list:
-    """参数网格搜索
+    """参数网格搜索（带数据预热加速）
 
     遍历所有参数组合，运行回测并返回按指定指标排序的结果。
-
-    Args:
-        strategy_cls: 策略类
-        universe: 股票列表
-        start_date: 开始日期
-        end_date: 结束日期
-        initial_capital: 初始资金
-        param_grid: {参数名: [取值列表], ...}
-        metric: 排序指标，如 'total_return', 'sharpe_ratio', 'max_drawdown'
-        progress_callback: 进度回调函数(completed, total)
-
-    Returns:
-        [{'params': {...}, 'result': BacktestResult, 'metric_value': float}, ...]
     """
     if param_grid is None:
         param_grid = {}
 
-    # 生成所有参数组合
     param_names = list(param_grid.keys())
     param_values = list(param_grid.values())
     combinations = list(itertools.product(*param_values))
@@ -226,6 +369,9 @@ def grid_search(strategy_cls, universe: list, start_date: str, end_date: str,
 
     if total == 0:
         return []
+
+    # Tier 1 优化：在网格循环前单次预热加载数据与指标计算
+    preloaded = preload_backtest_data(universe, start_date, end_date)
 
     results = []
     for i, combo in enumerate(combinations):
@@ -238,13 +384,13 @@ def grid_search(strategy_cls, universe: list, start_date: str, end_date: str,
             start_date=start_date,
             end_date=end_date,
             initial_capital=initial_capital,
+            preloaded_data=preloaded,
         )
         result = bt.run(save=False)
 
-        # 提取排序指标值
         metric_value = getattr(result, metric, 0)
         if metric == "max_drawdown":
-            metric_value = -metric_value  # 回撤越小越好（负数转正数排序）
+            metric_value = -metric_value
 
         results.append({
             "params": params,
@@ -255,7 +401,6 @@ def grid_search(strategy_cls, universe: list, start_date: str, end_date: str,
         if progress_callback:
             progress_callback(i + 1, total)
 
-    # 按指标降序排列
     results.sort(key=lambda r: r["metric_value"], reverse=True)
     return results
 
@@ -264,17 +409,9 @@ def grid_search_parallel(strategy_cls, universe: list, start_date: str, end_date
                           initial_capital: float = 100000, param_grid: dict = None,
                           metric: str = "total_return", max_workers: int = None,
                           progress_callback: Callable = None) -> list:
-    """并行参数网格搜索（基于 ProcessPoolExecutor）
+    """并行参数网格搜索（基于 ProcessPoolExecutor + 数据预热加速）
 
-    与 grid_search() 功能相同，但利用多核 CPU 并行执行回测。
-    适用于参数组合较多（>10）的场景。
-
-    Args:
-        同 grid_search()
-        max_workers: 并行进程数（默认 = CPU 核心数）
-
-    Returns:
-        同 grid_search()
+    适用于参数组合较多（>10）的场景。利用多核 CPU 并行执行，并共享预加载数据。
     """
     if param_grid is None:
         param_grid = {}
@@ -287,24 +424,20 @@ def grid_search_parallel(strategy_cls, universe: list, start_date: str, end_date
     if total == 0:
         return []
 
-    # 对单个参数组合执行一次回测（作为并行任务单元）
-    def _run_single(combo):
+    # Tier 1 优化：主进程一次性预处理，子任务零重复 I/O
+    preloaded = preload_backtest_data(universe, start_date, end_date)
+
+    tasks = []
+    for combo in combinations:
         params = dict(zip(param_names, combo))
-        bt = Backtester(
-            strategy_cls=strategy_cls,
-            params=params,
-            universe=universe,
-            start_date=start_date,
-            end_date=end_date,
-            initial_capital=initial_capital,
-        )
-        return bt.run(save=False)
+        args = (strategy_cls, params, universe, start_date, end_date, initial_capital, preloaded)
+        tasks.append((combo, args))
 
     results = []
     completed = 0
     with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(_run_single, combo): combo
-                   for combo in combinations}
+        futures = {executor.submit(_execute_single_grid_combo, args): combo
+                   for combo, args in tasks}
 
         for future in concurrent.futures.as_completed(futures):
             combo = futures[future]

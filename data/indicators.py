@@ -152,20 +152,24 @@ def add_volume_ma(df: pd.DataFrame, periods: list = None) -> pd.DataFrame:
     if periods is None:
         periods = [5, 10, 20]
     df = df.copy()
-    for p in periods:
-        df[f"vol_ma{p}"] = df["volume"].rolling(window=p, min_periods=1).mean()
+    # 兼容 volume 和 vol 两种常见列名
+    vol_col = "volume" if "volume" in df.columns else ("vol" if "vol" in df.columns else None)
+    if vol_col is not None:
+        for p in periods:
+            df[f"vol_ma{p}"] = df[vol_col].rolling(window=p, min_periods=1).mean()
     return df
 
 
 def add_atr(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
-    """添加ATR (Average True Range) 平均真实波幅
+    """添加ATR (Average True Range) 平均真实波幅及 ATR%
 
     True Range = max(high-low, |high-prev_close|, |low-prev_close|)
     ATR = MA(TR, period)
+    ATR% = ATR / Close * 100
 
     参数:
         period: 计算周期，默认 14
-    添加列: atr14
+    添加列: atr14, atr_pct
     """
     df = df.copy()
     high = df["high"]
@@ -176,7 +180,9 @@ def add_atr(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
         (high - prev_close).abs(),                 # 最高到前收的绝对偏差
         (low - prev_close).abs()                   # 最低到前收的绝对偏差
     ], axis=1).max(axis=1)                         # 取三者的最大值
-    df[f"atr{period}"] = tr.rolling(window=period, min_periods=1).mean()
+    atr_series = tr.rolling(window=period, min_periods=1).mean()
+    df[f"atr{period}"] = atr_series
+    df["atr_pct"] = (atr_series / df["close"]) * 100
     return df
 
 

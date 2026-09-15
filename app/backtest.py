@@ -9,7 +9,10 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime, date
 
-from app.st_utils import chinese_dataframe, chinese_date_picker, strategy_label
+from app.st_utils import (
+    chinese_dataframe, chinese_date_picker, strategy_label,
+    cached_get_stocks_with_data, cached_instrument_list,
+)
 from strategies import STRATEGY_REGISTRY, list_strategies
 from engine.backtester import Backtester, grid_search
 from data.storage import (
@@ -37,8 +40,8 @@ def show():
 
 def _show_run_backtest():
     """运行回测（单次）"""
-    stock_df = get_instrument_list()
-    stocks_with_data = get_stocks_with_data(min_days=60)
+    stock_df = cached_instrument_list()
+    stocks_with_data = cached_get_stocks_with_data(min_days=60)
     if stock_df.empty:
         st.warning("暂无标的数据，请先运行初始化脚本")
         return
@@ -281,8 +284,8 @@ def _show_run_backtest():
 
 def _show_grid_search():
     """参数优化（网格搜索）"""
-    stock_df = get_instrument_list()
-    stocks_with_data = get_stocks_with_data(min_days=60)
+    stock_df = cached_instrument_list()
+    stocks_with_data = cached_get_stocks_with_data(min_days=60)
     if stock_df.empty:
         st.warning("暂无标的数据")
         return
@@ -480,8 +483,8 @@ def _draw_heatmap(results, param_grid, metric):
 
 def _show_multi_strategy():
     """多策略对比"""
-    stock_df = get_instrument_list()
-    stocks_with_data = get_stocks_with_data(min_days=60)
+    stock_df = cached_instrument_list()
+    stocks_with_data = cached_get_stocks_with_data(min_days=60)
     if stock_df.empty:
         st.warning("暂无标的数据")
         return

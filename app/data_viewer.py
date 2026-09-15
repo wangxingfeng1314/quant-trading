@@ -8,7 +8,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from data.storage import get_stock_list, get_daily, get_daily_count, get_stocks_with_data, get_instrument_list
-from app.st_utils import chinese_dataframe, chinese_date_input
+from app.st_utils import chinese_dataframe, chinese_date_input, cached_get_stocks_with_data, cached_instrument_list
 from data.indicators import apply_indicators
 from data.cleaner import clean_daily
 
@@ -252,7 +252,7 @@ def show():
     st.title("📈 数据浏览")
 
     # 加载股票 + ETF 合并列表
-    stock_df = get_instrument_list()
+    stock_df = cached_instrument_list()
     if stock_df.empty:
         st.warning("数据库中暂无标的（股票/ETF）数据，请先运行初始化脚本：")
         st.code("python scripts/init_data.py", language="bash")
@@ -273,7 +273,7 @@ def show():
                 filtered = stock_df[mask]
             else:
                 # 默认只显示有数据的标的（自选股优先）
-                codes_with_data = get_stocks_with_data(min_days=1)
+                codes_with_data = cached_get_stocks_with_data(min_days=1)
                 filtered = stock_df[stock_df["ts_code"].isin(codes_with_data)].head(50)
 
             if filtered.empty:

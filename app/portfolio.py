@@ -12,7 +12,7 @@ from data.storage import (get_watchlist, add_to_watchlist, remove_from_watchlist
 from data.fetcher import fetch_daily, fetch_instrument_daily
 from data.cleaner import clean_daily
 from core.config import DATA_START_DATE
-from app.st_utils import chinese_dataframe, chinese_date_picker
+from app.st_utils import chinese_dataframe, chinese_date_picker, cached_instrument_list
 from app.data_viewer import create_candlestick_chart
 from data.indicators import apply_indicators
 from strategies import STRATEGY_REGISTRY
@@ -36,7 +36,7 @@ def _show_watchlist():
     """自选股管理"""
     st.subheader("自选股列表")
 
-    stock_df = get_instrument_list()  # 股票 + ETF 合并列表
+    stock_df = cached_instrument_list()  # 股票 + ETF 合并列表（已缓存）
 
     # 添加自选股
     col1, col2 = st.columns([3, 1])

@@ -11,9 +11,10 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# 注入全局深色金融主题
-from app.theme import inject_theme_css
+# 注入全局深色金融主题与即时切页监听
+from app.theme import inject_theme_css, inject_page_transition_js
 inject_theme_css()
+inject_page_transition_js()
 
 # ============================================================
 # 登录认证（可选，通过 APP_AUTH_ENABLED 环境变量启用）
@@ -42,24 +43,30 @@ if APP_AUTH_ENABLED:
             st.caption("💡 默认密码: quant123（请在 .env 中设置 APP_AUTH_PASSWORD 修改）")
         st.stop()
 
-# 启动时确保数据库表结构是最新的（含迁移）
+# 启动时确保数据库表结构是最新的（进程单例，切页无需反复执行 DDL）
 from data.storage import init_db, get_daily_count, get_watchlist, check_db_integrity
-init_db()
+
+@st.cache_resource
+def _ensure_db_initialized():
+    init_db()
+    return True
+
+_ensure_db_initialized()
 
 # ------------------------------------------------------------
 # 缓存：减少每次切换页面的重跑开销（DB 概览 + 定时任务状态）
 # ------------------------------------------------------------
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=180)
 def _cached_db_overview():
     return get_daily_count(), len(get_watchlist()), check_db_integrity()
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=600)
 def _cached_schtasks_caption():
     import subprocess
     try:
         result = subprocess.run(
             ["schtasks", "/query", "/tn", "QuantTrading-DataUpdate", "/fo", "LIST", "/v"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, timeout=3,
         )
         if result.returncode == 0:
             for line in result.stdout.split("\n"):
@@ -89,23 +96,22 @@ page = st.sidebar.radio(
     "导航",
     ["🏠 首页看板", "📈 数据浏览", "🔬 回测中心", "📚 策略百科", "🔍 选股筛选", "📡 信号中心", "💼 持仓管理"],
     index=0,
+    key="main_nav_radio",
 )
 
 # ============================================================
-# 主区域：切换页面时先清空旧页面，再显示「加载中」，避免旧画面残留
-# page_slot 为 st.empty()，每次重跑复用同一占位 → 进入 container 即清空旧内容
-# （把主页面渲染提前到侧边栏状态计算之前，让旧画面尽早被清掉）
+# 主区域：由前端 JS 在 0ms 瞬间抹除上一个页面并拉起过渡遮罩，
+# Python 渲染完成后由观察器平滑渐入，避免旧画面残留
 # ============================================================
 page_slot = st.empty()
 with page_slot.container():
-    with st.spinner("⏳ 页面加载中..."):
-        try:
-            module = __import__(PAGES[page], fromlist=["show"])
-            module.show()
-        except Exception as e:
-            st.error(f"🚨 页面加载失败: {e}")
-            with st.expander("查看错误详情"):
-                st.code(traceback.format_exc())
+    try:
+        module = __import__(PAGES[page], fromlist=["show"])
+        module.show()
+    except Exception as e:
+        st.error(f"🚨 页面加载失败: {e}")
+        with st.expander("查看错误详情"):
+            st.code(traceback.format_exc())
 
 # ============================================================
 # 侧边栏其余状态（独立于主区域，主页面渲染后再填充）

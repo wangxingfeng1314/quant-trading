@@ -7,7 +7,10 @@ from datetime import datetime, date
 
 from engine.scanner import scan_signals
 from data.storage import get_signals, get_instrument_list, get_daily, get_stocks_with_data, get_watchlist
-from app.st_utils import chinese_dataframe, chinese_date_picker, strategy_label
+from app.st_utils import (
+    chinese_dataframe, chinese_date_picker, strategy_label,
+    cached_get_stocks_with_data, cached_instrument_list,
+)
 from strategies import STRATEGY_REGISTRY
 from notifier.push import notify_signals
 
@@ -46,7 +49,7 @@ def _show_scan():
         scan_date_str = scan_date
 
     # 股票范围
-    stocks_with_data = get_stocks_with_data(min_days=60)
+    stocks_with_data = cached_get_stocks_with_data(min_days=60)
     if not stocks_with_data:
         st.warning("暂无足够的行情数据（需至少60条日线）")
         return
@@ -110,7 +113,7 @@ def _show_scan():
         # 导出全部信号为 CSV
         if signals:
             export_rows = []
-            stock_df = get_instrument_list()
+            stock_df = cached_instrument_list()
             stock_map = dict(zip(stock_df["ts_code"], stock_df["name"])) if not stock_df.empty else {}
             for sig in signals:
                 export_rows.append({

@@ -7,16 +7,15 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 
 from data.storage import get_instrument_list, get_daily, get_watchlist, get_daily_count, get_signals, batch_get_latest, get_index_daily, get_stocks_with_data, get_latest_date, get_index_latest_date
-from app.st_utils import chinese_dataframe
+from app.st_utils import chinese_dataframe, cached_get_stocks_with_data, cached_check_data_freshness, cached_instrument_list
 from data.indicators import apply_indicators
-from data.fetcher import check_data_freshness
 
 
 def show():
     st.title("📊 A股量化交易系统")
 
-    # 数据时效提示
-    freshness = check_data_freshness()
+    # 数据时效提示（使用 UI 级缓存，避免高频全表扫描）
+    freshness = cached_check_data_freshness()
     latest_date = freshness.get("latest_date", "")
     if latest_date:
         today = datetime.now().strftime("%Y%m%d")
@@ -116,8 +115,9 @@ def _show_market_overview():
         st.info("暂无指数数据，请先运行数据初始化脚本")
 
 
+@st.cache_data(ttl=300)
 def _fetch_index_realtime(index_code: str) -> pd.DataFrame:
-    """从 AKShare 实时获取指数最新行情
+    """从 AKShare 实时获取指数最新行情（缓存 5 分钟）
 
     Args:
         index_code: '000001.SH'(上证), '399001.SZ'(深证), '399006.SZ'(创业板)
@@ -146,7 +146,7 @@ def _fetch_index_realtime(index_code: str) -> pd.DataFrame:
         # 计算涨跌幅
         df["pct_chg"] = df["close"].pct_change() * 100
         return df.sort_values("trade_date").reset_index(drop=True)
-    except Exception as e:
+    except Exception:
         return pd.DataFrame()
 
 
@@ -155,12 +155,12 @@ def _show_system_status():
     st.subheader("📊 数据健康监控")
 
     # ---------- 第一行：关键指标卡片 ----------
-    freshness = check_data_freshness()
+    freshness = cached_check_data_freshness()
     latest_date = freshness.get("latest_date", "")
     watchlist = get_watchlist()
     watchlist_count = len(watchlist)
-    daily_count = get_daily_count()
-    stocks_with_data = get_stocks_with_data()
+    daily_count = freshness.get("total_rows", get_daily_count())
+    stocks_with_data = cached_get_stocks_with_data(min_days=1)
     stocks_with_data_count = len(stocks_with_data)
     signals_count = len(get_signals(limit=100))
     idx_latest = get_index_latest_date()
@@ -305,21 +305,12 @@ def _show_system_status():
             )
 
 
-def _show_watchlist_snapshot():
-    """自选股快照"""
-    watchlist = get_watchlist()
-    if watchlist.empty:
-        st.info("暂无自选股，请前往「持仓管理」添加")
-        return
-
-    stock_df = get_instrument_list()
-    name_map = {}
-    if not stock_df.empty:
-        name_map = dict(zip(stock_df["ts_code"], stock_df["name"]))
-
+@st.cache_data(ttl=60)
+def _calc_watchlist_snapshot_rows(watchlist_tuples: tuple, name_tuples: tuple) -> list:
+    """缓存版自选股行情与趋势指标计算（缓存 1 分钟，大幅加速页面切换）"""
+    name_map = dict(name_tuples)
     rows = []
-    for _, wl_row in watchlist.iterrows():
-        ts_code = wl_row["ts_code"]
+    for ts_code, note in watchlist_tuples:
         df = get_daily(ts_code)
         if df.empty:
             continue
@@ -328,7 +319,7 @@ def _show_watchlist_snapshot():
         prev = df.iloc[-2] if len(df) > 1 else latest
         chg_pct = ((latest["close"] - prev["close"]) / prev["close"]) * 100 if prev["close"] else 0
 
-        # 计算MA20趋势
+        # 计算MA20趋势与RSI
         df_ind = apply_indicators(df.copy(), ["ma", "rsi"])
         ma20 = df_ind["ma20"].iloc[-1] if "ma20" in df_ind.columns else 0
         rsi = df_ind["rsi14"].iloc[-1] if "rsi14" in df_ind.columns else 50
@@ -349,9 +340,24 @@ def _show_watchlist_snapshot():
             "趋势": trend,
             "RSI": f"{rsi:.1f}",
             "MA20": f"¥{ma20:.2f}",
-            "备注": wl_row.get("note", ""),
+            "备注": note,
         })
+    return rows
 
+
+def _show_watchlist_snapshot():
+    """自选股快照"""
+    watchlist = get_watchlist()
+    if watchlist.empty:
+        st.info("暂无自选股，请前往「持仓管理」添加")
+        return
+
+    stock_df = cached_instrument_list()
+    name_tuples = tuple(zip(stock_df["ts_code"], stock_df["name"])) if not stock_df.empty else ()
+    notes = watchlist["note"].fillna("").tolist() if "note" in watchlist.columns else [""] * len(watchlist)
+    wl_tuples = tuple(zip(watchlist["ts_code"], notes))
+
+    rows = _calc_watchlist_snapshot_rows(wl_tuples, name_tuples)
     if rows:
         df = pd.DataFrame(rows)
         chinese_dataframe(df)
@@ -397,7 +403,7 @@ def _show_hot_stocks():
         st.info("暂无自选股，请前往「持仓管理」添加")
         return
 
-    stock_df = get_instrument_list()
+    stock_df = cached_instrument_list()
     name_map = {}
     if not stock_df.empty:
         name_map = dict(zip(stock_df["ts_code"], stock_df["name"]))

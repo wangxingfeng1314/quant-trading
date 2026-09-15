@@ -205,6 +205,10 @@ MAIN_EXTRA = """
         /* 按钮全宽 */
         .stButton > button { width: 100%; }
     }
+    /* ===== 页面即时平滑淡入淡出与遮罩过渡 ===== */
+    [data-testid="stMainBlockContainer"], section.main {
+        transition: opacity 0.15s ease;
+    }
 </style>
 """
 
@@ -213,6 +217,110 @@ def inject_theme_css():
     """注入全局主题 CSS（main.py 调用一次）"""
     st.markdown(SIDEBAR_EXTRA, unsafe_allow_html=True)
     st.markdown(MAIN_EXTRA, unsafe_allow_html=True)
+
+
+def inject_page_transition_js():
+    """注入前端即时切页监听（0ms 消除旧页面残留 + 绝不阻断任何点击）"""
+    import streamlit.components.v1 as components
+    js_code = """
+    <script>
+    (function() {
+        const pDoc = window.parent.document;
+        if (!pDoc) return;
+
+        // 创建全局加载遮罩（严格设置 pointer-events: none，绝不阻断任何点击）
+        let loader = pDoc.getElementById('instant-page-loader');
+        if (!loader) {
+            loader = pDoc.createElement('div');
+            loader.id = 'instant-page-loader';
+            loader.style.cssText = 'position:fixed;top:0;right:0;bottom:0;left:0;' +
+                'background:rgba(10,14,23,0.85);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);' +
+                'z-index:99999;display:none;align-items:center;justify-content:center;flex-direction:column;' +
+                'pointer-events:none !important;user-select:none;';
+            loader.innerHTML = `
+                <div style="background:#131c30;border:1px solid #1e2a44;border-top:3px solid #ef5350;border-radius:16px;padding:26px 42px;display:flex;flex-direction:column;align-items:center;gap:16px;box-shadow:0 12px 48px rgba(0,0,0,0.65);pointer-events:none;">
+                    <div style="width:44px;height:44px;border:3px solid rgba(239,83,80,0.15);border-top:3px solid #ef5350;border-right:3px solid #ffd54f;border-radius:50%;animation:instant-spin 0.8s linear infinite;"></div>
+                    <div id="instant-loader-title" style="color:#ffd54f;font-size:1.05rem;font-weight:600;letter-spacing:0.5px;font-family:-apple-system,BlinkMacSystemFont,sans-serif;">
+                        ⚡ 正在加载页面...
+                    </div>
+                    <div style="color:#8b98b8;font-size:0.85rem;font-family:-apple-system,BlinkMacSystemFont,sans-serif;">
+                        正在准备最新数据与视图组件，请稍候
+                    </div>
+                </div>
+                <style>
+                    @keyframes instant-spin {
+                        0% { transform: rotate(0deg); }
+                        100% { transform: rotate(360deg); }
+                    }
+                </style>
+            `;
+            pDoc.body.appendChild(loader);
+        }
+
+        function getMainContainer() {
+            return pDoc.querySelector('[data-testid="stMainBlockContainer"]') ||
+                   pDoc.querySelector('section.main') ||
+                   pDoc.querySelector('[data-testid="stMain"]');
+        }
+
+        let hideTimeout = null;
+
+        function triggerTransition(pageText) {
+            const main = getMainContainer();
+            if (main) {
+                main.style.opacity = '0';
+                main.style.transition = 'opacity 0.08s ease';
+            }
+            const titleEl = pDoc.getElementById('instant-loader-title');
+            if (titleEl) {
+                titleEl.innerText = '⚡ 正在切换至「' + (pageText || '新页面') + '」...';
+            }
+            if (loader) {
+                loader.style.display = 'flex';
+            }
+
+            // 安全兜底计时器（最多 5 秒自动隐藏，防止异常情况悬停）
+            if (hideTimeout) clearTimeout(hideTimeout);
+            hideTimeout = setTimeout(function() {
+                if (loader) loader.style.display = 'none';
+                if (main) main.style.opacity = '1';
+            }, 5000);
+        }
+
+        function setupListeners() {
+            const sidebar = pDoc.querySelector('section[data-testid="stSidebar"]');
+            if (!sidebar) return;
+
+            const radioGroup = sidebar.querySelector('div[role="radiogroup"]');
+            if (!radioGroup || radioGroup.dataset.changeBound) return;
+            radioGroup.dataset.changeBound = "true";
+
+            // 监听 change 事件：单选框值改变时触发过渡，绝不拦截 mousedown/mouseup，100% 原生响应
+            radioGroup.addEventListener('change', function(e) {
+                const label = e.target.closest('label');
+                const pageText = label ? label.innerText.trim() : '';
+                triggerTransition(pageText);
+            });
+        }
+
+        // 监听运行状态：新页面渲染完成后平滑淡入并隐藏遮罩
+        setInterval(function() {
+            setupListeners();
+            const statusWidget = pDoc.querySelector('[data-testid="stStatusWidget"]');
+            const main = getMainContainer();
+            if (!statusWidget && loader && loader.style.display !== 'none') {
+                loader.style.display = 'none';
+                if (main) {
+                    main.style.opacity = '1';
+                }
+            }
+        }, 60);
+
+        setupListeners();
+    })();
+    </script>
+    """
+    components.html(js_code, height=0)
 
 
 def card_html(title: str, content_html: str, accent: str = "#ef5350") -> str:
@@ -235,3 +343,4 @@ def updown_color(value: float) -> str:
     if value < 0:
         return COLOR_DOWN
     return "#dbe2ee"
+

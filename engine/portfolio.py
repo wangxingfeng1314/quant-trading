@@ -31,10 +31,16 @@ class Portfolio:
         """总权益 = 现金 + 持仓市值"""
         return round(self.cash + self.market_value(prices), 2)
 
+    @property
+    def active_position_count(self) -> int:
+        """当前有效持仓（shares > 0）的标的只数"""
+        return sum(1 for pos in self.positions.values() if not pos.is_empty)
+
     def buy(self, ts_code: str, price: float, volume: int,
             trade_date: str, prev_close: float = 0,
             is_st: bool = False, is_cy: bool = False,
-            slippage: bool = True) -> Optional[Trade]:
+            slippage: bool = True,
+            context_snapshot: dict = None) -> Optional[Trade]:
         """买入股票
 
         Returns:
@@ -77,14 +83,22 @@ class Portfolio:
             ts_code=ts_code, direction="BUY", trade_date=trade_date,
             price=price, volume=volume,
             commission=cost["commission"], tax=cost["tax"],
+            context_snapshot=context_snapshot or {},
         )
         self.trades.append(trade)
         return trade
 
+    def on_new_day(self, trade_date: str):
+        """进入新交易日，通知所有持仓更新可用份额"""
+        for pos in self.positions.values():
+            if not pos.is_empty:
+                pos.on_new_day(trade_date)
+
     def sell(self, ts_code: str, price: float, volume: int,
              trade_date: str, prev_close: float = 0,
              is_st: bool = False, is_cy: bool = False,
-             slippage: bool = True) -> Optional[Trade]:
+             slippage: bool = True,
+             context_snapshot: dict = None) -> Optional[Trade]:
         """卖出股票
 
         Returns:
@@ -95,7 +109,7 @@ class Portfolio:
             return None
 
         # T+1检查
-        if not pos.can_sell(trade_date):
+        if not pos.can_sell(trade_date, volume=1):
             return None
 
         # 滑点调整
@@ -106,8 +120,9 @@ class Portfolio:
         if prev_close > 0:
             price = adjust_price(price, prev_close, is_st, is_cy)
 
-        # 不能卖出超过持仓
-        volume = min(volume, pos.shares)
+        # 不能卖出超过可用持仓
+        max_sell = pos.available_shares if pos.available_shares > 0 else pos.shares
+        volume = min(volume, max_sell)
         if volume <= 0:
             return None
 
@@ -134,6 +149,7 @@ class Portfolio:
             price=price, volume=volume,
             commission=cost["commission"], tax=cost["tax"],
             pnl=realized_pnl, holding_days=holding_days,
+            context_snapshot=context_snapshot or {},
         )
         self.trades.append(trade)
         return trade

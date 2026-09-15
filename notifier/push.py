@@ -281,7 +281,24 @@ def notify_signals(signals, strategy_names: list = None):
     strategy_str = ", ".join(strategy_names) if strategy_names else "所有策略"
     today = datetime.now().strftime("%Y-%m-%d")
 
+    # 延迟导入，避免循环依赖；查询标的中文名称
+    from data.storage import get_instrument_name
+
+    def _label(sig) -> str:
+        """格式化标的名称为 '名称(代码)'"""
+        name = get_instrument_name(sig.ts_code)
+        return f"{name}({sig.ts_code})"
+
     title = f"📊 量化信号日报 - {today}"
+
+    # 获取基准资金与仓位参数
+    try:
+        from core.config import DEFAULT_CAPITAL, BACKTEST_MIN_POSITION_PCT, BACKTEST_POSITION_STEP
+        base_capital = float(DEFAULT_CAPITAL)
+    except Exception:
+        base_capital = 100000.0
+        BACKTEST_MIN_POSITION_PCT = 0.05
+        BACKTEST_POSITION_STEP = 0.15
 
     content = f"""## 📊 量化交易信号日报
 **日期**: {today}
@@ -290,25 +307,39 @@ def notify_signals(signals, strategy_names: list = None):
 
 ---
 
-### 🟢 买入信号 TOP5
-| 股票 | 评分 | 参考价 | 原因 |
-|------|------|--------|------|
+### 🟢 买入信号 TOP5（量化行动指引）
+| 股票 | 评分 | 参考价 | 建议股数 | 预估金额 | 建议止损 | 目标止盈 | 触发原因 |
+|------|------|--------|----------|----------|----------|----------|----------|
 """
 
     buy_signals = sorted([s for s in signals if s.direction == "BUY"],
                          key=lambda s: s.score, reverse=True)[:5]
     for sig in buy_signals:
-        content += f"| {sig.ts_code} | {sig.score:.2f} | ¥{sig.price_ref:.2f} | {sig.reason} |\n"
+        price = max(sig.price_ref, 0.01)
+        pos_pct = BACKTEST_MIN_POSITION_PCT + sig.score * BACKTEST_POSITION_STEP
+        budget = base_capital * pos_pct
+        shares = max(100, int(budget / price) // 100 * 100)
+        est_cost = shares * price
+        stop_loss = round(price * 0.95, 2)
+        take_profit = round(price * 1.10, 2)
+        content += f"| {_label(sig)} | {sig.score:.2f} | ¥{price:.2f} | {shares}股 | ¥{est_cost:,.0f} | ¥{stop_loss:.2f} (-5%) | ¥{take_profit:.2f} (+10%) | {sig.reason} |\n"
 
     content += """
 ### 🔴 卖出信号 TOP5
-| 股票 | 评分 | 参考价 | 原因 |
-|------|------|--------|------|
+| 股票 | 评分 | 参考价 | 操作建议 | 触发原因 |
+|------|------|--------|----------|----------|
 """
     sell_signals = sorted([s for s in signals if s.direction == "SELL"],
                           key=lambda s: s.score, reverse=True)[:5]
     for sig in sell_signals:
-        content += f"| {sig.ts_code} | {sig.score:.2f} | ¥{sig.price_ref:.2f} | {sig.reason} |\n"
+        content += f"| {_label(sig)} | {sig.score:.2f} | ¥{sig.price_ref:.2f} | 建议平仓/减半 | {sig.reason} |\n"
+
+    content += f"""
+---
+> 💡 **量化执行提示**：
+> 1. 建议股数与金额基于基准资金 **¥{base_capital:,.0f}** 计算，可根据自身实际账户等比缩放。
+> 2. 建议次日 9:25 集合竞价或开盘后分批择机成交；如遇跳空高开超 3% 不建议盲目追涨。
+"""
 
     send_notification(title, content)
 
@@ -344,7 +375,7 @@ def notify_position_summary() -> bool:
         True=已推送, False=跳过（无持仓或推送失败）
     """
     try:
-        from data.storage import get_positions, get_daily
+        from data.storage import get_positions, get_daily, get_instrument_name
 
         positions = get_positions()
         if not positions:
@@ -377,8 +408,9 @@ def notify_position_summary() -> bool:
             total_market += market_value
 
             icon = "🟢" if pnl >= 0 else "🔴"
+            name = get_instrument_name(ts_code)
             rows.append(
-                f"{icon} **{ts_code}** ({pos.get('note', '')})  "
+                f"{icon} **{name}** ({ts_code}{pos.get('note', '') and ' · ' + pos.get('note', '')})  "
                 f"成本¥{buy_price:.2f}→现¥{current_price:.2f}  "
                 f"**{pnl:+.0f}元 ({pnl_pct:+.1f}%)**"
             )

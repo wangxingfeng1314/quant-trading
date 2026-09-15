@@ -8,8 +8,9 @@ from app.st_utils import chinese_dataframe, strategy_style_badge
 from data.storage import get_conn
 
 
+@st.cache_data(ttl=180)
 def _get_strategy_stats() -> dict:
-    """从回测记录中统计各策略的历史表现"""
+    """从回测记录中统计各策略的历史表现（缓存 3 分钟）"""
     stats = {}
     with get_conn() as conn:
         for s in list_strategies():

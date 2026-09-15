@@ -121,7 +121,7 @@ def test_signal_fields():
     from core.models import Signal
     model_fields = {f.name for f in fields(Signal)}
     expected = {"ts_code", "trade_date", "strategy", "direction",
-                "score", "reason", "price_ref", "created_at"}
+                "score", "reason", "price_ref", "created_at", "context_snapshot"}
     assert model_fields == expected, f"Signal 字段不匹配: {model_fields ^ expected}"
 
 
@@ -143,7 +143,7 @@ def test_trade_fields():
     from core.models import Trade
     model_fields = {f.name for f in fields(Trade)}
     expected = {"ts_code", "direction", "trade_date", "price", "volume",
-                "commission", "tax", "pnl", "holding_days"}
+                "commission", "tax", "pnl", "holding_days", "context_snapshot"}
     assert model_fields == expected, f"Trade 字段不匹配: {model_fields ^ expected}"
 
 

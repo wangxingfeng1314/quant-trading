@@ -15,6 +15,7 @@ class Signal:
     reason: str = ""
     price_ref: float = 0.0
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
+    context_snapshot: dict = field(default_factory=dict)  # 触发当期指标/风控上下文快照
 
 
 @dataclass
@@ -29,6 +30,7 @@ class Trade:
     tax: float = 0.0
     pnl: float = 0.0  # 已实现盈亏（仅卖出时）
     holding_days: int = 0  # 持仓天数（仅卖出时）
+    context_snapshot: dict = field(default_factory=dict)  # 成交时决策上下文快照
 
 
 @dataclass

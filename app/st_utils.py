@@ -153,3 +153,29 @@ def strategy_style_badge(style: str) -> str:
     return (f'<span style="background:{color}22;color:{color};border:1px solid '
             f'{color}55;border-radius:6px;padding:1px 8px;font-size:0.8rem;'
             f'margin-right:6px;">{icon}{style}</span>')
+
+
+# ============================================================
+# UI 级数据高频读取缓存（减少 40万行日线全表扫描与重跑耗时）
+# ============================================================
+
+@st.cache_data(ttl=300)
+def cached_get_stocks_with_data(min_days: int = 60) -> list:
+    """缓存版获取有日线数据的标的代码（缓存 5 分钟）"""
+    from data.storage import get_stocks_with_data
+    return get_stocks_with_data(min_days)
+
+
+@st.cache_data(ttl=120)
+def cached_check_data_freshness() -> dict:
+    """缓存版数据时效检查（缓存 2 分钟）"""
+    from data.fetcher import check_data_freshness
+    return check_data_freshness()
+
+
+@st.cache_data(ttl=300)
+def cached_instrument_list() -> pd.DataFrame:
+    """缓存版全标的列表（股票 + ETF，缓存 5 分钟）"""
+    from data.storage import get_instrument_list
+    return get_instrument_list()
+
