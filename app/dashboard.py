@@ -300,7 +300,7 @@ def _show_system_status():
                 run_update(watchlist=True)
             st.rerun()
     with col_b:
-        st.markdown(f"🏷️ 版本: v0.3.0 | 🗄️ `data/quant.db`")
+        st.markdown(f"🏷️ 版本: v0.4.0 | 🗄️ `data/quant.db`")
     with col_c:
         import json
         report = {

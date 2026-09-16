@@ -15,9 +15,9 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-v0.3.1-blue" alt="version" />
+  <img src="https://img.shields.io/badge/version-v0.4.0-blue" alt="version" />
   <img src="https://img.shields.io/badge/python-3.11-green" alt="python" />
-  <img src="https://img.shields.io/badge/tests-89%20passed-brightgreen" alt="tests" />
+  <img src="https://img.shields.io/badge/tests-191%20passed-brightgreen" alt="tests" />
   <img src="https://img.shields.io/badge/streamlit-1.58-red" alt="streamlit" />
 </p>
 
@@ -119,32 +119,40 @@ py run.py
 - ✅ A股费用模型（佣金万2.5/最低5元/印花万5/过户费）
 - ✅ 滑点模型（可配置千分之一）
 - ✅ 涨跌停限制（主板±10%/ST±5%/创业板±20%）
-- ✅ T+1 规则
-- ✅ 评分仓位管理
-- ✅ 沪深300基准对比
-- ✅ 绩效归因（月度热力图/逐年收益/滚动夏普/回撤）
-- ✅ 导出报告
-- 🚀 **网格搜索并行化**：多核 CPU 加速参数搜索
+- ✅ T+1 交易规则
+- ✅ **双撮合模式**：`next_open`（次日开盘价撮合，严格杜绝未来函数）与 `current_close`（当日收盘价撮合）
+- ✅ **持仓只数控制**：`max_active_positions` 动态控制持仓上限，超额买入信号按置信度横截面排序优选
+- ✅ **统一风控挂载**：支持挂载 `RiskManager`，实现固定硬止损、移动跟踪止盈与最大持仓周期退出
+- ✅ **决策上下文快照 (Tier 3)**：`context_snapshot` 记录触发信号与成交时当期的关键指标与决策依据
+- ✅ **送转派息现金分红**：`handle_corporate_action` 自动除权除息与红利再投资结转
+- ✅ 评分仓位管理（5%~20% 动态权重）
+- ✅ 沪深300基准对比（优先本地离线检索，自动降级网络）
+- ✅ 绩效归因（月度热力图/逐年收益/滚动夏普/卡玛比率/最大回撤）
+- ✅ 导出报告与交易明细
+- 🚀 **网格搜索并行化**：多核 CPU 加速参数优化
 
 ### 🔍 选股筛选
 按技术因子筛选股票/ETF：均线多头/MACD金叉/RSI范围/放量/布林带/KDJ金叉/涨跌幅。
-→ 综合评分排序（含类型标记） → 导出 CSV
+- 成交量单位规范为“万手”，杜绝百倍放大失真
+- 综合评分排序（含类型标记） → 导出 CSV
 
 ### 📡 信号中心（4个Tab）
 
 | Tab | 功能 |
 |:----|:------|
-| ① **实时扫描** | 选策略+范围（自选股/全部有数据股票），带进度条 |
+| ① **实时扫描** | 选策略+范围（自选股/全部有数据股票），带进度条 + 流动性与停牌守卫 |
 | ② **历史信号** | 按策略/方向筛选 |
 | ③ **信号验证 ⭐** | 验证信号后 N 日涨跌幅 + 胜率统计 |
-| ④ **组合信号** | 多策略共识分析 + 冲突检测 |
+| ④ **组合信号** | 多策略同标的仲裁（同向共振增强 + 多空冲突净额博弈） |
+
+> 💼 **实盘批量委托单生成器 (Broker-Ready Order Sheet)**：信号扫描后自动按照可用资金与单票上限折算整百股，卖出信号智能联动模拟持仓实际持股数量，支持加折价委托与硬止损价设置，一键导出通用券商 CSV 与通达信/同花顺批量委托 TXT。
 
 ### 💼 持仓管理（3个Tab）
 
 | Tab | 功能 |
 |:----|:------|
-| ① **自选股** | 添加/删除 + 自动下载数据 + 自动扫信号 + 分组管理(长线/短线) |
-| ② **模拟持仓** | 手动记录持仓 + 自动算盈亏（**持久化到 SQLite，刷新不丢**） |
+| ① **自选股** | 添加/批量移除（表单级封装，彻底杜绝操作跳顶） + 规范复合“股票”展示列 + 自动下载数据 + 自动扫信号 + 分组管理 |
+| ② **模拟持仓** | 手动记录持仓 + 自动算盈亏（**持久化到 SQLite，刷新不丢**） + 规范统一列结构 |
 | ③ **信号自动跟单 ⭐** | 一键跟入/跟出信号到持仓 + K线买卖点标注 |
 
 ### 📚 策略百科
@@ -272,12 +280,19 @@ FEISHU_WEBHOOK=              # 飞书机器人 Webhook
 ## 🔬 回测引擎
 
 ### 核心特性
-- **逐日迭代**：加载数据 → 构建日期序列 → 逐日产生信号 → 执行交易 → 记录权益
-- **A股费用模型**：佣金万2.5（最低5元）、印花税万5（仅卖出）、过户费万0.1、滑点千1
-- **风控规则**：涨跌停限制、T+1、评分仓位管理（5%~20%）
-- **绩效指标**：总收益、年化收益、最大回撤、夏普比率、卡玛比率(Calmar)、Alpha、Beta、胜率
+- **逐日因果律迭代**：加载数据 → 构建日期序列 → 逐日产生信号 → 撮合成交 → 记录权益
+- **双撮合执行模式**：
+  - `next_open`（次日开盘价撮合）：信号收盘产生，次日开盘买入，严格杜绝回测未来函数
+  - `current_close`（当日收盘价撮合）：经典当日收盘即时成交模式
+- **持仓规模与动态准入**：`max_active_positions` 控制同时持股总数上限，信号按置信度 score 横截面排序择优买入
+- **出场风控管理器 (RiskManager)**：支持固定比例止损、最高浮盈动态跟踪止盈、持仓到期强制平仓
+- **A股完整费用模型**：佣金万2.5（最低5元）、印花税万5（仅卖出）、过户费万0.1、滑点千1
+- **风控交易规则**：涨跌停限制、T+1锁定、评分仓位管理（5%~20%）
+- **送转派息处理**：`handle_corporate_action` 自动除权除息与红利再投资结转
+- **全链路决策快照 (Tier 3)**：交易记录与风控平仓包含 `context_snapshot`，实现完整因果归因
+- **绩效全面评估**：总收益、年化收益、最大回撤、夏普比率、卡玛比率(Calmar)、Alpha、Beta、胜率
 - **网格搜索**：`grid_search()`（串行）+ `grid_search_parallel()`（并行，利用多核 CPU）
-- **基准对比**：沪深300归一化权益曲线
+- **基准对比**：沪深300归一化权益曲线（优先本地数据库检索，自动降级在线获取）
 
 ### 网格搜索并行化
 
@@ -319,25 +334,30 @@ results = grid_search_parallel(
 
 ## 🧪 测试与CI/CD
 
-### 单元测试（89个）
+### 单元测试（191个全部通过）
 
 ```bash
 # 运行全部测试
 py -m pytest tests/ -v
 
 # 运行单个文件
-py -m pytest tests/test_commission.py -v
+py -m pytest tests/test_tier_optimizations.py -v
 ```
 
 | 测试文件 | 测试数 | 覆盖内容 |
 |:---------|:------|:---------|
-| `test_models.py` | 9 | Signal/Trade/BacktestResult/StockInfo 数据模型 |
-| `test_commission.py` | 15 | 费用计算/滑点/涨跌停/取整手（15个边界测试） |
-| `test_portfolio.py` | 14 | 买入/卖出/权益计算/绩效指标/边界场景 |
-| `test_backtester.py` | 11 | 回测主循环/绩效验证/网格搜索（串行+并行） |
+| `test_models.py` | 11 | Signal/Trade/BacktestResult/StockInfo 数据模型与快照 |
+| `test_commission.py` | 18 | 费用计算/滑点/涨跌停/取整手/零量防护（18个边界测试） |
+| `test_portfolio.py` | 13 | 买入/卖出/权益计算/除权分红/T+1跨日结转/绩效指标 |
+| `test_backtester.py` | 7 | 回测主循环/next_open撮合/持仓上限/零拷贝/网格搜索 |
 | `test_backtester_integration.py` | 5 | 真实 cleaner+indicators 集成测试 |
-| `test_storage.py` | 24 | SQLite 7张表 CRUD 全覆盖 |
+| `test_storage.py` | 24 | SQLite 7张表 CRUD 全覆盖与 WAL 事务 |
 | `test_schema_alignment.py` | 11 | 模型-数据库表结构对齐验证 |
+| `test_strategies_coverage.py` | 52 | 17 个量化策略完整信号生成与边界条件全覆盖 |
+| `test_tier_optimizations.py` | 29 | Tier 1/2/3 优化（零拷贝/除权断层/快照/时序突破/对象布尔） |
+| `test_expert_optimizations.py` | 6 | 专家级风控与连接池并发测试 |
+| `test_p0_p1_p2.py` | 8 | P0~P2 级历史缺陷回归与防护验证 |
+| `test_ui_cache.py` | 7 | Streamlit 缓存机制与 UI 状态一致性 |
 
 ### CI/CD
 
@@ -345,7 +365,7 @@ py -m pytest tests/test_commission.py -v
 
 ```
 ✅ 语法检查（py_compile 全量扫描 50+ 文件）
-✅ pytest 全部 89 个测试
+✅ pytest 全部 191 个测试
 ✅ 关键模块 import 一致性验证
 ```
 
@@ -405,22 +425,23 @@ quant-trading/
 │   ├── storage.py            # SQLite CRUD（连接池 + 版本化迁移 + 批量写入）
 │   ├── indicators.py         # 技术指标（MA/MACD/RSI/BOLL/KDJ/ATR）
 │   └── cleaner.py            # 数据清洗（OHLC校验/停牌过滤/去重）
-├── engine/                   # 回测引擎
-│   ├── backtester.py         # 回测主循环 + grid_search(串行+并行) + 零拷贝
-│   ├── portfolio.py          # 组合管理（滑点/费用）
-│   ├── position.py           # 持仓类（T+1规则）
-│   ├── commission.py         # A股费用模型（佣金/印花税/过户费）
+├── engine/                   # 回测与执行引擎
+│   ├── backtester.py         # 回测主循环 + next_open/current_close 双撮合 + 零拷贝
+│   ├── portfolio.py          # 组合管理（滑点/费用/除权除息/权益跟踪）
+│   ├── position.py           # 持仓类（T+1规则 + __bool__ 语义）
+│   ├── risk_manager.py       # 统一风控管理器（硬止损/跟踪止盈/周期退出）
+│   ├── commission.py         # A股费用模型（佣金/印花税/过户费/零量防护）
 │   └── scanner.py            # 信号扫描器（并行扫描 + 缓存，支持股票+ETF）
 ├── services/                 # 服务层（解耦 UI 与数据访问）
-│   ├── data_service.py       # 数据查询/更新服务
+│   ├── data_service.py       # 数据查询/更新服务（含除权断层检测）
 │   ├── backtest_service.py   # 回测/网格搜索/对比服务
-│   ├── signal_service.py     # 信号扫描/通知服务
+│   ├── signal_service.py     # 信号扫描/仲裁/通知服务
 │   └── validators.py         # 输入校验（股票代码/日期/资金）
-├── strategies/               # 17 个策略（自动发现注册，按风格分类）
-├── scripts/                  # 运维脚本（init_data 含 ETF 列表同步）
+├── strategies/               # 17 个策略（因果律时序隔离，自动发现注册）
+├── scripts/                  # 运维脚本（init_data 断层保护 + ETF 列表同步）
 ├── scheduler/                # APScheduler 定时调度（更新→扫描→推送闭环）
 ├── notifier/                 # 消息推送（5通道：Server酱/PushPlus/企微/钉钉/飞书）
-├── tests/                    # 89 个单元测试
+├── tests/                    # 191 个单元与回归测试（12个测试模块 100% 通过）
 ├── .github/workflows/        # CI/CD
 ├── CHANGELOG.md              # 更新日志
 └── requirements.txt          # 版本锁定
@@ -470,22 +491,17 @@ class MyStrategy(BaseStrategy):
 
 详见 [CHANGELOG.md](./CHANGELOG.md)
 
-### v0.3.1 关键更新（2026-08-11）
+### v0.4.0 关键更新（2026-09-16）
 
-- ⚡ **回测引擎零拷贝** — `iloc` 视图替代 `copy()`，消除 O(n²) 内存拷贝
-- 📦 **批量数据库写入** — 新增 `save_signals_batch()` + `executemany`，消除 N+1 写入
-- 🔗 **SQLite 连接池** — `threading.local()` 线程级连接复用，避免频繁建连
-- 🚀 **并行信号扫描** — `ThreadPoolExecutor`，≥50 只股票自动并行扫描
-- 🧱 **自定义异常体系** — 新增 `core/exceptions.py`（`QuantError` 基类 + 5 子类）
-- 🔌 **数据源抽象接口** — 新增 `data/fetcher_base.py`（`DataSource(ABC)` 统一接入）
-- 🛡️ **熔断/限流组件** — 新增 `data/fetcher_circuit.py`（`CircuitBreaker` + `TokenBucket`）
-- 🏗️ **服务层** — 新增 `services/`（DataService / BacktestService / SignalService + validators）
-- 🗃️ **数据库迁移系统** — `PRAGMA user_version` 版本化 schema 平滑迁移
-- 🔐 **安全加固** — Webhook URL 脱敏 + 输入校验（`validators.py`）+ Streamlit 登录认证
-- 📊 **回测结果对比** — 多结果叠加曲线 + 指标对比表 + CSV 导出
-- 📋 **CSV 导出** — 信号扫描 / 历史信号 / 持仓清单全面支持
-- 📱 **移动端适配** — `app/theme.py` 新增响应式 CSS
-- ✅ **89 个单元测试全部通过**，零回归
+- 🛡️ **突破策略因果律时序隔离** — 修复海龟突破 (`turtle.py`) 与唐奇安通道 (`donchian_breakout.py`) 时序基准错位，引入隔离的昨日基准 `prev_high_n` / `prev_upper`，彻底消除突破次日连阳重复发射买入信号的重大隐患
+- 🔍 **背离与形态时序严密化** — 修复 MACD / RSI 背离统计窗口包含今日导致底背离判定恒假的逻辑死锁；布林收口引入昨日状态容错
+- 🧱 **除权除息断层保护 (Tier 2 架构)** — `DataService` 与 `init_data.py` 全面接入 `check_split_dividend_anomaly`，在增量同步时自动识别前复权基准重置，并自动清空陈旧缓存全量重取
+- 🧭 **统一出场风控管理器** — 新增 `engine/risk_manager.py`，支持固定比例硬止损、动态跟踪止盈（最高浮盈激活 + 高点回撤锁定）、最大持仓天数自动退出
+- 📸 **全链路决策快照 (Tier 3 架构)** — 交易记录与风控平仓包含 `context_snapshot`，完整记录买卖当时的市场状态与决策依据
+- 💼 **券商实盘批量委托单生成器** — 信号中心新增 Broker-Ready Order Sheet，支持按资金上限与加折价自动算手，智能匹配当前实际持仓卖出股数，一键导出通达信/同花顺/通用券商格式
+- ⚖️ **多策略冲突仲裁与净额博弈** — `resolve_signal_conflicts` 实现同向共振增强增信与多空冲突净额博弈（Net Score），消除相反信号互搏
+- 🏷️ **界面与表格列结构规范** — 模拟持仓与自选股列表统一格式化为规范复合“股票”列，去除冗余的“代码”与“名称”列；成交量规范统一为“万手”；表单级多选封装彻底防跳顶
+- 🧪 **191 个测试用例全部通过** — 12 个测试套件 100% 通过，涵盖模型、策略、存储、风控与 UI 缓存
 
 ### v0.3.0 关键更新
 - 🔄 **自选股中心化重构** — 所有功能围绕自选股
@@ -504,5 +520,5 @@ class MyStrategy(BaseStrategy):
 ---
 
 <p align="center">
-  Made with ❤️ for A股量化 | v0.3.1
+  Made with ❤️ for A股量化 | v0.4.0
 </p>
