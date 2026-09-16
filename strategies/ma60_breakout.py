@@ -51,8 +51,10 @@ class MA60BreakoutStrategy(BaseStrategy):
             vol_ma5 = df["vol_ma5"].iloc[-1] if "vol_ma5" in df.columns else df["volume"].iloc[-5:].mean()
             vol_ratio = df["volume"].iloc[-1] / max(vol_ma5, 1)
 
+            has_position = portfolio is not None and portfolio.get_position(ts_code) is not None and not portfolio.get_position(ts_code).is_empty
+
             # 买入: 突破MA60（昨日在MA60下方或触及，今日站上MA60） + 均线走平或向上 + 放量
-            if (prev_close <= prev_ma and price > ma
+            if (not has_position and prev_close <= prev_ma and price > ma
                     and ma >= prev_ma and vol_ratio >= self.vol_ratio):
                 # 均线斜率越陡、放量越大分越高
                 slope_score = min(max(ma_slope / max(ma, 0.01) * 50, 0), 0.5)
@@ -67,15 +69,14 @@ class MA60BreakoutStrategy(BaseStrategy):
                     price_ref=price,
                 ))
 
-            # 卖出: 跌破MA60 且 MA60 拐头向下
-            if portfolio is None or portfolio.get_position(ts_code):
-                if price < ma and ma < prev_ma:
-                    signals.append(Signal(
-                        ts_code=ts_code, trade_date=trade_date,
-                        strategy=self.name, direction="SELL",
-                        score=0.8,
-                        reason=f"跌破MA{self.ma_period}={ma:.2f}且均线拐头向下",
-                        price_ref=price,
-                    ))
+            # 卖出: 跌破MA60（昨日在均线上方，今日跌破）且 MA60 拐头向下
+            if (portfolio is None or has_position) and prev_close >= prev_ma and price < ma and ma <= prev_ma:
+                signals.append(Signal(
+                    ts_code=ts_code, trade_date=trade_date,
+                    strategy=self.name, direction="SELL",
+                    score=0.8,
+                    reason=f"跌破MA{self.ma_period}={ma:.2f}且均线拐头向下",
+                    price_ref=price,
+                ))
 
         return signals

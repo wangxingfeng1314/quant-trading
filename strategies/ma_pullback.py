@@ -51,8 +51,10 @@ class MAPullbackStrategy(BaseStrategy):
             pulled_back = (prev_close <= prev_ma * (1 + self.tolerance))
             rebounded = price > ma
 
-            # 买入: 多头排列 + 回踩企稳
-            if is_bullish and pulled_back and rebounded:
+            has_position = portfolio is not None and portfolio.get_position(ts_code) is not None and not portfolio.get_position(ts_code).is_empty
+
+            # 买入: 未持仓 + 多头排列 + 回踩企稳
+            if not has_position and is_bullish and pulled_back and rebounded:
                 # 回踩越深、站回越强分越高
                 depth_score = min((prev_ma - prev_close) / max(prev_ma, 0.01) / 0.05, 0.4) if prev_close < prev_ma else 0.1
                 strength_score = min((price - ma) / max(ma, 0.01) / 0.02, 0.4)
@@ -65,9 +67,9 @@ class MAPullbackStrategy(BaseStrategy):
                     price_ref=price,
                 ))
 
-            # 卖出: 跌破MA10 且 MA5 下穿 MA10
-            if portfolio is None or portfolio.get_position(ts_code):
-                if price < ma and prev_ma5 > prev_ma and ma5 < ma:
+            # 卖出: 持有中（或无组合扫描）+ 跌破MA10 且 MA5 下穿 MA10
+            elif portfolio is None or has_position:
+                if price < ma and prev_ma5 >= prev_ma and ma5 < ma:
                     signals.append(Signal(
                         ts_code=ts_code, trade_date=trade_date,
                         strategy=self.name, direction="SELL",

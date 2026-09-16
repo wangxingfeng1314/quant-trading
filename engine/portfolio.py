@@ -73,12 +73,18 @@ class Portfolio:
 
         # 资金不足检查
         if total_amount > self.cash:
-            # 尝试减少数量
+            # 尝试减少数量（考虑最低佣金和手续费，防止现金为负）
             volume = int(self.cash / (price * 1.001)) // 100 * 100
             if volume <= 0:
                 return None
             cost = calc_cost(price, volume, "BUY", ts_code=ts_code)
             total_amount = price * volume + cost["total"]
+            while total_amount > self.cash and volume >= 100:
+                volume -= 100
+                if volume <= 0:
+                    return None
+                cost = calc_cost(price, volume, "BUY", ts_code=ts_code)
+                total_amount = price * volume + cost["total"]
 
         # 执行买入
         self.cash -= total_amount

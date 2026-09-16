@@ -89,7 +89,12 @@ def add_rsi(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
     avg_gain = gain.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
     avg_loss = loss.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
     rs = avg_gain / avg_loss.replace(0, np.nan)   # 相对强弱比（避免除0）
-    df[f"rsi{period}"] = 100 - (100 / (1 + rs))   # RSI公式
+    rsi = 100 - (100 / (1 + rs))                  # RSI公式
+    # 极端边界处理：全涨(avg_loss==0)为100，全跌(avg_gain==0)为0，无波动为50
+    if not rsi.empty:
+        rsi = rsi.where(avg_loss > 0, np.where(avg_gain > 0, 100.0, 50.0))
+        rsi = rsi.where(avg_gain > 0, np.where(avg_loss > 0, 0.0, 50.0))
+    df[f"rsi{period}"] = rsi
     return df
 
 
@@ -135,7 +140,9 @@ def add_kdj(df: pd.DataFrame, n: int = 9, m1: int = 3,
     df = df.copy()
     low_n = df["low"].rolling(window=n, min_periods=1).min()    # N日内最低价
     high_n = df["high"].rolling(window=n, min_periods=1).max()  # N日内最高价
-    rsv = (df["close"] - low_n) / (high_n - low_n).replace(0, np.nan) * 100  # RSV值
+    price_range = (high_n - low_n).replace(0, np.nan)
+    rsv = (df["close"] - low_n) / price_range * 100            # RSV值
+    rsv = rsv.fillna(50.0)                                      # 无波动时平滑填充中性50值
     df["kdj_k"] = rsv.ewm(alpha=1 / m1, adjust=False).mean()   # K值
     df["kdj_d"] = df["kdj_k"].ewm(alpha=1 / m2, adjust=False).mean()  # D值
     df["kdj_j"] = 3 * df["kdj_k"] - 2 * df["kdj_d"]            # J值

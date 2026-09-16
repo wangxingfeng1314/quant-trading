@@ -734,6 +734,99 @@ def test_multi_factor_and_signal_combo_with_pct_chg_column():
     assert isinstance(sigs_sc, list)
 
 
+def test_validate_date_strict_calendar():
+    """验证 validate_date 严谨的日历与闰年合法性校验"""
+    import pytest
+    from services.validators import validate_date
+    from core.exceptions import InvalidDateError
+
+    # 合法日期
+    assert validate_date("20240229") == "20240229"  # 闰年 2/29
+    assert validate_date("20230228") == "20230228"  # 平年 2/28
+    assert validate_date("20240430") == "20240430"  # 小月 30日
+
+    # 非法日期
+    with pytest.raises(InvalidDateError):
+        validate_date("20230229")  # 平年无 2/29
+    with pytest.raises(InvalidDateError):
+        validate_date("20240231")  # 2月无 31日
+    with pytest.raises(InvalidDateError):
+        validate_date("20240431")  # 4月小月无 31日
+    with pytest.raises(InvalidDateError):
+        validate_date("20241301")  # 无 13月
+
+
+def test_adjust_price_tick_rounding():
+    """验证 adjust_price 价格涨跌停限制精确到分钱（2位小数）"""
+    from engine.commission import adjust_price
+
+    # 10.15 * 1.10 = 11.165 -> 11.16 或 11.17，必须为 2 位小数
+    res = adjust_price(20.0, 10.15)
+    assert round(res, 2) == res
+    assert res == 11.17 or res == 11.16
+
+    # ST: 10.15 * 1.05 = 10.6575 -> 10.66
+    res_st = adjust_price(20.0, 10.15, is_st=True)
+    assert round(res_st, 2) == res_st
+
+
+def test_portfolio_cash_never_negative_on_min_commission():
+    """验证组合在极小资金余额且遭遇最低5元佣金时，不会导致现金为负（穿仓）"""
+    from engine.portfolio import Portfolio
+
+    # 只有 500 元现金，买入单价 4.5 元股票，100股=450元，佣金最低5元，过户费等
+    p = Portfolio(initial_capital=500.0)
+    trade = p.buy("000001.SZ", price=4.95, volume=100, trade_date="20240102")
+    # 4.95*100 = 495元 + 最低5元佣金 = 500.0x元，可能会超过500元
+    # 若现金不足以支付一手+5元佣金，应安全返回 None，且现金绝不为负
+    assert p.cash >= 0.0
+
+
+def test_strategies_has_position_filtering():
+    """验证 volume_price_breakout, ma_pullback, macd_cross 等策略在已有持仓时不重复发买入信号"""
+    from strategies.macd_cross import MACDCrossStrategy
+    from strategies.ma_pullback import MAPullbackStrategy
+    from strategies.volume_price_breakout import VolumePriceBreakoutStrategy
+    from engine.portfolio import Portfolio
+
+    n = 15
+    df = pd.DataFrame({
+        "trade_date": [f"202401{i:02d}" for i in range(1, n + 1)],
+        "open": [10.0 + i * 0.1 for i in range(n)],
+        "high": [10.5 + i * 0.1 for i in range(n)],
+        "low": [9.8 + i * 0.1 for i in range(n)],
+        "close": [10.2 + i * 0.1 for i in range(n)],
+        "volume": [1000] * (n - 1) + [3000],
+        "vol_ma5": [1000] * n,
+        "ma5": [10.0 + i * 0.1 for i in range(n)],
+        "ma10": [9.8 + i * 0.08 for i in range(n)],
+        "ma20": [9.5 + i * 0.05 for i in range(n)],
+        "dif": [-0.1] * (n - 1) + [0.2],
+        "dea": [0.0] * (n - 1) + [0.1],
+        "macd_hist": [-0.1] * (n - 1) + [0.1],
+    })
+
+    # 1. MACD Cross
+    strat_macd = MACDCrossStrategy()
+    # 无持仓：应发出金叉买入信号
+    sigs_no_pos = strat_macd.on_bar(f"202401{n:02d}", {"000001.SZ": df}, portfolio=None)
+    assert any(s.direction == "BUY" for s in sigs_no_pos)
+
+    # 有持仓：应被 has_position 拦截，不重复发出买入信号
+    p = Portfolio(initial_capital=100000)
+    p.buy("000001.SZ", price=10.0, volume=1000, trade_date="20240102")
+    sigs_with_pos = strat_macd.on_bar(f"202401{n:02d}", {"000001.SZ": df}, portfolio=p)
+    assert not any(s.direction == "BUY" for s in sigs_with_pos)
+
+    # 2. MA Pullback
+    strat_pullback = MAPullbackStrategy(ma_period=10)
+    p2 = Portfolio(initial_capital=100000)
+    p2.buy("000001.SZ", price=10.0, volume=1000, trade_date="20240102")
+    sigs_pullback = strat_pullback.on_bar(f"202401{n:02d}", {"000001.SZ": df}, portfolio=p2)
+    assert not any(s.direction == "BUY" for s in sigs_pullback)
+
+
+
 
 
 

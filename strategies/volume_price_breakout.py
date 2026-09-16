@@ -57,11 +57,14 @@ class VolumePriceBreakoutStrategy(BaseStrategy):
             vol_surge = self._is_volume_surge(df)
             recent_high = self._recent_high(df)
 
+            has_position = portfolio is not None and portfolio.get_position(ts_code) is not None and not portfolio.get_position(ts_code).is_empty
+
             # 买入信号:
-            # 条件1: 收盘站上MA20（昨日在MA下方，今日突破MA上方）
-            # 条件2: 放量确认（量能 > MA5量均线的1.5倍）
-            # 条件3: 突破前N日高点更佳（加分）
-            if prev_close <= prev_ma and price > ma_val and vol_surge:
+            # 条件1: 未持仓
+            # 条件2: 收盘站上MA20（昨日在MA下方，今日突破MA上方）
+            # 条件3: 放量确认（量能 > MA5量均线的1.5倍）
+            # 条件4: 突破前N日高点更佳（加分）
+            if not has_position and prev_close <= prev_ma and price > ma_val and vol_surge:
                 # 基础分0.6，突破前高再加分
                 base_score = 0.6
                 bonus = 0.2 if price > recent_high else 0
@@ -78,8 +81,8 @@ class VolumePriceBreakoutStrategy(BaseStrategy):
                 ))
 
             # 卖出信号:
-            # 持有中且缩量反弹至均线附近受压，或放量跌破均线
-            if portfolio is None or portfolio.get_position(ts_code):
+            # 持有中（或无组合全量扫描）且缩量反弹至阻力位受压，或放量跌破均线
+            elif portfolio is None or has_position:
                 # 场景1: 放量跌破MA20
                 if prev_close >= prev_ma and price < ma_val and vol_surge:
                     signals.append(Signal(
@@ -89,8 +92,8 @@ class VolumePriceBreakoutStrategy(BaseStrategy):
                         reason=f"放量跌破MA{self.ma_period}（{ma_val:.2f}）",
                         price_ref=price,
                     ))
-                # 场景2: 缩量反弹至前高附近受压（量价背离）
-                elif not vol_surge and price >= recent_high * 0.98 and price <= recent_high * 1.02:
+                # 场景2: 缩量反弹至前高附近受压（由下向上跨越触碰，避免横盘连续卖出）
+                elif not vol_surge and prev_close < recent_high * 0.98 and price >= recent_high * 0.98 and price <= recent_high * 1.02:
                     signals.append(Signal(
                         ts_code=ts_code, trade_date=trade_date,
                         strategy=self.name, direction="SELL",

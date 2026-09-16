@@ -39,17 +39,15 @@ def validate_date(date_str: str) -> str:
     Raises:
         InvalidDateError: 格式不正确
     """
+    from datetime import datetime
     if not date_str or not _DATE_PATTERN.match(date_str):
         raise InvalidDateError(date_str)
-    # 基本范围检查
-    year = int(date_str[:4])
-    month = int(date_str[4:6])
-    day = int(date_str[6:8])
-    if not (1990 <= year <= 2100):
+    # 日历与闰年合法性检查
+    try:
+        dt = datetime.strptime(date_str, "%Y%m%d")
+    except ValueError:
         raise InvalidDateError(date_str)
-    if not (1 <= month <= 12):
-        raise InvalidDateError(date_str)
-    if not (1 <= day <= 31):
+    if not (1990 <= dt.year <= 2100):
         raise InvalidDateError(date_str)
     return date_str
 

@@ -74,8 +74,18 @@ class Backtester:
             logger.info(f"加载数据: {len(self.universe)} 只股票, "
                          f"{self.start_date} ~ {self.end_date}")
             stock_data = {}  # {ts_code: DataFrame}
+            # 计算 warm-up 起始日期（提前180天加载历史K线，确保MA60/MACD/KDJ等长周期指标在回测首日就已就绪）
+            warmup_start = ""
+            if self.start_date:
+                try:
+                    from datetime import datetime, timedelta
+                    dt = datetime.strptime(self.start_date, "%Y%m%d")
+                    warmup_start = (dt - timedelta(days=180)).strftime("%Y%m%d")
+                except Exception:
+                    warmup_start = self.start_date
+
             for ts_code in self.universe:
-                df = get_daily(ts_code, self.start_date, self.end_date)
+                df = get_daily(ts_code, warmup_start, self.end_date)
                 if df.empty:
                     continue
                 df = clean_daily(df)
@@ -324,8 +334,17 @@ class Backtester:
 def preload_backtest_data(universe: list, start_date: str, end_date: str) -> dict:
     """预加载行情并预计算常用指标，用于多组回测与网格搜索共享内存（消除重复 I/O）"""
     data = {}
+    warmup_start = ""
+    if start_date:
+        try:
+            from datetime import datetime, timedelta
+            dt = datetime.strptime(start_date, "%Y%m%d")
+            warmup_start = (dt - timedelta(days=180)).strftime("%Y%m%d")
+        except Exception:
+            warmup_start = start_date
+
     for ts_code in universe:
-        df = get_daily(ts_code, start_date, end_date)
+        df = get_daily(ts_code, warmup_start, end_date)
         if df.empty:
             continue
         df = clean_daily(df)

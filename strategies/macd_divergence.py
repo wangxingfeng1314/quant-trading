@@ -44,17 +44,22 @@ class MACDDivergenceStrategy(BaseStrategy):
             price_min = prev_window.loc[price_min_idx, "close"]
             macd_at_price_min = prev_window.loc[price_min_idx, "macd_hist"]
 
+            has_position = portfolio is not None and portfolio.get_position(ts_code) is not None and not portfolio.get_position(ts_code).is_empty
+
             # 当前价格比历史最低价高不超过5%（或创出新低），且MACD柱明显高于前低
-            if (curr_close <= price_min * 1.05
+            if (not has_position
+                    and curr_close <= price_min * 1.05
                     and curr_macd > macd_at_price_min
                     and macd_at_price_min < 0
                     and curr_macd < 0):  # 都在零轴下方更有效
+                raw_score = 0.5 + 0.5 * min((curr_macd - macd_at_price_min) / (abs(macd_at_price_min) + 0.001), 1.0)
+                score = round(min(max(raw_score, 0.5), 1.0), 2)
                 signals.append(Signal(
                     ts_code=ts_code,
                     trade_date=trade_date,
                     strategy=self.name,
                     direction="BUY",
-                    score=round(min((curr_macd - macd_at_price_min) / (abs(macd_at_price_min) + 0.001), 1.0), 2),
+                    score=score,
                     reason=f"MACD底背离: 价格接近低点{price_min:.2f}, "
                            f"MACD柱从{macd_at_price_min:.3f}回升至{curr_macd:.3f}",
                     price_ref=price,
@@ -65,20 +70,22 @@ class MACDDivergenceStrategy(BaseStrategy):
             price_max = prev_window.loc[price_max_idx, "close"]
             macd_at_price_max = prev_window.loc[price_max_idx, "macd_hist"]
 
-            if (curr_close >= price_max * 0.95
+            if (portfolio is None or has_position) and (
+                    curr_close >= price_max * 0.95
                     and curr_macd < macd_at_price_max
                     and macd_at_price_max > 0
                     and curr_macd > 0):
-                if portfolio is None or portfolio.get_position(ts_code):
-                    signals.append(Signal(
-                        ts_code=ts_code,
-                        trade_date=trade_date,
-                        strategy=self.name,
-                        direction="SELL",
-                        score=round(min((macd_at_price_max - curr_macd) / (abs(macd_at_price_max) + 0.001), 1.0), 2),
-                        reason=f"MACD顶背离: 价格接近高点{price_max:.2f}, "
-                               f"MACD柱从{macd_at_price_max:.3f}回落至{curr_macd:.3f}",
-                        price_ref=price,
-                    ))
+                raw_score = 0.5 + 0.5 * min((macd_at_price_max - curr_macd) / (abs(macd_at_price_max) + 0.001), 1.0)
+                score = round(min(max(raw_score, 0.5), 1.0), 2)
+                signals.append(Signal(
+                    ts_code=ts_code,
+                    trade_date=trade_date,
+                    strategy=self.name,
+                    direction="SELL",
+                    score=score,
+                    reason=f"MACD顶背离: 价格接近高点{price_max:.2f}, "
+                           f"MACD柱从{macd_at_price_max:.3f}回落至{curr_macd:.3f}",
+                    price_ref=price,
+                ))
 
         return signals

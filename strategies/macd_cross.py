@@ -41,8 +41,10 @@ class MACDCrossStrategy(BaseStrategy):
             if any(v != v for v in [curr_dif, curr_dea, prev_dif, prev_dea]):
                 continue
 
-            # 金叉: DIF从下方上穿DEA
-            if prev_dif <= prev_dea and curr_dif > curr_dea:
+            has_position = portfolio is not None and portfolio.get_position(ts_code) is not None and not portfolio.get_position(ts_code).is_empty
+
+            # 金叉: DIF从下方上穿DEA（未持仓）
+            if not has_position and prev_dif <= prev_dea and curr_dif > curr_dea:
                 # 低位金叉（DIF<0）更可靠，加分
                 score = 0.5 + (0.4 if curr_dif < 0 else 0.0)
                 score += min(abs(curr_dif - curr_dea) / 0.2, 0.1)
@@ -55,18 +57,17 @@ class MACDCrossStrategy(BaseStrategy):
                     price_ref=price,
                 ))
 
-            # 死叉: DIF从上方下穿DEA
-            elif prev_dif >= prev_dea and curr_dif < curr_dea:
-                if portfolio is None or portfolio.get_position(ts_code):
-                    score = 0.5 + (0.4 if curr_dif > 0 else 0.0)
-                    score += min(abs(curr_dif - curr_dea) / 0.2, 0.1)
-                    signals.append(Signal(
-                        ts_code=ts_code, trade_date=trade_date,
-                        strategy=self.name, direction="SELL",
-                        score=round(min(score, 1.0), 2),
-                        reason=f"MACD死叉: DIF={curr_dif:.3f}下穿DEA={curr_dea:.3f}"
-                               f"{'（高位死叉）' if curr_dif > 0 else ''}",
-                        price_ref=price,
-                    ))
+            # 死叉: DIF从上方下穿DEA（持有中或无组合扫描模式）
+            elif (portfolio is None or has_position) and prev_dif >= prev_dea and curr_dif < curr_dea:
+                score = 0.5 + (0.4 if curr_dif > 0 else 0.0)
+                score += min(abs(curr_dif - curr_dea) / 0.2, 0.1)
+                signals.append(Signal(
+                    ts_code=ts_code, trade_date=trade_date,
+                    strategy=self.name, direction="SELL",
+                    score=round(min(score, 1.0), 2),
+                    reason=f"MACD死叉: DIF={curr_dif:.3f}下穿DEA={curr_dea:.3f}"
+                           f"{'（高位死叉）' if curr_dif > 0 else ''}",
+                    price_ref=price,
+                ))
 
         return signals

@@ -75,9 +75,19 @@ class DoubleBottomStrategy(BaseStrategy):
         between = segment.iloc[left[0]:right[0]+1]
         neck_line = between["high"].max()
 
+        # 颈线必须明显高于双底（至少高出 2% 形成有效凹陷谷底）
+        neck_height = (neck_line - min(left[1], right[1])) / max(left[1], 0.01)
+        if neck_height < 0.02:
+            return {"found": False}
+
         # 两个底不能相差太大（右底不低于左底的5%范围）
         bottom_diff = abs(right[1] - left[1]) / max(left[1], 0.01)
         if bottom_diff > 0.05:
+            return {"found": False}
+
+        # 右底形成后至昨日之间，收盘价不能早已显著突破颈线（防已兑现/失效形态）
+        after_right = segment.iloc[right[0]+1:]
+        if not after_right.empty and after_right["close"].max() > neck_line * 1.01:
             return {"found": False}
 
         return {
@@ -112,8 +122,10 @@ class DoubleBottomStrategy(BaseStrategy):
             vol_ma5 = df["vol_ma5"].iloc[-1] if "vol_ma5" in df.columns else df["volume"].iloc[-10:].mean()
             vol_ratio = df["volume"].iloc[-1] / max(vol_ma5, 1)
 
+            has_position = portfolio is not None and portfolio.get_position(ts_code) is not None and not portfolio.get_position(ts_code).is_empty
+
             # 买入: 价格突破颈线 + 放量确认
-            if prev_close <= neck_line and price > neck_line and vol_ratio >= self.neck_break_vol_ratio:
+            if not has_position and prev_close <= neck_line and price > neck_line and vol_ratio >= self.neck_break_vol_ratio:
                 # 评分：放量越大分越高，突破越远分越高
                 vol_score = min((vol_ratio - 1) / 2, 0.5)
                 dist_score = min((price / neck_line - 1) * 10, 0.5)
@@ -128,14 +140,13 @@ class DoubleBottomStrategy(BaseStrategy):
                 ))
 
             # 卖出: 持有中且跌破颈线
-            if portfolio is None or portfolio.get_position(ts_code):
-                if prev_close >= neck_line and price < neck_line:
-                    signals.append(Signal(
-                        ts_code=ts_code, trade_date=trade_date,
-                        strategy=self.name, direction="SELL",
-                        score=0.7,
-                        reason=f"跌破双底颈线{neck_line:.2f}，形态失败",
-                        price_ref=price,
-                    ))
+            if (portfolio is None or has_position) and prev_close >= neck_line and price < neck_line:
+                signals.append(Signal(
+                    ts_code=ts_code, trade_date=trade_date,
+                    strategy=self.name, direction="SELL",
+                    score=0.7,
+                    reason=f"跌破双底颈线{neck_line:.2f}，形态失败",
+                    price_ref=price,
+                ))
 
         return signals

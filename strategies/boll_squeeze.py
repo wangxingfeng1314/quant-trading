@@ -72,6 +72,8 @@ class BollSqueezeStrategy(BaseStrategy):
             prev_close = df["close"].iloc[-2]
             boll_upper = df["boll_upper"].iloc[-1]
             boll_lower = df["boll_lower"].iloc[-1]
+            prev_boll_upper = df["boll_upper"].iloc[-2]
+            prev_boll_lower = df["boll_lower"].iloc[-2]
 
             # 量比（放量确认）
             vol_ma5 = df["vol_ma5"].iloc[-1] if "vol_ma5" in df.columns else df["volume"].iloc[-5:].mean()
@@ -80,8 +82,10 @@ class BollSqueezeStrategy(BaseStrategy):
             if not self._is_squeezed(df):
                 continue
 
+            has_position = portfolio is not None and portfolio.get_position(ts_code) is not None and not portfolio.get_position(ts_code).is_empty
+
             # 买入: 收口后放量突破上轨
-            if prev_close <= boll_upper and price > boll_upper and vol_ratio >= self.vol_ratio:
+            if not has_position and prev_close <= prev_boll_upper and price > boll_upper and vol_ratio >= self.vol_ratio:
                 # 收口越久、放量越大分越高
                 score = round(min(0.5 + (vol_ratio - 1) / 2, 1.0), 2)
                 signals.append(Signal(
@@ -93,14 +97,13 @@ class BollSqueezeStrategy(BaseStrategy):
                 ))
 
             # 卖出: 收口后放量跌破下轨
-            if portfolio is None or portfolio.get_position(ts_code):
-                if prev_close >= boll_lower and price < boll_lower and vol_ratio >= self.vol_ratio:
-                    signals.append(Signal(
-                        ts_code=ts_code, trade_date=trade_date,
-                        strategy=self.name, direction="SELL",
-                        score=0.8,
-                        reason=f"布林带收口后放量跌破下轨{boll_lower:.2f}",
-                        price_ref=price,
-                    ))
+            if (portfolio is None or has_position) and prev_close >= prev_boll_lower and price < boll_lower and vol_ratio >= self.vol_ratio:
+                signals.append(Signal(
+                    ts_code=ts_code, trade_date=trade_date,
+                    strategy=self.name, direction="SELL",
+                    score=0.8,
+                    reason=f"布林带收口后放量跌破下轨{boll_lower:.2f}",
+                    price_ref=price,
+                ))
 
         return signals

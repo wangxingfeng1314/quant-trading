@@ -44,9 +44,11 @@ class BollingerReversalStrategy(BaseStrategy):
             prev_boll_lower = df["boll_lower"].iloc[-2]
             prev_boll_upper = df["boll_upper"].iloc[-2]
 
+            has_position = portfolio is not None and portfolio.get_position(ts_code) is not None and not portfolio.get_position(ts_code).is_empty
+
             # 买入: 前一日在轨内或触轨，今日低点触及下轨后收盘回升
-            if prev_close >= prev_boll_lower and curr_low <= boll_lower and curr_close > boll_lower:
-                score = round(min((curr_close - boll_lower) / (boll_mid - boll_lower + 0.01), 1.0), 2)
+            if not has_position and prev_close >= prev_boll_lower and curr_low <= boll_lower and curr_close > boll_lower:
+                score = round(min(0.5 + (curr_close - boll_lower) / (boll_mid - boll_lower + 0.01) * 0.5, 1.0), 2)
                 signals.append(Signal(
                     ts_code=ts_code, trade_date=trade_date,
                     strategy=self.name, direction="BUY",
@@ -56,15 +58,14 @@ class BollingerReversalStrategy(BaseStrategy):
                 ))
 
             # 卖出: 前一日在轨内或触轨，今日高点触及上轨后收盘回落
-            elif prev_close <= prev_boll_upper and curr_high >= boll_upper and curr_close < boll_upper:
-                if portfolio is None or portfolio.get_position(ts_code):
-                    score = round(min((boll_upper - curr_close) / (boll_upper - boll_mid + 0.01), 1.0), 2)
-                    signals.append(Signal(
-                        ts_code=ts_code, trade_date=trade_date,
-                        strategy=self.name, direction="SELL",
-                        score=score,
-                        reason=f"触及布林上轨{boll_upper:.2f}后回落至{curr_close:.2f}",
-                        price_ref=curr_close,
-                    ))
+            elif (portfolio is None or has_position) and prev_close <= prev_boll_upper and curr_high >= boll_upper and curr_close < boll_upper:
+                score = round(min(0.5 + (boll_upper - curr_close) / (boll_upper - boll_mid + 0.01) * 0.5, 1.0), 2)
+                signals.append(Signal(
+                    ts_code=ts_code, trade_date=trade_date,
+                    strategy=self.name, direction="SELL",
+                    score=score,
+                    reason=f"触及布林上轨{boll_upper:.2f}后回落至{curr_close:.2f}",
+                    price_ref=curr_close,
+                ))
 
         return signals

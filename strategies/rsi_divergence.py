@@ -44,16 +44,20 @@ class RSIDivergenceStrategy(BaseStrategy):
             if len(prev_window) < 10:
                 continue
 
+            has_position = portfolio is not None and portfolio.get_position(ts_code) is not None and not portfolio.get_position(ts_code).is_empty
+
             # 底背离: 历史区间最低点
             price_min_idx = prev_window["close"].idxmin()
             price_min = prev_window.loc[price_min_idx, "close"]
             rsi_at_price_min = prev_window.loc[price_min_idx, self.rsi_col]
 
             # 当前价格处于低位（接近或创新低），但RSI明显高于前低
-            if (curr_rsi > rsi_at_price_min + 5
+            if (not has_position
+                    and curr_rsi > rsi_at_price_min + 5
                     and price <= price_min * 1.05
                     and curr_rsi < 50):  # RSI在弱势区更有效
-                score = round(min((curr_rsi - rsi_at_price_min) / 30, 1.0), 2)
+                raw_score = 0.5 + 0.5 * min((curr_rsi - rsi_at_price_min) / 30, 1.0)
+                score = round(min(max(raw_score, 0.5), 1.0), 2)
                 signals.append(Signal(
                     ts_code=ts_code, trade_date=trade_date,
                     strategy=self.name, direction="BUY",
@@ -68,18 +72,19 @@ class RSIDivergenceStrategy(BaseStrategy):
             price_max = prev_window.loc[price_max_idx, "close"]
             rsi_at_price_max = prev_window.loc[price_max_idx, self.rsi_col]
 
-            if (curr_rsi < rsi_at_price_max - 5
+            if (portfolio is None or has_position) and (
+                    curr_rsi < rsi_at_price_max - 5
                     and price >= price_max * 0.95
                     and curr_rsi > 50):  # RSI在强势区更有效
-                if portfolio is None or portfolio.get_position(ts_code):
-                    score = round(min((rsi_at_price_max - curr_rsi) / 30, 1.0), 2)
-                    signals.append(Signal(
-                        ts_code=ts_code, trade_date=trade_date,
-                        strategy=self.name, direction="SELL",
-                        score=score,
-                        reason=f"RSI顶背离: 价格近高点{price_max:.2f}, "
-                               f"RSI从{rsi_at_price_max:.1f}回落至{curr_rsi:.1f}",
-                        price_ref=price,
-                    ))
+                raw_score = 0.5 + 0.5 * min((rsi_at_price_max - curr_rsi) / 30, 1.0)
+                score = round(min(max(raw_score, 0.5), 1.0), 2)
+                signals.append(Signal(
+                    ts_code=ts_code, trade_date=trade_date,
+                    strategy=self.name, direction="SELL",
+                    score=score,
+                    reason=f"RSI顶背离: 价格近高点{price_max:.2f}, "
+                           f"RSI从{rsi_at_price_max:.1f}回落至{curr_rsi:.1f}",
+                    price_ref=price,
+                ))
 
         return signals

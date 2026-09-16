@@ -641,14 +641,15 @@ def check_split_dividend_anomaly(ts_code: str, new_df: pd.DataFrame) -> bool:
     return False
 
 
-def batch_get_latest(codes: list, limit: int = 2) -> pd.DataFrame:
+def batch_get_latest(codes: list, limit: int = 2, chunk_size: int = 500) -> pd.DataFrame:
     """批量获取多只股票的最新N条日线数据
 
-    使用 SQL 窗口函数 ROW_NUMBER()，一条 SQL 替代 N 条，性能提升 100 倍。
+    使用 SQL 窗口函数 ROW_NUMBER()，分批（默认500只/批，避免SQLite参数超限）执行并合并。
 
     参数:
         codes: 股票代码列表 e.g. ['000001.SZ', '600519.SH']
         limit: 每只股票取最近 N 条
+        chunk_size: 单次 SQL 查询的标的数量上限（默认500，防止触发 SQLite 999 变量限制）
 
     返回:
         含 ts_code, trade_date, open, high, low, close, volume, pct_chg 的 DataFrame
@@ -656,24 +657,34 @@ def batch_get_latest(codes: list, limit: int = 2) -> pd.DataFrame:
     if not codes:
         return pd.DataFrame()
 
-    # 用窗口函数 ROW_NUMBER 取每只股票最近N条
-    placeholders = ",".join("?" * len(codes))          # 生成占位符: ?,?,?,...
-    query = f"""
-        SELECT * FROM (
-            SELECT *, ROW_NUMBER() OVER (
-                PARTITION BY ts_code ORDER BY trade_date DESC
-            ) as rn
-            FROM daily_price
-            WHERE ts_code IN ({placeholders})
-        ) WHERE rn <= ?
-        ORDER BY ts_code, trade_date
-    """
-    params = codes + [limit]
+    results = []
     with get_conn() as conn:
-        df = pd.read_sql(query, conn, params=params)
+        for i in range(0, len(codes), chunk_size):
+            chunk = codes[i:i + chunk_size]
+            placeholders = ",".join("?" * len(chunk))
+            query = f"""
+                SELECT * FROM (
+                    SELECT *, ROW_NUMBER() OVER (
+                        PARTITION BY ts_code ORDER BY trade_date DESC
+                    ) as rn
+                    FROM daily_price
+                    WHERE ts_code IN ({placeholders})
+                ) WHERE rn <= ?
+                ORDER BY ts_code, trade_date
+            """
+            params = chunk + [limit]
+            sub_df = pd.read_sql(query, conn, params=params)
+            if not sub_df.empty:
+                results.append(sub_df)
+
+    if not results:
+        return pd.DataFrame()
+
+    df = pd.concat(results, ignore_index=True)
     if not df.empty:
         df["trade_date"] = df["trade_date"].astype(str)  # 确保日期为字符串
-        df = df.drop(columns=["rn"])                      # 移除窗口函数辅助列
+        if "rn" in df.columns:
+            df = df.drop(columns=["rn"])                  # 移除窗口函数辅助列
     return df
 
 

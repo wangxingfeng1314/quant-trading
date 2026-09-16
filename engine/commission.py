@@ -92,16 +92,16 @@ def adjust_price(price: float, prev_close: float, is_st: bool = False,
         return price
 
     if is_st:
-        upper = prev_close * 1.05
-        lower = prev_close * 0.95
+        upper = round(prev_close * 1.05, 2)
+        lower = round(prev_close * 0.95, 2)
     elif is_cy:
-        upper = prev_close * 1.20
-        lower = prev_close * 0.80
+        upper = round(prev_close * 1.20, 2)
+        lower = round(prev_close * 0.80, 2)
     else:
-        upper = prev_close * 1.10
-        lower = prev_close * 0.90
+        upper = round(prev_close * 1.10, 2)
+        lower = round(prev_close * 0.90, 2)
 
-    return max(lower, min(upper, price))
+    return round(max(lower, min(upper, price)), 2)
 
 
 def round_lot(volume: int, direction: str) -> int:
