@@ -162,6 +162,7 @@ class Backtester:
                     prev_close = float(df_stock.iloc[curr_idx - 1]["close"]) if curr_idx > 0 else 0.0
                     is_st = "ST" in ts_code
                     is_cy = ts_code.startswith(("300", "301", "688"))
+                    is_bj = ts_code.startswith(("43", "83", "87", "92")) or ts_code.endswith(".BJ")
                     snapshot = self._build_snapshot(sig, df_stock, curr_idx)
 
                     if sig.direction == "BUY":
@@ -182,6 +183,7 @@ class Backtester:
                                 prev_close=prev_close,
                                 is_st=is_st,
                                 is_cy=is_cy,
+                                is_bj=is_bj,
                                 context_snapshot=snapshot,
                             )
                     elif sig.direction == "SELL":
@@ -196,6 +198,7 @@ class Backtester:
                                 prev_close=prev_close,
                                 is_st=is_st,
                                 is_cy=is_cy,
+                                is_bj=is_bj,
                                 context_snapshot=snapshot,
                             )
                 pending_signals = []
@@ -225,6 +228,7 @@ class Backtester:
                     prev_close = float(df_stock.iloc[curr_idx - 1]["close"]) if (df_stock is not None and curr_idx > 0) else 0.0
                     is_st = "ST" in ts_code
                     is_cy = ts_code.startswith(("300", "301", "688"))
+                    is_bj = ts_code.startswith(("43", "83", "87", "92")) or ts_code.endswith(".BJ")
                     snapshot = self._build_snapshot(sig, df_stock, curr_idx)
 
                     if sig.direction == "BUY":
@@ -245,6 +249,7 @@ class Backtester:
                                 prev_close=prev_close,
                                 is_st=is_st,
                                 is_cy=is_cy,
+                                is_bj=is_bj,
                                 context_snapshot=snapshot,
                             )
                     elif sig.direction == "SELL":
@@ -259,6 +264,7 @@ class Backtester:
                                 prev_close=prev_close,
                                 is_st=is_st,
                                 is_cy=is_cy,
+                                is_bj=is_bj,
                                 context_snapshot=snapshot,
                             )
 

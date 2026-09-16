@@ -46,7 +46,7 @@ class Portfolio:
 
     def buy(self, ts_code: str, price: float, volume: int,
             trade_date: str, prev_close: float = 0,
-            is_st: bool = False, is_cy: bool = False,
+            is_st: bool = False, is_cy: bool = False, is_bj: bool = False,
             slippage: bool = True,
             context_snapshot: dict = None) -> Optional[Trade]:
         """买入股票
@@ -60,7 +60,7 @@ class Portfolio:
 
         # 涨跌停限制
         if prev_close > 0:
-            price = adjust_price(price, prev_close, is_st, is_cy)
+            price = adjust_price(price, prev_close, is_st, is_cy, is_bj)
 
         # 取整手
         volume = round_lot(volume, "BUY")
@@ -110,7 +110,7 @@ class Portfolio:
 
     def sell(self, ts_code: str, price: float, volume: int,
              trade_date: str, prev_close: float = 0,
-             is_st: bool = False, is_cy: bool = False,
+             is_st: bool = False, is_cy: bool = False, is_bj: bool = False,
              slippage: bool = True,
              context_snapshot: dict = None) -> Optional[Trade]:
         """卖出股票
@@ -132,7 +132,7 @@ class Portfolio:
 
         # 涨跌停限制
         if prev_close > 0:
-            price = adjust_price(price, prev_close, is_st, is_cy)
+            price = adjust_price(price, prev_close, is_st, is_cy, is_bj)
 
         # 不能卖出超过可用持仓
         max_sell = pos.available_shares if pos.buy_date else (pos.available_shares if pos.available_shares > 0 else pos.shares)

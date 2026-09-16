@@ -165,7 +165,7 @@ class DataService:
     def update_index_data():
         """更新大盘指数数据"""
         try:
-            for code in ["000001.SH", "399001.SZ", "399006.SZ"]:
+            for code in ["000001.SH", "399001.SZ", "399006.SZ", "000300.SH"]:
                 df = fetch_index_daily(code)
                 if df is not None and not df.empty:
                     save_index_daily(df)

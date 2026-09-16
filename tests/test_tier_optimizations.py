@@ -1062,6 +1062,28 @@ def test_indicators_missing_columns_safe():
     assert "atr14" not in res_atr.columns
 
 
+def test_adjust_price_beijing_exchange():
+    """验证 adjust_price 对北交所 (is_bj=True) 标的执行 30% 涨跌停限制"""
+    from engine.commission import adjust_price
+
+    prev_close = 10.0
+    # 涨停限制 10.0 * 1.30 = 13.0
+    assert adjust_price(15.0, prev_close, is_bj=True) == 13.0
+    # 跌停限制 10.0 * 0.70 = 7.0
+    assert adjust_price(5.0, prev_close, is_bj=True) == 7.0
+    # 正常委托在限制内
+    assert adjust_price(11.5, prev_close, is_bj=True) == 11.5
+
+
+def test_index_codes_includes_hs300():
+    """验证数据获取模块 INDEX_CODES 包含回测核心基准 000300.SH (沪深300)"""
+    from data.fetcher import INDEX_CODES
+
+    assert "000300.SH" in INDEX_CODES
+    assert INDEX_CODES["000300.SH"] == "沪深300"
+
+
+
 
 
 

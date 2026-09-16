@@ -76,14 +76,15 @@ def apply_slippage(price: float, direction: str, slippage_rate: float = None) ->
 
 
 def adjust_price(price: float, prev_close: float, is_st: bool = False,
-                 is_cy: bool = False) -> float:
+                 is_cy: bool = False, is_bj: bool = False) -> float:
     """价格涨跌停限制
 
     Args:
         price: 委托价格
         prev_close: 前收盘价
-        is_st: 是否ST股
+        is_st: 是否ST股 (5%)
         is_cy: 是否创业板/科创板（20%涨跌停）
+        is_bj: 是否北交所（30%涨跌停）
 
     Returns:
         限制后的价格
@@ -94,6 +95,9 @@ def adjust_price(price: float, prev_close: float, is_st: bool = False,
     if is_st:
         upper = round(prev_close * 1.05, 2)
         lower = round(prev_close * 0.95, 2)
+    elif is_bj:
+        upper = round(prev_close * 1.30, 2)
+        lower = round(prev_close * 0.70, 2)
     elif is_cy:
         upper = round(prev_close * 1.20, 2)
         lower = round(prev_close * 0.80, 2)
