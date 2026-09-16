@@ -97,7 +97,11 @@ def clean_daily(df: pd.DataFrame) -> pd.DataFrame:
 
     # ==================== 步骤1: 去除空行 ====================
     # 关键价格字段(OHLC)任一为空 → 该行无法使用，直接去除
-    df = df.dropna(subset=["open", "high", "low", "close"])
+    ohlc_cols = ["open", "high", "low", "close"]
+    if not all(c in df.columns for c in ohlc_cols):
+        logger.warning(f"数据缺失OHLC关键列: {[c for c in ohlc_cols if c not in df.columns]}")
+        return pd.DataFrame()
+    df = df.dropna(subset=ohlc_cols)
 
     # ==================== 步骤2: 数值类型转换 ====================
     # 原始数据(特别是Baostock返回的)可能是字符串类型

@@ -1027,6 +1027,42 @@ def test_portfolio_calc_metrics_benchmark_types():
     assert res_array["beta"] == res_list["beta"]
 
 
+def test_clean_daily_missing_ohlc_safe():
+    """验证 clean_daily 在输入缺失 OHLC 关键列的异常 DataFrame 时安全返回空 DataFrame 而非抛出 KeyError"""
+    from data.cleaner import clean_daily
+
+    # 缺失 open 列
+    bad_df = pd.DataFrame({
+        "trade_date": ["20260101"],
+        "close": [10.0],
+        "volume": [1000],
+    })
+    res = clean_daily(bad_df)
+    assert res.empty
+
+
+def test_indicators_missing_columns_safe():
+    """验证 apply_indicators、add_kdj、add_atr 在输入缺少 high/low/close 列时安全返回，不崩溃抛出 KeyError"""
+    from data.indicators import apply_indicators, add_kdj, add_atr
+
+    incomplete_df = pd.DataFrame({
+        "trade_date": ["20260101"],
+        "volume": [1000],
+    })
+
+    # 不含 close 列
+    res_app = apply_indicators(incomplete_df)
+    assert "close" not in res_app.columns
+
+    # 不含 high/low/close 列
+    res_kdj = add_kdj(incomplete_df)
+    assert "kdj_k" not in res_kdj.columns
+
+    res_atr = add_atr(incomplete_df)
+    assert "atr14" not in res_atr.columns
+
+
+
 
 
 

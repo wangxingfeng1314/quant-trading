@@ -137,6 +137,8 @@ def add_kdj(df: pd.DataFrame, n: int = 9, m1: int = 3,
         m2: D值平滑周期，默认 3
     添加列: kdj_k, kdj_d, kdj_j
     """
+    if any(c not in df.columns for c in ["high", "low", "close"]):
+        return df
     df = df.copy()
     low_n = df["low"].rolling(window=n, min_periods=1).min()    # N日内最低价
     high_n = df["high"].rolling(window=n, min_periods=1).max()  # N日内最高价
@@ -178,6 +180,8 @@ def add_atr(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
         period: 计算周期，默认 14
     添加列: atr14, atr_pct
     """
+    if any(c not in df.columns for c in ["high", "low", "close"]):
+        return df
     df = df.copy()
     high = df["high"]
     low = df["low"]
@@ -208,7 +212,7 @@ def apply_indicators(df: pd.DataFrame, indicators: list = None) -> pd.DataFrame:
     返回:
         添加了指标列的新 DataFrame（不修改输入数据）
     """
-    if df is None or df.empty:
+    if df is None or df.empty or "close" not in df.columns:
         return df if df is not None else pd.DataFrame()
 
     # 所有支持的指标及其对应的计算函数
