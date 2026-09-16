@@ -47,14 +47,14 @@ class MAPullbackStrategy(BaseStrategy):
 
             # 短期多头: MA5 > MA10 且 MA10 走平或向上
             is_bullish = ma5 > ma and ma >= prev_ma
-            # 回踩: 前日收盘在MA10附近或跌破（不超过容差），今日站回均线上方
-            pulled_back = (prev_close <= ma * (1 + self.tolerance))
+            # 回踩: 前日收盘在昨日MA10附近或跌破（不超过容差），今日站回均线上方
+            pulled_back = (prev_close <= prev_ma * (1 + self.tolerance))
             rebounded = price > ma
 
             # 买入: 多头排列 + 回踩企稳
             if is_bullish and pulled_back and rebounded:
                 # 回踩越深、站回越强分越高
-                depth_score = min((ma - prev_close) / max(ma, 0.01) / 0.05, 0.4) if prev_close < ma else 0.1
+                depth_score = min((prev_ma - prev_close) / max(prev_ma, 0.01) / 0.05, 0.4) if prev_close < prev_ma else 0.1
                 strength_score = min((price - ma) / max(ma, 0.01) / 0.02, 0.4)
                 score = round(min(0.3 + max(depth_score, 0) + strength_score, 1.0), 2)
                 signals.append(Signal(
@@ -66,7 +66,7 @@ class MAPullbackStrategy(BaseStrategy):
                 ))
 
             # 卖出: 跌破MA10 且 MA5 下穿 MA10
-            if portfolio and portfolio.get_position(ts_code):
+            if portfolio is None or portfolio.get_position(ts_code):
                 if price < ma and prev_ma5 > prev_ma and ma5 < ma:
                     signals.append(Signal(
                         ts_code=ts_code, trade_date=trade_date,

@@ -85,6 +85,13 @@ def run_update(days: int = 5, watchlist: bool = False, progress_callback=None):
     """
     global _progress_callback
     _progress_callback = progress_callback
+
+    # 防护：空库时避免触发 sys.exit(1) 导致调用者进程（如 Streamlit）崩溃退出
+    freshness = check_data_freshness()
+    if not freshness.get("latest_date"):
+        logger.warning("数据库为空，请先运行完整数据初始化: python scripts/init_data.py --stocks 300")
+        return
+
     # 模拟命令行参数，调用 main() 执行更新
     import sys
     argv = ["init_data.py", "--update", "--days", str(days)]
@@ -184,22 +191,25 @@ def main():
             if _progress_callback:
                 _progress_callback(i, total, ts_code, name)
 
-            # 最近14天（含今天）的数据每次都重新拉取，确保最完整
-            skip_threshold = (datetime.now() - timedelta(days=14)).strftime("%Y%m%d")
             latest = latest_map.get(ts_code, "")
-            if latest and latest < skip_threshold:
-                # 最新数据超过14天前 → 数据太旧不用刷新，跳过
+            # 若本地已有今天（或最新交易日）数据，则安全跳过，避免重复请求
+            if latest and latest >= end_date:
                 skip_count += 1
                 continue
+
+            # 增量起始日期：覆盖最近14天或自本地最新断点起补齐（确保长期未更新的标的不被遗漏）
+            skip_threshold = (datetime.now() - timedelta(days=args.days or 14)).strftime("%Y%m%d")
+            if latest:
+                fetch_start = min(latest, skip_threshold)
+            else:
+                fetch_start = skip_threshold
 
             # 限速：每只请求前随机休眠 0.3~1.5 秒
             # AKShare免费API有频率限制，随机休眠可有效降低被限流的概率
             time.sleep(random.uniform(0.3, 1.5))
 
             try:
-                # 从14天前开始拉取，覆盖最近14天的数据
-                fetch_start = skip_threshold
-                # 按标类型路由：ETF 走 TickFlow，股票走多源级联
+                # 按标的类型路由：ETF 走 TickFlow，股票走多源级联
                 df = fetch_instrument_daily(ts_code, fetch_start, end_date)
                 if df.empty:
                     continue    # 所有数据源均无数据，跳过

@@ -12,6 +12,7 @@ from datetime import datetime, date
 from app.st_utils import (
     chinese_dataframe, chinese_date_picker, strategy_label,
     cached_get_stocks_with_data, cached_instrument_list,
+    format_strategy_cn, format_direction_cn, format_stock_cn,
 )
 from strategies import STRATEGY_REGISTRY, list_strategies
 from engine.backtester import Backtester, grid_search
@@ -196,10 +197,50 @@ def _show_run_backtest():
         # 基准对比选项
         show_benchmark = st.checkbox("叠加沪深300基准对比", value=True, key="bt_benchmark")
 
+        # 高阶实盘与风控设置
+        with st.expander("⚙️ 高阶撮合与独立风控设置", expanded=False):
+            exec_mode_opt = st.radio(
+                "撮合时序模式",
+                ["次日开盘价撮合 (next_open，推荐防假定成交)", "当日收盘价撮合 (current_close)"],
+                index=0,
+                key="bt_exec_mode",
+            )
+            exec_mode = "next_open" if "next_open" in exec_mode_opt else "current_close"
+
+            enable_rm = st.checkbox("启用独立出场风控管理器 (RiskManager)", value=True, key="bt_enable_rm")
+            rm_stop_loss = 0.05
+            rm_trail_start = 0.08
+            rm_trail_callback = 0.03
+            rm_max_days = 0
+            if enable_rm:
+                rm_c1, rm_c2 = st.columns(2)
+                with rm_c1:
+                    stop_loss_pct = st.number_input("硬止损阈值 (%)", value=5.0, min_value=1.0, max_value=20.0, step=0.5, key="bt_sl_pct")
+                    rm_stop_loss = stop_loss_pct / 100.0
+                    trail_start_pct = st.number_input("移动止盈启动浮盈 (%)", value=8.0, min_value=2.0, max_value=50.0, step=1.0, key="bt_ts_pct")
+                    rm_trail_start = trail_start_pct / 100.0
+                with rm_c2:
+                    trail_pullback_pct = st.number_input("移动止盈高点回撤 (%)", value=3.0, min_value=1.0, max_value=20.0, step=0.5, key="bt_tp_pct")
+                    rm_trail_callback = trail_pullback_pct / 100.0
+                    max_days_val = st.number_input("最长持仓天数 (0=不限)", value=30, min_value=0, max_value=250, step=5, key="bt_max_days")
+                    rm_max_days = int(max_days_val)
+
+            max_pos_val = st.number_input("最大并发持仓股票数 (0=不限)", value=5, min_value=0, max_value=50, step=1, key="bt_max_pos")
+
     if st.button("🚀 运行回测", type="primary", width='stretch'):
         if not universe:
             st.error("请选择至少一只股票")
             return
+
+        from engine.risk_manager import RiskManager
+        rm_instance = None
+        if enable_rm:
+            rm_instance = RiskManager(
+                stop_loss_pct=rm_stop_loss,
+                trailing_stop_activation=rm_trail_start,
+                trailing_stop_callback=rm_trail_callback,
+                max_holding_days=rm_max_days,
+            )
 
         # 批量回测自选股模式
         if mode == "全部自选股":
@@ -213,6 +254,9 @@ def _show_run_backtest():
                     universe=[ts_code],
                     start_date=start_date, end_date=end_date,
                     initial_capital=float(capital),
+                    execution_mode=exec_mode,
+                    risk_manager=rm_instance,
+                    max_active_positions=int(max_pos_val),
                 )
                 result = bt.run(save=False)
                 if result.equity_curve:
@@ -229,8 +273,8 @@ def _show_run_backtest():
             st.success(f"回测完成！{len(results)}/{len(universe)} 只自选股产生交易")
 
             # 对比表格
-            stock_df = get_instrument_list()
-            name_map = dict(zip(stock_df["ts_code"], stock_df["name"]))
+            stock_df = cached_instrument_list()
+            name_map = dict(zip(stock_df["ts_code"], stock_df["name"])) if not stock_df.empty else {}
             compare_rows = []
             for r in results:
                 res = r["result"]
@@ -268,6 +312,9 @@ def _show_run_backtest():
                 universe=universe,
                 start_date=start_date, end_date=end_date,
                 initial_capital=float(capital),
+                execution_mode=exec_mode,
+                risk_manager=rm_instance,
+                max_active_positions=int(max_pos_val),
             )
             result = bt.run(save=True)
 
@@ -358,12 +405,25 @@ def _show_grid_search():
     # 股票选择
     mode = st.radio("标的", ["单只标的", "多只标的(手动)"], horizontal=True, key="gs_mode")
     if mode == "单只标的":
-        options = stock_df_data.apply(
+        gs_search = st.text_input("搜索标的", placeholder="输入代码或中文名称过滤", key="gs_search")
+        if gs_search:
+            mask = (stock_df_data["ts_code"].str.contains(gs_search, case=False) |
+                    stock_df_data["name"].str.contains(gs_search, case=False))
+            filtered = stock_df_data[mask]
+        else:
+            filtered = stock_df_data.head(100)
+
+        options = filtered.apply(
             lambda r: f"[{r['type']}] {r['ts_code']} {r['name']}", axis=1
-        ).head(100).tolist()
-        selected = st.selectbox("选择标的", options, key="gs_stock")
-        parts = selected.split(" ")
-        universe = [parts[1] if len(parts) >= 2 else parts[0]]
+        ).tolist()
+        if options:
+            selected = st.selectbox("选择标的", options, key="gs_stock")
+            parts = selected.split(" ")
+            ts_code = parts[1] if len(parts) >= 2 else parts[0]
+            universe = [ts_code]
+        else:
+            st.warning("未找到匹配标的，请调整搜索词")
+            return
     else:
         codes_input = st.text_area("标的代码（每行一个）", height=80, key="gs_codes",
                                     placeholder="000001.SZ\n600519.SH\n510300.SH")
@@ -512,7 +572,12 @@ def _show_multi_strategy():
     col1, col2, col3 = st.columns(3)
     with col1:
         codes_input = st.text_input("股票代码", placeholder="000001.SZ", key="ms_code")
-        st.caption(f"📊 有数据的股票: {len(stocks_with_data)} 只")
+        ms_name_map = dict(zip(stock_df["ts_code"], stock_df["name"])) if not stock_df.empty else {}
+        matched_name = ms_name_map.get(codes_input.strip(), "")
+        if matched_name:
+            st.caption(f"🏷️ 当前标的: **{codes_input.strip()} {matched_name}**")
+        else:
+            st.caption(f"📊 数据库有数据标的: {len(stocks_with_data)} 只")
     with col2:
         ms_start = chinese_date_picker("开始日期", default_val=date(2023,1,1), key="ms_start")
     with col3:
@@ -560,7 +625,7 @@ def _show_multi_strategy():
                     result = bt.run(save=False)
                     ret = result.total_return if result.equity_curve else None
                     matrix_data.append({
-                        "strategy": sname,
+                        "strategy": format_strategy_cn(sname),
                         "stock": ts_code,
                         "stock_name": name_map.get(ts_code, ts_code),
                         "return": ret,
@@ -636,7 +701,7 @@ def _show_multi_strategy():
                 result = bt.run(save=False)
                 if result.equity_curve:
                     curves.append(result.equity_curve)
-                    names.append(sname)
+                    names.append(f"{format_strategy_cn(sname)} ({sname})")
 
         if not curves:
             st.warning("所有策略均无交易产生")
@@ -698,7 +763,7 @@ def _show_multi_strategy():
                 "交易次数": len([c for c in curves if c is not None]),
             })
 
-            chinese_dataframe(pd.DataFrame(rows))
+        chinese_dataframe(pd.DataFrame(rows))
 
 
 def _show_nlp_summary(result):
@@ -851,12 +916,14 @@ def _display_result(result, benchmark_curve=None):
     # 交易记录
     if result.trades:
         st.subheader("📋 交易记录")
+        stock_df = cached_instrument_list()
+        name_map = dict(zip(stock_df["ts_code"], stock_df["name"])) if not stock_df.empty else {}
         trade_data = []
         for t in result.trades:
             trade_data.append({
                 "日期": t.trade_date,
-                "股票": t.ts_code,
-                "方向": t.direction,
+                "股票": format_stock_cn(t.ts_code, name_map),
+                "方向": format_direction_cn(t.direction),
                 "价格": f"{t.price:.2f}",
                 "数量": t.volume,
                 "佣金": f"{t.commission:.2f}",
@@ -864,7 +931,7 @@ def _display_result(result, benchmark_curve=None):
                 "盈亏": f"{t.pnl:.2f}" if t.direction == "SELL" else "",
                 "持仓天数": t.holding_days if t.direction == "SELL" else "",
             })
-            chinese_dataframe(pd.DataFrame(trade_data))
+        chinese_dataframe(pd.DataFrame(trade_data))
 
     # 导出报告
     st.markdown("---")
@@ -908,7 +975,7 @@ def _display_result(result, benchmark_curve=None):
         # 汇总报告
         report = f"""回测报告
 ========
-策略: {result.strategy}
+策略: {format_strategy_cn(result.strategy)} ({result.strategy})
 参数: {result.params}
 日期范围: {result.start_date} ~ {result.end_date}
 
@@ -1147,7 +1214,7 @@ def _show_history():
         # 用 checkbox 选 ID
         selected_ids = []
         for idx, row in results_df.head(20).iterrows():
-            label = (f"#{row['id']} {row['strategy']} | "
+            label = (f"#{row['id']} {format_strategy_cn(row['strategy'])} ({row['strategy']}) | "
                      f"{row['start_date']}~{row['end_date']} | "
                      f"收益 {row['total_return']:.2f}%")
             if st.checkbox(label, key=f"hist_chk_{row['id']}"):
@@ -1165,7 +1232,7 @@ def _show_history():
     # 详细记录展示
     for _, row in results_df.head(20).iterrows():
         with st.expander(
-            f"#{row['id']} {row['strategy']} | {row['start_date']}~{row['end_date']} | "
+            f"#{row['id']} {format_strategy_cn(row['strategy'])} ({row['strategy']}) | {row['start_date']}~{row['end_date']} | "
             f"收益 {row['total_return']:.2f}% | 回撤 {row['max_drawdown']:.2f}%"
         ):
             c1, c2, c3, c4 = st.columns(4)
@@ -1177,8 +1244,17 @@ def _show_history():
             # 交易明细
             trades_df = get_backtest_trades(row["id"])
             if not trades_df.empty:
-                chinese_dataframe(trades_df[["trade_date", "ts_code", "direction",
-                                        "price", "volume", "pnl", "holding_days"]])
+                stock_df = cached_instrument_list()
+                name_map = dict(zip(stock_df["ts_code"], stock_df["name"])) if not stock_df.empty else {}
+                disp_trades = trades_df[["trade_date", "ts_code", "direction",
+                                        "price", "volume", "pnl", "holding_days"]].copy()
+                disp_trades["ts_code"] = disp_trades["ts_code"].apply(lambda c: format_stock_cn(c, name_map))
+                disp_trades["direction"] = disp_trades["direction"].apply(format_direction_cn)
+                disp_trades = disp_trades.rename(columns={
+                    "trade_date": "日期", "ts_code": "股票", "direction": "方向",
+                    "price": "价格", "volume": "数量", "pnl": "盈亏", "holding_days": "持仓天数",
+                })
+                chinese_dataframe(disp_trades)
 
 
 def _show_comparison(backtest_ids: list):
@@ -1203,7 +1279,7 @@ def _show_comparison(backtest_ids: list):
             continue
         df_eq = pd.DataFrame(eq)
         total_ret = (df_eq["equity"].iloc[-1] / df_eq["equity"].iloc[0] - 1) * 100
-        label = f"#{r['id']} {r['strategy']} ({total_ret:+.1f}%)"
+        label = f"#{r['id']} {format_strategy_cn(r['strategy'])} ({total_ret:+.1f}%)"
         fig.add_trace(go.Scatter(
             x=df_eq["date"], y=df_eq["equity"],
             mode="lines", name=label, line=dict(width=2),
@@ -1223,7 +1299,7 @@ def _show_comparison(backtest_ids: list):
     for r in results:
         compare_rows.append({
             "ID": r["id"],
-            "策略": r["strategy"],
+            "策略": format_strategy_cn(r["strategy"]),
             "日期范围": f"{r['start_date']}~{r['end_date']}",
             "总收益%": f"{r.get('total_return', 0):+.2f}",
             "年化%": f"{r.get('annual_return', 0):+.2f}",

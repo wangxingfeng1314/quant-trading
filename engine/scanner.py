@@ -3,6 +3,8 @@ import logging
 import concurrent.futures
 from typing import List, Callable
 from datetime import datetime
+import pandas as pd
+
 
 from data.storage import (
     get_daily, get_instrument_list, save_signal, save_signals_batch,
@@ -14,18 +16,73 @@ from strategies import STRATEGY_REGISTRY
 from core.models import Signal
 from core.config import (
     SCANNER_CACHE_THRESHOLD, SCANNER_MIN_DATA_DAYS, SCANNER_PARALLEL_WORKERS,
+    SCANNER_MIN_DAILY_AMOUNT, SCANNER_FILTER_SUSPENDED,
 )
 
 logger = logging.getLogger(__name__)
 
 
-def _scan_single_stock(ts_code: str, end_date: str, strategy_instances: list) -> list:
+def check_stock_liquidity(
+    df: "pd.DataFrame",
+    end_date: str = "",
+    min_daily_amount: float = 0.0,
+    filter_suspended: bool = True,
+) -> bool:
+    """检查标的是否满足流动性要求及非停牌状态
+
+    Args:
+        df: 清洗并截断至 end_date 的日线数据（升序排列）
+        end_date: 扫描目标日期
+        min_daily_amount: 近 5 日最低日均成交额（元，0表示不限制）
+        filter_suspended: 是否过滤停牌/成交量为0标的
+    """
+    if df is None or df.empty:
+        return False
+
+    latest = df.iloc[-1]
+
+    # 1. 停牌过滤
+    if filter_suspended:
+        # 最后一根 bar 的成交量或成交额为 0 视为停牌 (兼容 volume 与 vol 字段)
+        vol_val = latest.get("volume") if ("volume" in latest and pd.notna(latest.get("volume"))) else latest.get("vol", 0)
+        amt_val = latest.get("amount", 0)
+        if float(vol_val or 0) <= 0 or float(amt_val or 0) <= 0:
+            return False
+        # 检查最新交易日与 end_date 跨度，若最新交易日落后超过30天视为长期停牌
+        if end_date:
+            try:
+                dt_latest = datetime.strptime(str(latest.get("trade_date", "")), "%Y%m%d")
+                dt_end = datetime.strptime(str(end_date), "%Y%m%d")
+                if (dt_end - dt_latest).days > 30:
+                    return False
+            except Exception:
+                pass
+
+    # 2. 流动性过滤（近5日日均成交额）
+    if min_daily_amount > 0 and len(df) >= 1:
+        check_window = min(5, len(df))
+        avg_amt = df["amount"].tail(check_window).mean()
+        if avg_amt < min_daily_amount:
+            return False
+
+    return True
+
+
+def _scan_single_stock(
+    ts_code: str,
+    end_date: str,
+    strategy_instances: list,
+    min_daily_amount: float = None,
+    filter_suspended: bool = None,
+) -> list:
     """扫描单只股票的所有策略信号（可作为并行任务单元）
 
     Args:
         ts_code: 股票代码
         end_date: 扫描截止日期
         strategy_instances: 已初始化的策略实例列表
+        min_daily_amount: 最小日均成交额（元）
+        filter_suspended: 是否过滤停牌标的
 
     Returns:
         该股票产生的 Signal 列表
@@ -43,7 +100,13 @@ def _scan_single_stock(ts_code: str, end_date: str, strategy_instances: list) ->
     if df.empty:
         return []
 
-    df = apply_indicators(df, ["ma", "macd", "rsi", "boll", "vol_ma"])
+    # 流动性与停牌守卫检查
+    amt_threshold = min_daily_amount if min_daily_amount is not None else SCANNER_MIN_DAILY_AMOUNT
+    flt_susp = filter_suspended if filter_suspended is not None else SCANNER_FILTER_SUSPENDED
+    if not check_stock_liquidity(df, end_date=end_date, min_daily_amount=amt_threshold, filter_suspended=flt_susp):
+        return []
+
+    df = apply_indicators(df, ["ma", "macd", "rsi", "boll", "vol_ma", "kdj", "atr"])
     data_dict = {ts_code: df}
 
     signals = []
@@ -60,7 +123,11 @@ def _scan_single_stock(ts_code: str, end_date: str, strategy_instances: list) ->
 def scan_signals(universe: list = None, strategy_names: list = None,
                  end_date: str = "", save: bool = True,
                  progress_callback: Callable = None,
-                 parallel: bool = True) -> List[Signal]:
+                 parallel: bool = True,
+                  min_daily_amount: float = None,
+                  filter_suspended: bool = None,
+                  force_refresh: bool = False) -> List[Signal]:
+
     """扫描全市场信号
 
     Args:
@@ -70,6 +137,9 @@ def scan_signals(universe: list = None, strategy_names: list = None,
         save: 是否保存到数据库
         progress_callback: 进度回调函数(completed, total)
         parallel: 是否使用并行扫描（默认True，少量股票时可选False）
+        min_daily_amount: 最小日均成交额
+        filter_suspended: 是否过滤停牌
+        force_refresh: 是否强制全量重扫（忽略缓存）
 
     Returns:
         Signal列表，按score降序排列
@@ -88,27 +158,25 @@ def scan_signals(universe: list = None, strategy_names: list = None,
             return []
         universe = stock_df["ts_code"].tolist()
 
-    # ---------- 缓存检查：当天已扫描过的直接返回 ----------
-    cached = get_signals(trade_date=end_date)
-    if not cached.empty:
-        cached = cached[cached["ts_code"].isin(universe)]
-        cached = cached[cached["strategy"].isin(strategy_names)]
-        cached_stocks = cached["ts_code"].nunique()
-        if cached_stocks >= len(universe) * SCANNER_CACHE_THRESHOLD:
-            logger.info(f"缓存命中: {len(cached)} 条信号 (日期={end_date}), 跳过全量扫描")
-            signals_list = []
-            for _, row in cached.iterrows():
-                signals_list.append(Signal(
-                    ts_code=row["ts_code"], trade_date=row["trade_date"],
-                    strategy=row["strategy"], direction=row["direction"],
-                    score=float(row.get("score", 0)),
-                    reason=row.get("reason", ""),
-                    price_ref=float(row.get("price_ref", 0)),
-                ))
-            signals_list.sort(key=lambda s: s.score, reverse=True)
-            return signals_list
-        else:
-            logger.info(f"部分缓存: {cached_stocks}/{len(universe)} 只股票, 补扫剩余部分")
+    # ---------- 缓存检查：针对小规模自选股，当天已扫描过的直接返回 ----------
+    if not force_refresh and len(universe) <= 20:
+        cached = get_signals(trade_date=end_date)
+        if not cached.empty:
+            cached = cached[cached["ts_code"].isin(universe)]
+            cached = cached[cached["strategy"].isin(strategy_names)]
+            if not cached.empty and set(cached["ts_code"]) == set(universe):
+                logger.info(f"缓存命中: {len(cached)} 条信号 (日期={end_date}), 跳过全量扫描")
+                signals_list = []
+                for _, row in cached.iterrows():
+                    signals_list.append(Signal(
+                        ts_code=row["ts_code"], trade_date=row["trade_date"],
+                        strategy=row["strategy"], direction=row["direction"],
+                        score=float(row.get("score", 0)),
+                        reason=row.get("reason", ""),
+                        price_ref=float(row.get("price_ref", 0)),
+                    ))
+                signals_list.sort(key=lambda s: s.score, reverse=True)
+                return signals_list
 
     # 预过滤：只扫描有数据且数据量足够的股票
     with get_conn() as conn:
@@ -139,7 +207,10 @@ def scan_signals(universe: list = None, strategy_names: list = None,
         max_workers = SCANNER_PARALLEL_WORKERS or None  # None = 自动检测 CPU 核心数
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
-                executor.submit(_scan_single_stock, ts_code, end_date, strategy_instances): ts_code
+                executor.submit(
+                    _scan_single_stock, ts_code, end_date, strategy_instances,
+                    min_daily_amount, filter_suspended,
+                ): ts_code
                 for ts_code in universe
             }
             completed = 0
@@ -159,7 +230,10 @@ def scan_signals(universe: list = None, strategy_names: list = None,
     else:
         # 串行扫描（少量股票时更高效，无进程开销）
         for i, ts_code in enumerate(universe):
-            sigs = _scan_single_stock(ts_code, end_date, strategy_instances)
+            sigs = _scan_single_stock(
+                ts_code, end_date, strategy_instances,
+                min_daily_amount, filter_suspended,
+            )
             all_signals.extend(sigs)
 
             if (i + 1) % 100 == 0:

@@ -244,3 +244,218 @@ def test_cross_sectional_ranking_and_max_positions(monkeypatch):
     assert "000001.SZ" in bought_codes
     assert "000002.SZ" in bought_codes
     assert "600519.SH" not in bought_codes
+
+
+# -------------------------------------------------------------
+# 全局逻辑与架构缺陷修复专项回归测试
+# -------------------------------------------------------------
+def test_check_stock_liquidity_volume_compatibility():
+    """验证 check_stock_liquidity 兼容 volume 与 vol 字段"""
+    from engine.scanner import check_stock_liquidity
+    df_vol = pd.DataFrame([
+        {"trade_date": "20260915", "close": 10.0, "volume": 100000.0, "amount": 1000000.0},
+        {"trade_date": "20260916", "close": 10.5, "volume": 120000.0, "amount": 1260000.0},
+    ])
+    assert check_stock_liquidity(df_vol, end_date="20260916", filter_suspended=True) is True
+
+    df_zero = pd.DataFrame([
+        {"trade_date": "20260915", "close": 10.0, "volume": 100000.0, "amount": 1000000.0},
+        {"trade_date": "20260916", "close": 10.0, "volume": 0.0, "amount": 0.0},
+    ])
+    assert check_stock_liquidity(df_zero, end_date="20260916", filter_suspended=True) is False
+
+
+def test_get_daily_limit_returns_latest_chronological():
+    """验证 get_daily(limit=N) 获取最新 N 条并按升序排列"""
+    test_code = "999999.TEST"
+    dates = ["20260101", "20260102", "20260103", "20260104", "20260105"]
+    with get_conn() as conn:
+        conn.execute("DELETE FROM daily_price WHERE ts_code = ?", (test_code,))
+        for d in dates:
+            conn.execute(
+                "INSERT INTO daily_price (ts_code, trade_date, open, high, low, close, volume, amount) "
+                "VALUES (?, ?, 10, 11, 9, 10, 1000, 10000)",
+                (test_code, d)
+            )
+
+    try:
+        df = get_daily(test_code, limit=2)
+        assert len(df) == 2
+        assert df["trade_date"].tolist() == ["20260104", "20260105"]
+
+        df1 = get_daily(test_code, limit=1)
+        assert len(df1) == 1
+        assert df1["trade_date"].iloc[0] == "20260105"
+    finally:
+        with get_conn() as conn:
+            conn.execute("DELETE FROM daily_price WHERE ts_code = ?", (test_code,))
+
+
+def test_risk_manager_parameter_aliases():
+    """验证 RiskManager 别名参数兼容性"""
+    rm = RiskManager(
+        stop_loss_pct=-4.5,
+        trailing_stop_pct=7.5,
+        trailing_callback_pct=2.5,
+        max_holding_days=15,
+    )
+    assert rm.stop_loss_pct == -4.5
+    assert rm.trailing_stop_activation == 7.5
+    assert rm.trailing_stop_callback == 2.5
+    assert rm.max_holding_days == 15
+
+
+def test_default_indicators_contains_kdj_and_atr():
+    """验证 apply_indicators 默认计算包含 kdj 与 atr"""
+    from data.indicators import apply_indicators
+    df = pd.DataFrame({
+        "trade_date": ["20260101", "20260102", "20260103", "20260104", "20260105"],
+        "open": [10.0, 10.2, 10.1, 10.3, 10.5],
+        "high": [10.5, 10.6, 10.4, 10.7, 10.8],
+        "low": [9.8, 10.0, 9.9, 10.1, 10.3],
+        "close": [10.2, 10.1, 10.3, 10.5, 10.6],
+        "volume": [1000, 1200, 1100, 1300, 1500],
+    })
+    res = apply_indicators(df)
+    assert "kdj_k" in res.columns
+    assert "kdj_d" in res.columns
+    assert "atr14" in res.columns
+
+
+def test_risk_manager_does_not_pollute_highest_prices_from_non_positions():
+    """验证风控管理器不会被未持仓股票的历史高价污染导致建仓后立刻误触移动止盈"""
+    from engine.portfolio import Portfolio, Position
+    rm = RiskManager(trailing_stop_activation=8.0, trailing_stop_callback=3.0)
+    p = Portfolio(initial_capital=100000)
+
+    # 模拟股票曾经在历史上有过高价 100 元，但当时我们并未持仓
+    current_prices_day1 = {"000001.SZ": 100.0}
+    signals_day1 = rm.check_risks("20240101", p, current_prices_day1)
+    assert len(signals_day1) == 0
+    # 未持仓标的不应记录在 highest_prices 中
+    assert "000001.SZ" not in rm.highest_prices
+
+    # 第 20 天在 50 元建仓
+    pos = Position(ts_code="000001.SZ", shares=1000, avg_cost=50.0, buy_date="20240120")
+    p.positions["000001.SZ"] = pos
+
+    # 第 21 天，价格仍在 50 元（涨幅 0%）
+    signals_day21 = rm.check_risks("20240121", p, {"000001.SZ": 50.0})
+    # 绝不能误报跟踪止盈
+    assert len(signals_day21) == 0
+    # 最高价基准应为成本价 50.0
+    assert rm.highest_prices["000001.SZ"] == 50.0
+
+
+def test_macd_divergence_zero_division_guard():
+    """验证 MACD 背离在 macd_at_price_min 接近 -0.001 时不会发生除0崩溃"""
+    from strategies.macd_divergence import MACDDivergenceStrategy
+    strategy = MACDDivergenceStrategy(lookback=5)
+
+    df = pd.DataFrame({
+        "trade_date": ["20260101", "20260102", "20260103", "20260104", "20260105"],
+        "close": [10.0, 9.8, 9.7, 9.72, 9.71],
+        "volume": [1000, 1000, 1000, 1000, 1000],
+        # 构造刚好等于 -0.001 的 macd_hist
+        "macd_hist": [-0.01, -0.005, -0.001, -0.0005, -0.0002],
+    })
+
+    # 不应抛出 ZeroDivisionError
+    sigs = strategy.on_bar("20260105", {"000001.SZ": df})
+    assert isinstance(sigs, list)
+
+
+def test_portfolio_sell_date_string_with_hyphens():
+    """验证卖出时即使传入带连字符的日期格式，holding_days 也能正确解析"""
+    from engine.portfolio import Portfolio, Position
+    p = Portfolio(initial_capital=100000)
+    pos = Position(ts_code="000001.SZ", shares=1000, available_shares=1000, avg_cost=10.0, buy_date="2024-01-01")
+    p.positions["000001.SZ"] = pos
+
+    trade = p.sell(ts_code="000001.SZ", price=11.0, volume=1000, trade_date="2024-01-11")
+    assert trade is not None
+    assert trade.holding_days == 10
+
+
+def test_etf_stamp_duty_exemption():
+    """验证场内 ETF (51/15/16等) 交易免征印花税"""
+    from engine.commission import calc_cost
+    # 普通股票卖出收 0.05% 印花税
+    stock_cost = calc_cost(price=10.0, volume=1000, direction="SELL", ts_code="600519.SH")
+    assert stock_cost["tax"] == 5.0
+
+    # ETF 卖出免收印花税
+    etf_cost = calc_cost(price=3.0, volume=10000, direction="SELL", ts_code="510300.SH")
+    assert etf_cost["tax"] == 0.0
+
+
+def test_ma60_breakout_temporal_consistency():
+    """验证 MA60 突破策略基于 prev_ma 判定突破"""
+    from strategies.ma60_breakout import MA60BreakoutStrategy
+    st = MA60BreakoutStrategy(ma_period=5, slope_days=2, vol_ratio=1.1)
+
+    # 构造数据：第8天收盘9.7低于MA5(9.84)，第9天收盘10.5突破MA5(9.94)，均线向上且放量
+    df = pd.DataFrame({
+        "trade_date": [f"2026010{i}" for i in range(1, 10)],
+        "close": [10.0, 10.0, 10.0, 10.0, 9.9, 9.8, 9.8, 9.7, 10.5],
+        "volume": [1000] * 8 + [2000],
+        "vol_ma5": [1000] * 9,
+    })
+    from data.indicators import add_ma
+    df = add_ma(df, [5])
+    sigs = st.on_bar("20260109", {"000001.SZ": df})
+    # 应当生成买入信号
+    assert len(sigs) == 1
+    assert sigs[0].direction == "BUY"
+
+
+def test_multi_factor_and_signal_combo_without_pct_chg_column():
+    """验证 multi_factor 和 signal_combo 缺失 pct_chg 列时自动回退至价格推导"""
+    from strategies.multi_factor import MultiFactorStrategy
+    from strategies.signal_combo import SignalComboStrategy
+
+    mf = MultiFactorStrategy(ma_period=5)
+    sc = SignalComboStrategy(ma_period=5)
+
+    df = pd.DataFrame({
+        "trade_date": [f"2026010{i}" for i in range(1, 35)],
+        "open": [10.0 + i * 0.1 for i in range(34)],
+        "high": [10.2 + i * 0.1 for i in range(34)],
+        "low": [9.8 + i * 0.1 for i in range(34)],
+        "close": [10.1 + i * 0.1 for i in range(34)],
+        "volume": [1000] * 33 + [3000],  # 放量
+        "vol_ma5": [1000] * 34,
+        "ma5": [10.0 + i * 0.1 for i in range(34)],
+        "ma20": [9.5 + i * 0.05 for i in range(34)],
+        "dif": [0.5] * 34,
+        "dea": [0.3] * 34,
+        "macd_hist": [0.4] * 34,
+        "rsi14": [60.0] * 34,
+        "boll_upper": [15.0] * 34,
+        "boll_mid": [12.0] * 34,
+        "boll_lower": [9.0] * 34,
+    })
+    # 故意不包含 pct_chg 列
+    assert "pct_chg" not in df.columns
+
+    # 运行不报错且能正常评分
+    sigs_mf = mf.on_bar("20260134", {"000001.SZ": df})
+    sigs_sc = sc.on_bar("20260134", {"000001.SZ": df})
+    assert isinstance(sigs_mf, list)
+    assert isinstance(sigs_sc, list)
+
+
+def test_get_signals_with_start_date():
+    """验证 get_signals 支持 start_date 区间过滤"""
+    from data.storage import save_signal, get_signals
+    from core.models import Signal
+
+    save_signal(Signal(ts_code="000001.SZ", trade_date="20260301", strategy="ma_cross", direction="BUY", score=0.8))
+    save_signal(Signal(ts_code="000001.SZ", trade_date="20260310", strategy="ma_cross", direction="BUY", score=0.9))
+
+    df_filtered = get_signals(start_date="20260305")
+    assert not df_filtered.empty
+    assert (df_filtered["trade_date"] >= "20260305").all()
+
+
+

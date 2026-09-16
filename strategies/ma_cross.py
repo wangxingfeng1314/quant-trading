@@ -64,7 +64,7 @@ class MACrossStrategy(BaseStrategy):
 
             # 死叉: 快线从上方穿越慢线
             elif prev_fast >= prev_slow and curr_fast < curr_slow:
-                if portfolio and portfolio.get_position(ts_code):
+                if portfolio is None or portfolio.get_position(ts_code):
                     signals.append(Signal(
                         ts_code=ts_code,
                         trade_date=trade_date,

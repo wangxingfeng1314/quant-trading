@@ -50,7 +50,7 @@ class MACDDivergenceStrategy(BaseStrategy):
                     trade_date=trade_date,
                     strategy=self.name,
                     direction="BUY",
-                    score=round(min((curr_macd - macd_at_price_min) / abs(macd_at_price_min + 0.001), 1.0), 2),
+                    score=round(min((curr_macd - macd_at_price_min) / (abs(macd_at_price_min) + 0.001), 1.0), 2),
                     reason=f"MACD底背离: 价格接近低点{price_min:.2f}, "
                            f"MACD柱从{macd_at_price_min:.3f}回升至{curr_macd:.3f}",
                     price_ref=price,
@@ -65,13 +65,13 @@ class MACDDivergenceStrategy(BaseStrategy):
                     and curr_macd < macd_at_price_max
                     and macd_at_price_max > 0
                     and curr_macd > 0):
-                if portfolio and portfolio.get_position(ts_code):
+                if portfolio is None or portfolio.get_position(ts_code):
                     signals.append(Signal(
                         ts_code=ts_code,
                         trade_date=trade_date,
                         strategy=self.name,
                         direction="SELL",
-                        score=round(min((macd_at_price_max - curr_macd) / abs(macd_at_price_max + 0.001), 1.0), 2),
+                        score=round(min((macd_at_price_max - curr_macd) / (abs(macd_at_price_max) + 0.001), 1.0), 2),
                         reason=f"MACD顶背离: 价格接近高点{price_max:.2f}, "
                                f"MACD柱从{macd_at_price_max:.3f}回落至{curr_macd:.3f}",
                         price_ref=price,

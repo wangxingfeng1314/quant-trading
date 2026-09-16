@@ -108,7 +108,9 @@ class MultiFactorStrategy(BaseStrategy):
 
         vol_ratio = vol / vol_ma
         # 放量且上涨 → 看多
-        pct_chg = df["pct_chg"].iloc[-1] if "pct_chg" in df.columns else 0
+        pct_chg = df["pct_chg"].iloc[-1] if ("pct_chg" in df.columns and pd.notna(df["pct_chg"].iloc[-1])) else (
+            (df["close"].iloc[-1] / df["close"].iloc[-2] - 1) * 100 if len(df) >= 2 else 0
+        )
         if vol_ratio > 1.3 and pct_chg > 0:
             return round(min((vol_ratio - 1) * 0.8, 1.0), 2)
         # 放量且下跌 → 看空
@@ -173,7 +175,7 @@ class MultiFactorStrategy(BaseStrategy):
 
             # 卖出信号（持仓中或总分极低）
             elif total <= self.sell_threshold:
-                if portfolio and portfolio.get_position(ts_code):
+                if portfolio is None or portfolio.get_position(ts_code):
                     score = round(min(abs(total) / 5.0, 1.0), 2)
                     signals.append(Signal(
                         ts_code=ts_code, trade_date=trade_date,

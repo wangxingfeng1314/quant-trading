@@ -128,7 +128,7 @@ class DoubleBottomStrategy(BaseStrategy):
                 ))
 
             # 卖出: 持有中且跌破颈线
-            if portfolio and portfolio.get_position(ts_code):
+            if portfolio is None or portfolio.get_position(ts_code):
                 if prev_close >= neck_line and price < neck_line:
                     signals.append(Signal(
                         ts_code=ts_code, trade_date=trade_date,

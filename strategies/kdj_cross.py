@@ -56,7 +56,7 @@ class KDJCrossStrategy(BaseStrategy):
 
             # 死叉卖出: K下穿D 且 K在高位(>60)
             elif prev_k >= prev_d and curr_k < curr_d and curr_k > 60:
-                if portfolio and portfolio.get_position(ts_code):
+                if portfolio is None or portfolio.get_position(ts_code):
                     score = round(min((curr_k - 60) / 40 + (curr_d - curr_k) / 100, 1.0), 2)
                     signals.append(Signal(
                         ts_code=ts_code, trade_date=trade_date,

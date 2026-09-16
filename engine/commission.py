@@ -4,7 +4,8 @@ from core.config import COMMISSION_RATE, MIN_COMMISSION, STAMP_TAX_RATE, TRANSFE
 
 def calc_cost(price: float, volume: int, direction: str,
               commission_rate: float = None,
-              stamp_tax_rate: float = None) -> dict:
+              stamp_tax_rate: float = None,
+              ts_code: str = "") -> dict:
     """计算A股交易费用
 
     Args:
@@ -13,6 +14,7 @@ def calc_cost(price: float, volume: int, direction: str,
         direction: 'BUY' 或 'SELL'
         commission_rate: 佣金费率，默认从配置读取
         stamp_tax_rate: 印花税费率，默认从配置读取
+        ts_code: 标的代码（如 510300.SH，场内ETF免征印花税）
 
     Returns:
         {'commission': 佣金, 'tax': 印花税, 'transfer_fee': 过户费, 'total': 总费用}
@@ -24,11 +26,17 @@ def calc_cost(price: float, volume: int, direction: str,
 
     amount = price * volume
 
+    # 判断是否为场内基金/ETF/可转债（免征印花税）
+    is_etf_or_bond = ts_code.startswith(("51", "56", "58", "15", "16", "11", "12"))
+
     # 佣金：双向收取，最低5元
     commission = max(amount * commission_rate, MIN_COMMISSION)
 
-    # 印花税：仅卖出收取
-    tax = amount * stamp_tax_rate if direction == "SELL" else 0.0
+    # 印花税：仅股票卖出收取（ETF/基金免征）
+    if direction == "SELL" and not is_etf_or_bond:
+        tax = amount * stamp_tax_rate
+    else:
+        tax = 0.0
 
     # 过户费：双向收取
     transfer_fee = amount * TRANSFER_FEE_RATE

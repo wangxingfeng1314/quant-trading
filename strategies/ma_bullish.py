@@ -64,7 +64,7 @@ class MABullishStrategy(BaseStrategy):
 
             # 卖出: 多头排列被破坏（快线下穿中线）
             elif pf > pm and f < m:
-                if portfolio and portfolio.get_position(ts_code):
+                if portfolio is None or portfolio.get_position(ts_code):
                     signals.append(Signal(
                         ts_code=ts_code, trade_date=trade_date,
                         strategy=self.name, direction="SELL",

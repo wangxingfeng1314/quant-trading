@@ -58,10 +58,10 @@ class VolumePriceBreakoutStrategy(BaseStrategy):
             recent_high = self._recent_high(df)
 
             # 买入信号:
-            # 条件1: 收盘站上MA20
+            # 条件1: 收盘站上MA20（昨日在MA下方，今日突破MA上方）
             # 条件2: 放量确认（量能 > MA5量均线的1.5倍）
             # 条件3: 突破前N日高点更佳（加分）
-            if prev_close <= ma_val and price > ma_val and vol_surge:
+            if prev_close <= prev_ma and price > ma_val and vol_surge:
                 # 基础分0.6，突破前高再加分
                 base_score = 0.6
                 bonus = 0.2 if price > recent_high else 0
@@ -79,9 +79,9 @@ class VolumePriceBreakoutStrategy(BaseStrategy):
 
             # 卖出信号:
             # 持有中且缩量反弹至均线附近受压，或放量跌破均线
-            if portfolio and portfolio.get_position(ts_code):
+            if portfolio is None or portfolio.get_position(ts_code):
                 # 场景1: 放量跌破MA20
-                if prev_close >= ma_val and price < ma_val and vol_surge:
+                if prev_close >= prev_ma and price < ma_val and vol_surge:
                     signals.append(Signal(
                         ts_code=ts_code, trade_date=trade_date,
                         strategy=self.name, direction="SELL",

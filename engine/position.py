@@ -53,7 +53,11 @@ class Position:
 
     def sell(self, volume: int, price: float, cost: float) -> float:
         """减仓，优先校验可用份额，返回已实现盈亏"""
-        max_sell = self.available_shares if self.available_shares > 0 else self.shares
+        # 当有明确买入日期时严格按可用份额限制，防止 T+0 违规卖出；无买入日期时兼容单元测试 mock 对象
+        if self.buy_date:
+            max_sell = self.available_shares
+        else:
+            max_sell = self.available_shares if self.available_shares > 0 else self.shares
         if volume > max_sell:
             volume = max_sell
         if volume <= 0:
@@ -83,3 +87,33 @@ class Position:
         if self.avg_cost <= 0:
             return 0.0
         return (current_price / self.avg_cost - 1) * 100
+
+    def adjust_for_split(self, split_factor: float = 1.0, dividend_per_share: float = 0.0) -> float:
+        """除权除息处理
+
+        Args:
+            split_factor: 送转股倍数（如 10 送 2 为 1.2，10 送 10 为 2.0）
+            dividend_per_share: 每股派现金额（元）
+
+        Returns:
+            收到的现金分红总额（元）
+        """
+        if self.is_empty:
+            return 0.0
+
+        cash_dividend = 0.0
+        if dividend_per_share > 0:
+            cash_dividend = round(self.shares * dividend_per_share, 2)
+            # 扣减摊薄成本
+            self.avg_cost = max(0.0, self.avg_cost - dividend_per_share)
+            self.total_cost = max(0.0, self.total_cost - cash_dividend)
+
+        if split_factor > 0 and split_factor != 1.0:
+            self.shares = int(self.shares * split_factor)
+            self.available_shares = int(self.available_shares * split_factor)
+            self.frozen_shares = int(self.frozen_shares * split_factor)
+            if self.shares > 0:
+                self.avg_cost = round(self.avg_cost / split_factor, 4)
+
+        return cash_dividend
+

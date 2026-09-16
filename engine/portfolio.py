@@ -32,6 +32,14 @@ class Portfolio:
         return round(self.cash + self.market_value(prices), 2)
 
     @property
+    def total_value(self) -> float:
+        """组合当前评估总价值（优先取最新净值，缺省以现金加持仓成本估算）"""
+        if self.equity_curve:
+            return float(self.equity_curve[-1].get("equity", self.cash))
+        cost_val = sum(pos.shares * pos.avg_cost for pos in self.positions.values() if not pos.is_empty)
+        return round(self.cash + cost_val, 2)
+
+    @property
     def active_position_count(self) -> int:
         """当前有效持仓（shares > 0）的标的只数"""
         return sum(1 for pos in self.positions.values() if not pos.is_empty)
@@ -60,7 +68,7 @@ class Portfolio:
             return None
 
         # 计算费用
-        cost = calc_cost(price, volume, "BUY")
+        cost = calc_cost(price, volume, "BUY", ts_code=ts_code)
         total_amount = price * volume + cost["total"]
 
         # 资金不足检查
@@ -69,7 +77,7 @@ class Portfolio:
             volume = int(self.cash / (price * 1.001)) // 100 * 100
             if volume <= 0:
                 return None
-            cost = calc_cost(price, volume, "BUY")
+            cost = calc_cost(price, volume, "BUY", ts_code=ts_code)
             total_amount = price * volume + cost["total"]
 
         # 执行买入
@@ -121,26 +129,30 @@ class Portfolio:
             price = adjust_price(price, prev_close, is_st, is_cy)
 
         # 不能卖出超过可用持仓
-        max_sell = pos.available_shares if pos.available_shares > 0 else pos.shares
+        max_sell = pos.available_shares if pos.buy_date else (pos.available_shares if pos.available_shares > 0 else pos.shares)
         volume = min(volume, max_sell)
         if volume <= 0:
             return None
 
         # 计算费用
-        cost = calc_cost(price, volume, "SELL")
+        cost = calc_cost(price, volume, "SELL", ts_code=ts_code)
+
+        buy_date = pos.buy_date
 
         # 执行卖出
         realized_pnl = pos.sell(volume, price, cost["total"])
         self.cash += price * volume - cost["total"]
 
         holding_days = 0
-        if pos.avg_cost > 0:
+        if buy_date:
             # 简单估算持仓天数
             try:
                 from datetime import datetime
-                buy_dt = datetime.strptime(pos.buy_date, "%Y%m%d")
-                sell_dt = datetime.strptime(trade_date, "%Y%m%d")
-                holding_days = (sell_dt - buy_dt).days
+                b_str = str(buy_date).replace("-", "").replace("/", "")
+                s_str = str(trade_date).replace("-", "").replace("/", "")
+                buy_dt = datetime.strptime(b_str, "%Y%m%d")
+                sell_dt = datetime.strptime(s_str, "%Y%m%d")
+                holding_days = max(0, (sell_dt - buy_dt).days)
             except (ValueError, TypeError):
                 pass
 
@@ -180,28 +192,35 @@ class Portfolio:
         initial = equities[0]
         final = equities[-1]
 
-        # 总收益率
-        total_return = (final / initial - 1) * 100
+        # 总收益率 (防止除0)
+        total_return = (final / initial - 1) * 100 if initial > 0 else 0.0
 
-        # 年化收益率
+        # 年化收益率 (防止 final <= 0 产生复数或报 TypeError)
         days = len(equities)
-        annual_return = ((final / initial) ** (252 / max(days, 1)) - 1) * 100
+        if initial > 0 and final > 0 and days > 0:
+            annual_return = ((final / initial) ** (252 / days) - 1) * 100
+        else:
+            annual_return = -100.0 if (initial > 0 and final <= 0) else 0.0
 
-        # 最大回撤
+        # 最大回撤 (防止 peak <= 0)
         peak = equities[0]
         max_dd = 0.0
         for eq in equities:
             peak = max(peak, eq)
-            dd = (peak - eq) / peak * 100
-            max_dd = max(max_dd, dd)
+            if peak > 0:
+                dd = (peak - eq) / peak * 100
+                max_dd = max(max_dd, dd)
 
-        # 夏普比率 (假设无风险利率3%)
+        # 夏普比率 (假设无风险利率3%，防止分母为0)
         sharpe = 0.0
         returns = []
         if len(equities) > 1:
             import numpy as np
-            returns = np.diff(equities) / equities[:-1]
-            if returns.std() > 0:
+            prev_eq = np.array(equities[:-1], dtype=float)
+            prev_eq = np.where(prev_eq == 0, np.nan, prev_eq)
+            returns = np.diff(equities) / prev_eq
+            returns = returns[np.isfinite(returns)]
+            if len(returns) > 1 and returns.std() > 0:
                 sharpe = (returns.mean() * 252 - 0.03) / (returns.std() * np.sqrt(252))
 
         # 卡玛比率 (Calmar Ratio) = 年化收益 / 最大回撤绝对值
@@ -239,3 +258,24 @@ class Portfolio:
             "initial_capital": self.initial_capital,
             "final_capital": round(final, 2),
         }
+
+    def handle_corporate_action(self, ts_code: str, split_factor: float = 1.0, dividend_per_share: float = 0.0) -> float:
+        """处理指定持仓的除权除息（送转增股与现金分红）
+
+        Args:
+            ts_code: 股票代码
+            split_factor: 送转股倍数（如 10 送 2 为 1.2）
+            dividend_per_share: 每股派现（元）
+
+        Returns:
+            收到的现金分红总额并计入现金账户
+        """
+        pos = self.get_position(ts_code)
+        if not pos or pos.is_empty:
+            return 0.0
+
+        cash_div = pos.adjust_for_split(split_factor, dividend_per_share)
+        if cash_div > 0:
+            self.cash += cash_div
+        return cash_div
+

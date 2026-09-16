@@ -50,7 +50,7 @@ class TurtleStrategy(BaseStrategy):
                 ))
 
             # 出场信号: 价格跌破M日最低
-            if portfolio and portfolio.get_position(ts_code):
+            if portfolio is None or portfolio.get_position(ts_code):
                 low_m = df["low"].iloc[-(self.exit_period + 1):-1].min()
                 if price < low_m:
                     signals.append(Signal(

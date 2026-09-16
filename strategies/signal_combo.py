@@ -70,7 +70,9 @@ class SignalComboStrategy(BaseStrategy):
         if "vol_ma5" in df.columns:
             vol = df["volume"].iloc[-1]
             vol_ma = df["vol_ma5"].iloc[-1]
-            pct_chg = df["pct_chg"].iloc[-1] if "pct_chg" in df.columns else 0
+            pct_chg = df["pct_chg"].iloc[-1] if ("pct_chg" in df.columns and pd.notna(df["pct_chg"].iloc[-1])) else (
+                (df["close"].iloc[-1] / df["close"].iloc[-2] - 1) * 100 if len(df) >= 2 else 0
+            )
             if vol_ma > 0 and vol > vol_ma * self.vol_ratio:
                 if pct_chg > 0:
                     score += 1
@@ -115,7 +117,7 @@ class SignalComboStrategy(BaseStrategy):
 
             # 卖出: 总分达到卖出阈值（多维度共振看空）
             elif total <= self.sell_threshold:
-                if portfolio and portfolio.get_position(ts_code):
+                if portfolio is None or portfolio.get_position(ts_code):
                     score = round(min(abs(total) / 4.0, 1.0), 2)
                     signals.append(Signal(
                         ts_code=ts_code, trade_date=trade_date,

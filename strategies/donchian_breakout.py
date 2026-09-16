@@ -67,7 +67,7 @@ class DonchianBreakoutStrategy(BaseStrategy):
                 ))
 
             # 出场信号: 价格跌破下轨
-            if portfolio and portfolio.get_position(ts_code):
+            if portfolio is None or portfolio.get_position(ts_code):
                 if prev_close >= lower and price < lower:
                     signals.append(Signal(
                         ts_code=ts_code, trade_date=trade_date,

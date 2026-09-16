@@ -66,7 +66,7 @@ class RSIDivergenceStrategy(BaseStrategy):
             if (curr_rsi < rsi_at_price_max - 5
                     and price >= price_max * 0.95
                     and curr_rsi > 50):  # RSI在强势区更有效
-                if portfolio and portfolio.get_position(ts_code):
+                if portfolio is None or portfolio.get_position(ts_code):
                     score = round(min((rsi_at_price_max - curr_rsi) / 30, 1.0), 2)
                     signals.append(Signal(
                         ts_code=ts_code, trade_date=trade_date,

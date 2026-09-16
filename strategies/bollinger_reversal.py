@@ -55,7 +55,7 @@ class BollingerReversalStrategy(BaseStrategy):
 
             # 卖出: 前一日在轨内或触轨，今日高点触及上轨后收盘回落
             elif prev_close <= boll_upper and curr_high >= boll_upper and curr_close < boll_upper:
-                if portfolio and portfolio.get_position(ts_code):
+                if portfolio is None or portfolio.get_position(ts_code):
                     score = round(min((boll_upper - curr_close) / (boll_upper - boll_mid + 0.01), 1.0), 2)
                     signals.append(Signal(
                         ts_code=ts_code, trade_date=trade_date,

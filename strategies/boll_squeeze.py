@@ -41,9 +41,11 @@ class BollSqueezeStrategy(BaseStrategy):
 
         # 当前带宽
         curr_bw = (df["boll_upper"].iloc[-1] - df["boll_lower"].iloc[-1]) / mid
-        # 历史带宽序列（不含今日，防未来函数）
+        # 历史带宽序列（不含今日，防未来函数；按各自历史中轨归一化）
+        hist_mid = df["boll_mid"].iloc[-self.lookback - 1:-1] if "boll_mid" in df.columns else df["close"].iloc[-self.lookback - 1:-1]
+        hist_mid = hist_mid.replace(0, float("nan"))
         hist_bw = (df["boll_upper"].iloc[-self.lookback - 1:-1]
-                   - df["boll_lower"].iloc[-self.lookback - 1:-1]) / mid
+                   - df["boll_lower"].iloc[-self.lookback - 1:-1]) / hist_mid
         hist_bw = hist_bw.dropna()
         if len(hist_bw) < 20:
             return False
@@ -87,7 +89,7 @@ class BollSqueezeStrategy(BaseStrategy):
                 ))
 
             # 卖出: 收口后放量跌破下轨
-            if portfolio and portfolio.get_position(ts_code):
+            if portfolio is None or portfolio.get_position(ts_code):
                 if prev_close >= boll_lower and price < boll_lower and vol_ratio >= self.vol_ratio:
                     signals.append(Signal(
                         ts_code=ts_code, trade_date=trade_date,

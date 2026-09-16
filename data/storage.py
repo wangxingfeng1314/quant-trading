@@ -565,15 +565,17 @@ def get_daily(ts_code: str, start_date: str = "", end_date: str = "",
     if end_date:
         query += " AND trade_date <= ?"               # 结束日期过滤
         params.append(end_date)
-    query += " ORDER BY trade_date"
-    # 当 limit > 0 时，在 SQL 层面直接限制返回行数（比全量读取后 tail() 更高效）
     if limit > 0:
-        query += " LIMIT ?"
+        query += " ORDER BY trade_date DESC LIMIT ?"
         params.append(limit)
+    else:
+        query += " ORDER BY trade_date"
     with get_conn() as conn:
         df = pd.read_sql(query, conn, params=params)
     if not df.empty:
         df["trade_date"] = df["trade_date"].astype(str)  # 确保日期为字符串
+        if limit > 0:
+            df = df.sort_values("trade_date").reset_index(drop=True)  # 转回升序
     return df
 
 
@@ -741,13 +743,14 @@ def save_signals_batch(signals: list):
 
 
 def get_signals(trade_date: str = "", strategy: str = "",
-                limit: int = 100) -> pd.DataFrame:
+                limit: int = 100, start_date: str = "") -> pd.DataFrame:
     """查询交易信号
 
     参数:
-        trade_date: 按日期过滤 "YYYYMMDD"（空=全部）
+        trade_date: 按具体单日过滤 "YYYYMMDD"（空=全部）
         strategy:   按策略名过滤（空=全部）
         limit:      最多返回条数
+        start_date: 按起始日期过滤 "YYYYMMDD"（包含当日，空=不限）
 
     返回:
         按日期降序、评分降序排列的信号 DataFrame
@@ -757,6 +760,9 @@ def get_signals(trade_date: str = "", strategy: str = "",
     if trade_date:
         query += " AND trade_date = ?"                   # 按日期筛选
         params.append(trade_date)
+    if start_date:
+        query += " AND trade_date >= ?"                  # 按起始日期筛选
+        params.append(start_date)
     if strategy:
         query += " AND strategy = ?"                     # 按策略筛选
         params.append(strategy)

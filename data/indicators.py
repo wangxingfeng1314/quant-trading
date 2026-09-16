@@ -214,7 +214,7 @@ def apply_indicators(df: pd.DataFrame, indicators: list = None) -> pd.DataFrame:
 
     # 默认指标组合：覆盖最常用的技术分析指标
     if indicators is None:
-        indicators = ["ma", "macd", "rsi", "boll", "vol_ma"]
+        indicators = ["ma", "macd", "rsi", "boll", "vol_ma", "kdj", "atr"]
 
     # 依次计算每个指标
     for name in indicators:

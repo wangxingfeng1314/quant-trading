@@ -95,11 +95,11 @@ def show():
                 else:
                     reasons.append("均线多头")
 
-            # 2. 突破MA20
+            # 2. 突破MA20（昨日收盘在昨日MA20下方，今日收盘突破今日MA20上方）
             if match and breakout_ma20:
                 if "ma20" not in df.columns:
                     match = False
-                elif not (prev["close"] <= prev["ma20"] < latest["close"]):
+                elif not (prev["close"] <= prev["ma20"] and latest["close"] > latest["ma20"]):
                     match = False
                 else:
                     reasons.append("突破MA20")
@@ -180,7 +180,7 @@ def show():
                     "代码": ts_code,
                     "名称": name_map.get(ts_code, ""),
                     "类型": stock_df.loc[stock_df["ts_code"] == ts_code, "type"].iloc[0]
-                            if (stock_df["ts_code"] == ts_code).any() else "",
+                            if ("type" in stock_df.columns and (stock_df["ts_code"] == ts_code).any()) else "",
                     "最新价": latest["close"],
                     "涨跌幅%": round(chg, 2) if pd.notna(chg) else 0,
                     "成交量(万手)": round(latest["volume"] / 10000, 0) if latest["volume"] else 0,

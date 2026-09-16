@@ -8,11 +8,11 @@ from datetime import date, datetime, timedelta
 from data.storage import (get_watchlist, add_to_watchlist, remove_from_watchlist,
                           get_stock_list, get_daily, get_signals, get_latest_date,
                           save_daily, get_positions, add_position, remove_position,
-                          get_instrument_list)
+                          clear_positions, get_instrument_list)
 from data.fetcher import fetch_daily, fetch_instrument_daily
 from data.cleaner import clean_daily
 from core.config import DATA_START_DATE
-from app.st_utils import chinese_dataframe, chinese_date_picker, cached_instrument_list
+from app.st_utils import chinese_dataframe, chinese_date_picker, cached_instrument_list, format_strategy_cn, format_stock_cn
 from app.data_viewer import create_candlestick_chart
 from data.indicators import apply_indicators
 from strategies import STRATEGY_REGISTRY
@@ -116,30 +116,28 @@ def _show_watchlist():
     if group_filter != "全部":
         watchlist = watchlist[watchlist["group_name"] == group_filter]
 
+    name_map = dict(zip(stock_df["ts_code"], stock_df["name"])) if not stock_df.empty else {}
+
     # 获取每只自选股的最新价格
     rows = []
     for _, wl_row in watchlist.iterrows():
         ts_code = wl_row["ts_code"]
+        name = name_map.get(ts_code, ts_code)
         df = get_daily(ts_code)
         if df.empty:
             rows.append({
-                "代码": ts_code, "名称": ts_code,
-                "最新价": "-", "涨跌幅": "-",
+                "股票": format_stock_cn(ts_code, name_map),
+                "最新价": "-",
+                "涨跌幅": "-",
                 "分组": wl_row.get("group_name", ""),
                 "备注": wl_row.get("note", ""),
             })
             continue
 
         latest = df.iloc[-1]
-        name = ts_code
-        if not stock_df.empty:
-            match = stock_df[stock_df["ts_code"] == ts_code]
-            if not match.empty:
-                name = match.iloc[0]["name"]
 
         rows.append({
-            "代码": ts_code,
-            "名称": name,
+            "股票": format_stock_cn(ts_code, name_map),
             "最新价": f"¥{latest['close']:.2f}",
             "涨跌幅": f"{latest.get('pct_chg', 0):.2f}%",
             "分组": wl_row.get("group_name", ""),
@@ -158,55 +156,89 @@ def _show_watchlist():
         mime="text/csv",
     )
 
-    # 删除自选股（带二次确认）
-    with st.expander("移除自选股"):
-        remove_code = st.selectbox(
-            "选择要移除的股票",
-            watchlist["ts_code"].tolist(),
-            key="remove_select",
-        )
-        col_confirm_a, col_confirm_b = st.columns([1, 1])
-        with col_confirm_a:
-            if st.button("🗑️ 移除", type="secondary", key="remove_btn",
-                         use_container_width=True):
-                st.session_state["confirm_remove"] = remove_code
-        with col_confirm_b:
-            if st.session_state.get("confirm_remove") == remove_code:
-                if st.button("✅ 确认删除", type="primary", key="confirm_btn",
-                             use_container_width=True):
-                    remove_from_watchlist(remove_code)
-                    st.toast(f"✅ 已移除 {remove_code}", icon="🗑️")
-                    st.session_state.pop("confirm_remove", None)
-                    st.rerun()
-                st.caption("⚠️ 再次点击「移除」可取消")
-            else:
-                st.session_state.pop("confirm_remove", None)
+    # 构造标的代码与中文名称映射
+    name_map = dict(zip(stock_df["ts_code"], stock_df["name"])) if stock_df is not None and not stock_df.empty else {}
+    format_stock = lambda code: f"{code} {name_map.get(code, '')}".strip()
 
-    # 分组管理
-    with st.expander("分组管理"):
-        group_code = st.selectbox("选择股票", watchlist["ts_code"].tolist(), key="group_code")
-        group_name = st.text_input("分组名称", placeholder="如: 长线池、短线池", key="group_name_input",
-                                    value=watchlist[watchlist["ts_code"] == group_code]["group_name"].iloc[0]
-                                    if group_code in watchlist["ts_code"].values else "")
-        if st.button("保存分组", key="save_group"):
-            update_watchlist_group(group_code, group_name)
-            st.success(f"已设置 {group_code} 分组为 {group_name}")
-            st.rerun()
+    # 删除自选股（通过表单封装，彻底消除勾选即触发刷新和跳顶问题）
+    with st.expander("移除自选股", expanded=False):
+        with st.form("remove_watchlist_form", clear_on_submit=True):
+            remove_codes = st.multiselect(
+                "选择要移除的股票（支持多选，勾选不会刷新页面）",
+                watchlist["ts_code"].tolist(),
+                format_func=format_stock,
+                key="remove_multiselect",
+            )
+            col_rm1, col_rm2 = st.columns([1, 2])
+            with col_rm1:
+                confirm_del = st.form_submit_button("🗑️ 确认批量移除", type="primary", use_container_width=True)
+            with col_rm2:
+                st.caption("💡 提示：支持同时勾选多只股票/ETF，点击按钮后一次性批量移除，操作过程中绝不跳动页面")
+
+            if confirm_del:
+                if not remove_codes:
+                    st.warning("请先勾选需要移除的股票")
+                else:
+                    for code in remove_codes:
+                        remove_from_watchlist(code)
+                    st.toast(f"✅ 已成功移除 {len(remove_codes)} 只自选股", icon="🗑️")
+                    st.rerun()
+
+    # 分组管理（通过表单封装，彻底消除勾选即触发刷新和跳顶问题）
+    with st.expander("分组管理", expanded=False):
+        with st.form("group_watchlist_form", clear_on_submit=False):
+            group_codes = st.multiselect(
+                "选择股票（支持多选批量分组，勾选不会刷新页面）",
+                watchlist["ts_code"].tolist(),
+                format_func=format_stock,
+                key="group_multiselect",
+            )
+
+            col_g1, col_g2 = st.columns([1, 2])
+            with col_g1:
+                existing_groups = ["-- 自定义输入 --"] + [g for g in groups if g]
+                preset_group = st.selectbox("从已有分组选取", existing_groups, key="preset_group_pick")
+            with col_g2:
+                default_val = "" if preset_group == "-- 自定义输入 --" else preset_group
+                group_name = st.text_input(
+                    "目标分组名称",
+                    value=default_val,
+                    placeholder="如: 核心资产、短线博弈、新能源池（留空即清空分组）",
+                    key="group_name_input",
+                )
+
+            submit_group = st.form_submit_button("💾 保存分组设置", type="primary", use_container_width=False)
+            if submit_group:
+                if not group_codes:
+                    st.warning("请至少勾选一只股票")
+                else:
+                    target_name = group_name.strip()
+                    for code in group_codes:
+                        update_watchlist_group(code, target_name)
+                    st.toast(f"✅ 已将选中的 {len(group_codes)} 只标的分组设置为: 「{target_name or '默认'}」", icon="💾")
+                    st.rerun()
+
 
     # 自选股K线快览
     st.subheader("K线快览")
     if not watchlist.empty:
-        selected_code = st.selectbox("查看K线", watchlist["ts_code"].tolist())
+        selected_code = st.selectbox(
+            "查看K线",
+            watchlist["ts_code"].tolist(),
+            format_func=format_stock,
+        )
         if selected_code:
+            stock_display_name = name_map.get(selected_code, selected_code)
             df = get_daily(selected_code)
             if not df.empty:
                 df = apply_indicators(df, ["ma", "vol_ma"])
                 fig = create_candlestick_chart(
-                    df, selected_code, selected_code,
+                    df, selected_code, stock_display_name,
                     show_volume=True, show_macd=False, show_boll=False,
                     height=400,
                 )
                 st.plotly_chart(fig, width='stretch')
+
 
 
 def _show_portfolio():
@@ -214,7 +246,8 @@ def _show_portfolio():
     st.subheader("模拟持仓")
     st.caption("记录你的实际持仓，跟踪盈亏（数据持久化到数据库）")
 
-    stock_df = get_instrument_list()  # 股票 + ETF 合并列表（用于持仓名称显示）
+    stock_df = cached_instrument_list()  # 股票 + ETF 合并列表（用于持仓名称显示）
+    name_map = dict(zip(stock_df["ts_code"], stock_df["name"])) if not stock_df.empty else {}
 
     # 添加持仓
     with st.form("add_position", clear_on_submit=True):
@@ -254,16 +287,13 @@ def _show_portfolio():
         pnl = value - cost
         pnl_pct = (current_price / pos["buy_price"] - 1) * 100
 
-        name = ts_code
-        if not stock_df.empty:
-            match = stock_df[stock_df["ts_code"] == ts_code]
-            if not match.empty:
-                name = match.iloc[0]["name"]
+        name = name_map.get(ts_code, ts_code)
 
         total_cost += cost
         total_value += value
 
         rows.append({
+            "股票": format_stock_cn(ts_code, name_map),
             "代码": ts_code,
             "名称": name,
             "买入价": f"¥{pos['buy_price']:.2f}",
@@ -288,10 +318,26 @@ def _show_portfolio():
     c3.metric("总盈亏", f"¥{total_pnl:,.0f}")
     c4.metric("收益率", f"{total_pnl_pct:.2f}%")
 
-    # 清空持仓
-    if st.button("清空所有持仓"):
-        st.session_state.positions = []
-        st.rerun()
+    col_del1, col_del2 = st.columns([1, 1])
+    with col_del1:
+        if st.button("🗑️ 清空所有持仓", type="secondary"):
+            clear_positions()
+            st.session_state.positions = []
+            st.toast("已清空所有模拟持仓", icon="🗑️")
+            st.rerun()
+    with col_del2:
+        with st.popover("❌ 移除单只持仓"):
+            del_pos_choice = st.selectbox(
+                "选择要移除的持仓",
+                positions,
+                format_func=lambda p: f"{p['ts_code']} {name_map.get(p['ts_code'], '')} ({p['shares']}股 @ ¥{p['buy_price']:.2f})",
+                key="del_single_pos_select",
+            )
+            if st.button("确认移除", type="primary", key="confirm_del_single_pos"):
+                if del_pos_choice and "_id" in del_pos_choice:
+                    remove_position(del_pos_choice["_id"])
+                    st.toast(f"已移除 {del_pos_choice['ts_code']} 持仓", icon="✅")
+                    st.rerun()
 
 
 def _show_auto_trade():
@@ -345,7 +391,7 @@ def _show_auto_trade():
                     "股票": f"{sig['ts_code']} {name_map.get(sig['ts_code'], '')}",
                     "信号价": f"¥{sig['price_ref']:.2f}" if sig["price_ref"] else "-",
                     "评分": sig["score"],
-                    "策略": sig["strategy"],
+                    "策略": format_strategy_cn(sig["strategy"]),
                     "状态": has_pos,
                     "原因": sig.get("reason", ""),
                 })
@@ -356,13 +402,16 @@ def _show_auto_trade():
             # 一键跟单按钮
             if st.button("📥 一键跟入（将买入信号加入持仓）"):
                 added = 0
+                existing_set = set(existing_codes)
                 for _, sig in buy_signals.iterrows():
-                    if sig["ts_code"] not in existing_codes and sig["price_ref"] > 0:
+                    code = sig["ts_code"]
+                    if code not in existing_set and sig["price_ref"] > 0:
                         budget_per_stock = 50000
                         shares = int(budget_per_stock / sig["price_ref"]) // 100 * 100
                         if shares >= 100:
-                            add_position(sig["ts_code"], sig["price_ref"], shares, sig["trade_date"])
+                            add_position(code, sig["price_ref"], shares, sig["trade_date"])
                             added += 1
+                            existing_set.add(code)
                 st.success(f"已跟入 {added} 只股票到模拟持仓")
                 st.rerun()
         else:
@@ -377,7 +426,7 @@ def _show_auto_trade():
                     "股票": f"{sig['ts_code']} {name_map.get(sig['ts_code'], '')}",
                     "信号价": f"¥{sig['price_ref']:.2f}" if sig["price_ref"] else "-",
                     "评分": sig["score"],
-                    "策略": sig["strategy"],
+                    "策略": format_strategy_cn(sig["strategy"]),
                     "持仓": f"{pos['shares']}股" if pos else "无",
                     "原因": sig.get("reason", ""),
                 })
@@ -387,9 +436,10 @@ def _show_auto_trade():
 
             if st.button("📤 一键跟出（将卖出信号从持仓移除）"):
                 removed = 0
-                for sig_ts_code in sell_signals["ts_code"].tolist():
-                    pos = next((p for p in get_positions() if p["ts_code"] == sig_ts_code), None)
-                    if pos:
+                target_codes = set(sell_signals["ts_code"].tolist())
+                current_positions = get_positions()
+                for pos in current_positions:
+                    if pos["ts_code"] in target_codes:
                         remove_position(pos["_id"])
                         removed += 1
                 st.success(f"已移除 {removed} 只持仓")
@@ -401,9 +451,13 @@ def _show_auto_trade():
     st.subheader("📈 持仓K线（含买卖点标注）")
     current_positions = get_positions()
     if current_positions:
+        stock_df = cached_instrument_list()
+        pos_name_map = dict(zip(stock_df["ts_code"], stock_df["name"])) if stock_df is not None and not stock_df.empty else {}
         pos_code = st.selectbox(
             "选择持仓股票查看K线",
             [p["ts_code"] for p in current_positions],
+            format_func=lambda c: f"{c} {pos_name_map.get(c, '')}".strip(),
+            key="pos_kline_select",
         )
         if pos_code:
             df = get_daily(pos_code)
@@ -415,8 +469,9 @@ def _show_auto_trade():
                     p["buy_date"] for p in current_positions
                     if p["ts_code"] == pos_code and p.get("buy_date")
                 ]
+                pos_display_name = pos_name_map.get(pos_code, pos_code)
                 fig = create_candlestick_chart(
-                    df, pos_code, pos_code,
+                    df, pos_code, pos_display_name,
                     show_volume=True, show_macd=False, show_boll=False,
                     buy_dates=buy_dates,
                     height=420,

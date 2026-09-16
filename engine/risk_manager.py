@@ -22,14 +22,23 @@ class RiskManager:
                  stop_loss_pct: float = -5.0,
                  trailing_stop_activation: float = 8.0,
                  trailing_stop_callback: float = 3.0,
-                 max_holding_days: int = 0):
+                 max_holding_days: int = 0,
+                 trailing_stop_pct: Optional[float] = None,
+                 trailing_callback_pct: Optional[float] = None):
         """
         Args:
             stop_loss_pct: 固定止损百分比，如 -5.0 代表亏损5%止损
             trailing_stop_activation: 移动跟踪止盈激活阈值百分比，如 8.0 代表涨幅达到8%激活
             trailing_stop_callback: 移动止盈回撤阈值百分比，如 3.0 代表从最高点回撤3%触发止盈
             max_holding_days: 最大持仓天数，0 表示不限制
+            trailing_stop_pct: trailing_stop_activation 的参数别名
+            trailing_callback_pct: trailing_stop_callback 的参数别名
         """
+        if trailing_stop_pct is not None:
+            trailing_stop_activation = trailing_stop_pct
+        if trailing_callback_pct is not None:
+            trailing_stop_callback = trailing_callback_pct
+
         self.stop_loss_pct = stop_loss_pct
         self.trailing_stop_activation = trailing_stop_activation
         self.trailing_stop_callback = trailing_stop_callback
@@ -38,14 +47,32 @@ class RiskManager:
         # 跟踪每个持仓标的的最高价: {ts_code: highest_price}
         self.highest_prices: Dict[str, float] = {}
 
-    def update_highs(self, current_prices: Dict[str, float]):
-        """更新标的最新最高价"""
-        for ts_code, price in current_prices.items():
+    def update_highs(self, current_prices: Dict[str, float], active_positions: Optional[dict] = None):
+        """更新标的最新最高价（严格限定于当前持仓标的，防止未持仓股票的历史价格污染移动止盈基准）"""
+        if active_positions is not None:
+            active_codes = {c for c, p in active_positions.items() if not p.is_empty}
+        else:
+            active_codes = set(current_prices.keys())
+
+        # 清理已平仓或非活跃的标的
+        for code in list(self.highest_prices.keys()):
+            if code not in active_codes:
+                self.highest_prices.pop(code, None)
+
+        for ts_code in active_codes:
+            price = current_prices.get(ts_code)
+            if price is None or price <= 0:
+                continue
+
+            pos = active_positions.get(ts_code) if active_positions else None
+            cost = pos.avg_cost if (pos and pos.avg_cost > 0) else price
+
             if ts_code in self.highest_prices:
                 if price > self.highest_prices[ts_code]:
                     self.highest_prices[ts_code] = price
             else:
-                self.highest_prices[ts_code] = price
+                # 首次建仓跟踪，以建仓成本与当前价的较高者作为起始基准
+                self.highest_prices[ts_code] = max(cost, price)
 
     def check_risks(self, trade_date: str, portfolio: Portfolio,
                     current_prices: Dict[str, float]) -> List[Signal]:
@@ -59,7 +86,7 @@ class RiskManager:
         Returns:
             触发风控的 Signal 列表（direction='SELL'）
         """
-        self.update_highs(current_prices)
+        self.update_highs(current_prices, active_positions=portfolio.positions)
         risk_signals = []
 
         for ts_code, pos in portfolio.positions.items():
@@ -131,8 +158,10 @@ class RiskManager:
             # --- 风控规则3: 最大持仓周期退出 ---
             if self.max_holding_days > 0 and pos.buy_date:
                 try:
-                    b_dt = datetime.strptime(pos.buy_date, "%Y%m%d")
-                    c_dt = datetime.strptime(trade_date, "%Y%m%d")
+                    b_str = str(pos.buy_date).replace("-", "").replace("/", "")
+                    c_str = str(trade_date).replace("-", "").replace("/", "")
+                    b_dt = datetime.strptime(b_str, "%Y%m%d")
+                    c_dt = datetime.strptime(c_str, "%Y%m%d")
                     holding_days = (c_dt - b_dt).days
                     if holding_days >= self.max_holding_days:
                         risk_signals.append(Signal(

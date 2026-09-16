@@ -57,7 +57,7 @@ class MACDCrossStrategy(BaseStrategy):
 
             # 死叉: DIF从上方下穿DEA
             elif prev_dif >= prev_dea and curr_dif < curr_dea:
-                if portfolio and portfolio.get_position(ts_code):
+                if portfolio is None or portfolio.get_position(ts_code):
                     score = 0.5 + (0.4 if curr_dif > 0 else 0.0)
                     score += min(abs(curr_dif - curr_dea) / 0.2, 0.1)
                     signals.append(Signal(

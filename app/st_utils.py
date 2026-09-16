@@ -179,3 +179,80 @@ def cached_instrument_list() -> pd.DataFrame:
     from data.storage import get_instrument_list
     return get_instrument_list()
 
+
+# 常见策略代号到中文规范名称映射
+STRATEGY_CHINESE_NAMES = {
+    "macd_cross": "MACD金叉死叉",
+    "ma_cross": "双均线交叉",
+    "ma_bullish": "均线多头排列",
+    "ma_pullback": "均线回踩",
+    "ma60_breakout": "60日均线突破",
+    "rsi_oversold": "RSI超卖反弹",
+    "rsi_divergence": "RSI底背离",
+    "bollinger_reversal": "布林带触轨反转",
+    "boll_squeeze": "布林带收口突破",
+    "kdj_cross": "KDJ金叉死叉",
+    "double_bottom": "W底形态反转",
+    "turtle": "海龟交易法则",
+    "donchian_breakout": "唐奇安通道突破",
+    "volume_price_breakout": "量价突破",
+    "multi_factor": "多因子综合评分",
+    "signal_combo": "双策略组合验证",
+    "arbitrated_net": "多空博弈净额",
+}
+
+
+def format_strategy_cn(name: str) -> str:
+    """将策略代号转换为规范中文名称"""
+    if not name:
+        return ""
+    name_str = str(name).strip()
+    if name_str in STRATEGY_CHINESE_NAMES:
+        return STRATEGY_CHINESE_NAMES[name_str]
+    if name_str.startswith("ensemble_"):
+        count = name_str.split("_")[-1]
+        return f"多策略共振({count}合一)"
+    # 处理逗号分隔的多策略（如 "macd_cross, rsi_oversold"）
+    if "," in name_str:
+        parts = [p.strip() for p in name_str.split(",") if p.strip()]
+        return ", ".join(STRATEGY_CHINESE_NAMES.get(p, p) for p in parts)
+    # 从 STRATEGY_REGISTRY 取 description
+    try:
+        from strategies import STRATEGY_REGISTRY
+        if name_str in STRATEGY_REGISTRY:
+            desc = STRATEGY_REGISTRY[name_str].description
+            if "（" in desc:
+                return desc.split("（")[0].strip()
+            if "(" in desc:
+                return desc.split("(")[0].strip()
+            return desc[:12].strip()
+    except Exception:
+        pass
+    return name_str
+
+
+def format_direction_cn(direction: str, with_icon: bool = True) -> str:
+    """将交易方向 BUY/SELL 转换为中文 买入/卖出"""
+    if not direction:
+        return ""
+    d_upper = str(direction).strip().upper()
+    if d_upper in ("BUY", "买入", "🟢 买入"):
+        return "🟢 买入" if with_icon else "买入"
+    elif d_upper in ("SELL", "卖出", "🔴 卖出"):
+        return "🔴 卖出" if with_icon else "卖出"
+    return str(direction)
+
+
+def format_stock_cn(ts_code: str, name_map: dict = None) -> str:
+    """将股票代码转换为带中文名称的格式，如 '000001.SZ 平安银行'"""
+    if not ts_code:
+        return ""
+    code_str = str(ts_code).strip()
+    if name_map is None:
+        stock_df = cached_instrument_list()
+        name_map = dict(zip(stock_df["ts_code"], stock_df["name"])) if not stock_df.empty else {}
+    name = name_map.get(code_str, "")
+    return f"{code_str} {name}".strip() if name else code_str
+
+
+

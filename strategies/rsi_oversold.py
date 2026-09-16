@@ -55,7 +55,7 @@ class RSIOversoldStrategy(BaseStrategy):
 
             # 卖出: 前一日RSI > 超买线，今日下穿超买线
             elif prev_rsi > self.overbought and curr_rsi < self.overbought:
-                if portfolio and portfolio.get_position(ts_code):
+                if portfolio is None or portfolio.get_position(ts_code):
                     score = round(min((self.overbought - curr_rsi) / 30, 1.0), 2)
                     signals.append(Signal(
                         ts_code=ts_code, trade_date=trade_date,

@@ -155,3 +155,48 @@ APP_AUTH_ENABLED = os.getenv("APP_AUTH_ENABLED", "false").lower() == "true"
 
 APP_AUTH_PASSWORD = os.getenv("APP_AUTH_PASSWORD", "")
 # 应用登录密码（为空且 AUTH_ENABLED=true 时使用默认密码 "quant123"）
+
+# ============================================================
+# 流动性与停牌风控配置（原 scanner.py 扩展）
+# ============================================================
+SCANNER_MIN_DAILY_AMOUNT = float(os.getenv("SCANNER_MIN_DAILY_AMOUNT", "0"))
+# 最少日均成交额过滤（元，默认 0 不强滤，实盘建议 20000000-30000000）
+
+SCANNER_FILTER_SUSPENDED = os.getenv("SCANNER_FILTER_SUSPENDED", "true").lower() == "true"
+# 是否过滤最新交易日停牌/无成交量标的
+
+# ============================================================
+# 生产级日志分级轮转（Log Rotation）
+# ============================================================
+import logging
+from logging.handlers import RotatingFileHandler
+
+def setup_logging(name: str = "quant", level: int = logging.INFO, log_filename: str = "quant.log") -> logging.Logger:
+    """初始化生产级日志轮转记录器
+
+    - 自动挂载 RotatingFileHandler，单文件上限 20MB，保留 5 份历史归档
+    - UTF-8 编码，统一输出格式
+    """
+    logger = logging.getLogger(name)
+    logger.setLevel(level)
+
+    # 避免重复挂载 handler
+    file_handlers = [h for h in logger.handlers if isinstance(h, RotatingFileHandler)]
+    if not file_handlers:
+        log_file = LOG_DIR / log_filename
+        rfh = RotatingFileHandler(
+            str(log_file),
+            maxBytes=20 * 1024 * 1024,  # 20MB
+            backupCount=5,
+            encoding="utf-8",
+        )
+        formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s - %(message)s")
+        rfh.setFormatter(formatter)
+        rfh.setLevel(level)
+        logger.addHandler(rfh)
+
+    return logger
+
+# 默认配置全局日志记录器
+default_logger = setup_logging()
+

@@ -161,8 +161,7 @@ class Backtester:
                             if portfolio.active_position_count >= self.max_active_positions:
                                 continue
 
-                        position_pct = BACKTEST_MIN_POSITION_PCT + sig.score * BACKTEST_POSITION_STEP
-                        budget = portfolio.cash * position_pct
+                        budget = self._calc_buy_budget(portfolio, sig)
                         volume = int(budget / max(open_price, 1)) // 100 * 100
                         if volume > 0:
                             portfolio.buy(
@@ -178,7 +177,7 @@ class Backtester:
                     elif sig.direction == "SELL":
                         pos = portfolio.get_position(ts_code)
                         if pos and not pos.is_empty:
-                            sell_vol = pos.available_shares if pos.available_shares > 0 else pos.shares
+                            sell_vol = pos.available_shares if pos.buy_date else (pos.available_shares if pos.available_shares > 0 else pos.shares)
                             portfolio.sell(
                                 ts_code=ts_code,
                                 price=open_price,
@@ -225,8 +224,7 @@ class Backtester:
                             if portfolio.active_position_count >= self.max_active_positions:
                                 continue
 
-                        position_pct = BACKTEST_MIN_POSITION_PCT + sig.score * BACKTEST_POSITION_STEP
-                        budget = portfolio.cash * position_pct
+                        budget = self._calc_buy_budget(portfolio, sig)
                         volume = int(budget / max(sig.price_ref, 1)) // 100 * 100
                         if volume > 0:
                             portfolio.buy(
@@ -242,7 +240,7 @@ class Backtester:
                     elif sig.direction == "SELL":
                         pos = portfolio.get_position(sig.ts_code)
                         if pos and not pos.is_empty:
-                            sell_vol = pos.available_shares if pos.available_shares > 0 else pos.shares
+                            sell_vol = pos.available_shares if pos.buy_date else (pos.available_shares if pos.available_shares > 0 else pos.shares)
                             portfolio.sell(
                                 ts_code=sig.ts_code,
                                 price=sig.price_ref,
@@ -320,6 +318,16 @@ class Backtester:
                 if col in row and pd.notna(row[col]):
                     snap[col] = round(float(row[col]), 2)
         return snap
+
+    def _calc_buy_budget(self, portfolio, sig) -> float:
+        """根据组合总资产与持仓限制计算单笔买入预算，消除现金连续衰减偏差"""
+        if self.max_active_positions > 0:
+            target_pct = min(1.0 / self.max_active_positions, 1.0)
+        else:
+            target_pct = min(BACKTEST_MIN_POSITION_PCT + sig.score * BACKTEST_POSITION_STEP, 1.0)
+        # 以组合当前总净值 (NAV) 定额，并受限于可用现金
+        ideal_budget = portfolio.total_value * target_pct
+        return max(0.0, min(portfolio.cash, ideal_budget))
 
 
 def preload_backtest_data(universe: list, start_date: str, end_date: str) -> dict:

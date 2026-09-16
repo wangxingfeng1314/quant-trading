@@ -257,15 +257,80 @@ def inject_page_transition_js():
             pDoc.body.appendChild(loader);
         }
 
+        const pWin = window.parent;
+        if (!pWin.__quant_scroll_state) {
+            pWin.__quant_scroll_state = {
+                lastScrollTop: 0,
+                isNavSwitching: false,
+                restoreUntil: 0
+            };
+        }
+        const state = pWin.__quant_scroll_state;
+
         function getMainContainer() {
             return pDoc.querySelector('[data-testid="stMainBlockContainer"]') ||
                    pDoc.querySelector('section.main') ||
                    pDoc.querySelector('[data-testid="stMain"]');
         }
 
+        function getScrollContainer() {
+            return pDoc.querySelector('[data-testid="stAppViewContainer"]') ||
+                   pDoc.querySelector('section.main') ||
+                   pDoc.documentElement;
+        }
+
+        function getEffectiveScrollTop() {
+            const sc = getScrollContainer();
+            if (sc && sc.scrollTop > 0) return sc.scrollTop;
+            if (pWin.scrollY > 0) return pWin.scrollY;
+            if (pDoc.documentElement && pDoc.documentElement.scrollTop > 0) return pDoc.documentElement.scrollTop;
+            if (pDoc.body && pDoc.body.scrollTop > 0) return pDoc.body.scrollTop;
+            return 0;
+        }
+
+        function applyScrollTop(val) {
+            if (val <= 0) return;
+            const sc = getScrollContainer();
+            if (sc) sc.scrollTop = val;
+            try { pWin.scrollTo(0, val); } catch(e) {}
+            if (pDoc.documentElement) pDoc.documentElement.scrollTop = val;
+            if (pDoc.body) pDoc.body.scrollTop = val;
+        }
+
+        // 持续记录滚动条位置（只要有滚动或者交互就更新快照）
+        function trackScroll() {
+            if (state.isNavSwitching) return;
+            const cur = getEffectiveScrollTop();
+            if (cur > 0) {
+                state.lastScrollTop = cur;
+            }
+        }
+
+        // 绑定页面滚动和用户交互事件（点击任何按钮、多选、下拉前，先为滚动条拍下快照）
+        pWin.addEventListener('scroll', trackScroll, { passive: true });
+        pDoc.addEventListener('scroll', trackScroll, { passive: true });
+        const scInit = getScrollContainer();
+        if (scInit) scInit.addEventListener('scroll', trackScroll, { passive: true });
+
+        pDoc.addEventListener('mousedown', function(e) {
+            // 如果不是在侧边栏导航点击，就记录当前的滚动位置
+            const inSidebarRadio = e.target.closest('section[data-testid="stSidebar"] div[role="radiogroup"]');
+            if (!inSidebarRadio) {
+                trackScroll();
+                state.restoreUntil = Date.now() + 1200; // 交互后 1.2 秒内若发生重绘，锁定滚动条
+            }
+        }, { passive: true, capture: true });
+
         let hideTimeout = null;
 
+        // 侧边栏导航切换页面时，才允许重置滚动条到顶部
         function triggerTransition(pageText) {
+            state.isNavSwitching = true;
+            state.lastScrollTop = 0;
+            state.restoreUntil = 0;
+
+            applyScrollTop(0);
+
             const main = getMainContainer();
             if (main) {
                 main.style.opacity = '0';
@@ -279,11 +344,12 @@ def inject_page_transition_js():
                 loader.style.display = 'flex';
             }
 
-            // 安全兜底计时器（最多 5 秒自动隐藏，防止异常情况悬停）
+            // 安全兜底计时器（最多 5 秒自动隐藏）
             if (hideTimeout) clearTimeout(hideTimeout);
             hideTimeout = setTimeout(function() {
                 if (loader) loader.style.display = 'none';
                 if (main) main.style.opacity = '1';
+                state.isNavSwitching = false;
             }, 5000);
         }
 
@@ -295,7 +361,7 @@ def inject_page_transition_js():
             if (!radioGroup || radioGroup.dataset.changeBound) return;
             radioGroup.dataset.changeBound = "true";
 
-            // 监听 change 事件：单选框值改变时触发过渡，绝不拦截 mousedown/mouseup，100% 原生响应
+            // 监听 change 事件：单选框值改变时触发过渡
             radioGroup.addEventListener('change', function(e) {
                 const label = e.target.closest('label');
                 const pageText = label ? label.innerText.trim() : '';
@@ -303,18 +369,29 @@ def inject_page_transition_js():
             });
         }
 
-        // 监听运行状态：新页面渲染完成后平滑淡入并隐藏遮罩
+        // 监听运行状态：新页面渲染完成后平滑淡入；同时持续防跳顶
         setInterval(function() {
             setupListeners();
             const statusWidget = pDoc.querySelector('[data-testid="stStatusWidget"]');
             const main = getMainContainer();
+
+            // 若处于页面内组件交互或 rerun 状态，且检测到被浏览器归零，强力平滑锚定回快照位置
+            if (!state.isNavSwitching && state.lastScrollTop > 0) {
+                const cur = getEffectiveScrollTop();
+                if (cur === 0 || Date.now() < state.restoreUntil) {
+                    applyScrollTop(state.lastScrollTop);
+                }
+            }
+
             if (!statusWidget && loader && loader.style.display !== 'none') {
                 loader.style.display = 'none';
+                state.isNavSwitching = false;
                 if (main) {
                     main.style.opacity = '1';
                 }
             }
-        }, 60);
+        }, 40);
+
 
         setupListeners();
     })();

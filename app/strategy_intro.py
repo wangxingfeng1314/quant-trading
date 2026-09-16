@@ -4,7 +4,7 @@ import app  # noqa: F401
 import streamlit as st
 import pandas as pd
 from strategies import STRATEGY_REGISTRY, list_strategies
-from app.st_utils import chinese_dataframe, strategy_style_badge
+from app.st_utils import chinese_dataframe, strategy_style_badge, format_strategy_cn
 from data.storage import get_conn
 
 
@@ -66,7 +66,7 @@ def show():
         if stats:
             ranking_data.append({
                 "风格": s.get("style", "综合"),
-                "策略": s["name"],
+                "策略": f"{format_strategy_cn(s['name'])} ({s['name']})",
                 "说明": s["desc"],
                 "平均总收益%": stats["平均总收益%"],
                 "平均年化%": stats["平均年化%"],
@@ -116,7 +116,7 @@ def show():
             doc = cls.__doc__ or ""
             stats = strategy_stats.get(s["name"])
 
-            label = f"**{s['name']}** — {s['desc']}"
+            label = f"**{format_strategy_cn(s['name'])}** (`{s['name']}`) — {s['desc']}"
             if stats:
                 label += f"  (📈 平均收益 {stats['平均总收益%']:+.1f}%)"
 

@@ -6,9 +6,19 @@ import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 
-from data.storage import get_instrument_list, get_daily, get_watchlist, get_daily_count, get_signals, batch_get_latest, get_index_daily, get_stocks_with_data, get_latest_date, get_index_latest_date
-from app.st_utils import chinese_dataframe, cached_get_stocks_with_data, cached_check_data_freshness, cached_instrument_list
+from data.storage import (
+    get_instrument_list, get_daily, get_watchlist, get_daily_count,
+    get_signals, batch_get_latest, get_index_daily, get_stocks_with_data,
+    get_latest_date, get_index_latest_date,
+)
+from app.st_utils import (
+    chinese_dataframe, cached_get_stocks_with_data, cached_check_data_freshness,
+    cached_instrument_list, format_strategy_cn, format_direction_cn,
+)
 from data.indicators import apply_indicators
+from core.config import TUSHARE_TOKEN
+
+
 
 
 def show():
@@ -52,13 +62,14 @@ def show():
     with col1:
         _show_market_overview()
     with col2:
-        # 复盘报告按钮
-        if st.button("📋 生成每日复盘报告", use_container_width=True, type="secondary"):
-            _generate_daily_report()
+        # 复盘报告按钮容器
+        with st.popover("📋 每日复盘报告 (查看/导出)", use_container_width=True):
+            _render_daily_report()
 
     st.markdown("---")
 
-    tab1, tab2, tab3 = st.tabs(["⭐ 自选股快照", "📡 今日信号", "📊 自选股排行"])
+
+    tab1, tab2, tab3, tab4 = st.tabs(["⭐ 自选股快照", "📡 今日信号", "📊 自选股排行", "🔌 数据健康监控"])
 
     with tab1:
         _show_watchlist_snapshot()
@@ -66,6 +77,9 @@ def show():
         _show_today_signals()
     with tab3:
         _show_hot_stocks()
+    with tab4:
+        _show_system_status()
+
 
 
 def _show_market_overview():
@@ -233,12 +247,15 @@ def _show_system_status():
     if not watchlist.empty:
         st.markdown("**📅 自选股数据健康度明细**")
         today_str = datetime.now().strftime("%Y%m%d")
+        health_stock_df = cached_instrument_list()
+        health_name_map = dict(zip(health_stock_df["ts_code"], health_stock_df["name"])) if not health_stock_df.empty else {}
         health_rows = []
         for _, wl_row in watchlist.iterrows():
             ts_code = wl_row["ts_code"]
-            name = wl_row.get("note", "") or get_stock_name(ts_code)
+            name = health_name_map.get(ts_code, "") or wl_row.get("note", "") or ts_code
             row_count = len(get_daily(ts_code))
             latest = get_latest_date(ts_code)
+
             if latest:
                 try:
                     d1 = datetime.strptime(latest, "%Y%m%d")
@@ -278,31 +295,31 @@ def _show_system_status():
     col_a, col_b, col_c = st.columns(3)
     with col_a:
         if st.button("🔄 更新自选股数据", use_container_width=True, type="primary"):
-            from data.storage import run_update
+            from scripts.init_data import run_update
             with st.spinner("正在更新数据..."):
                 run_update(watchlist=True)
             st.rerun()
     with col_b:
         st.markdown(f"🏷️ 版本: v0.3.0 | 🗄️ `data/quant.db`")
     with col_c:
-        if st.button("📋 导出健康报告", use_container_width=True):
-            import json
-            report = {
-                "时间": datetime.now().isoformat(),
-                "数据最新日期": latest_date,
-                "数据状态": fresh_label,
-                "有数据股票": stocks_with_data_count,
-                "日线总条数": daily_count,
-                "自选股数": watchlist_count,
-                "历史信号数": signals_count,
-                "指数最新日期": idx_latest,
-            }
-            st.download_button(
-                "⬇️ 下载 JSON",
-                json.dumps(report, ensure_ascii=False, indent=2),
-                file_name=f"data_health_{today}.json",
-                mime="application/json",
-            )
+        import json
+        report = {
+            "时间": datetime.now().isoformat(),
+            "数据最新日期": latest_date,
+            "数据状态": fresh_label,
+            "有数据股票": stocks_with_data_count,
+            "日线总条数": daily_count,
+            "自选股数": watchlist_count,
+            "历史信号数": signals_count,
+            "指数最新日期": idx_latest,
+        }
+        st.download_button(
+            "📋 导出健康报告 (JSON)",
+            json.dumps(report, ensure_ascii=False, indent=2),
+            file_name=f"data_health_{today}.json",
+            mime="application/json",
+            use_container_width=True,
+        )
 
 
 @st.cache_data(ttl=60)
@@ -383,8 +400,8 @@ def _show_today_signals():
     for _, sig in signals.iterrows():
         rows.append({
             "股票": f"{sig['ts_code']} {name_map.get(sig['ts_code'], '')}",
-            "方向": "🟢 买入" if sig["direction"] == "BUY" else "🔴 卖出",
-            "策略": sig["strategy"],
+            "方向": format_direction_cn(sig["direction"], with_icon=True),
+            "策略": format_strategy_cn(sig["strategy"]),
             "评分": f"{sig['score']:.2f}",
             "参考价": f"¥{sig['price_ref']:.2f}" if sig["price_ref"] else "-",
             "原因": sig.get("reason", ""),
@@ -408,35 +425,25 @@ def _show_hot_stocks():
     if not stock_df.empty:
         name_map = dict(zip(stock_df["ts_code"], stock_df["name"]))
 
-    # 只扫描自选股
-    codes_with_data = watchlist["ts_code"].tolist()
-
-    # 批量查询最新2条数据（一条SQL）
-    batch_df = batch_get_latest(codes_with_data, limit=2)
-
-    if batch_df.empty:
-        st.info("暂无行情数据")
-        return
-
     rows = []
-    for ts_code in codes_with_data:
-        code_df = batch_df[batch_df["ts_code"] == ts_code].sort_values("trade_date")
-        if len(code_df) < 2:
+    for _, wl in watchlist.iterrows():
+        ts_code = wl["ts_code"]
+        df = get_daily(ts_code)
+        if df.empty:
             continue
-        latest = code_df.iloc[-1]
-        prev = code_df.iloc[-2]
-        chg_pct = ((latest["close"] - prev["close"]) / prev["close"]) * 100
+        latest = df.iloc[-1]
+        prev = df.iloc[-2] if len(df) > 1 else latest
+        pct = ((latest["close"] - prev["close"]) / prev["close"]) * 100
 
         rows.append({
             "代码": ts_code,
             "名称": name_map.get(ts_code, ""),
-            "最新价": f"¥{latest['close']:.2f}",
-            "涨跌幅": f"{chg_pct:+.2f}%",
-            "成交量": f"{latest['volume'] / 10000:.0f}万手" if latest.get("volume") else "-",
+            "现价": f"¥{latest['close']:.2f}",
+            "涨跌幅": f"{pct:+.2f}%",
+            "成交量(手)": f"{latest.get('vol', 0):,}",
         })
 
     if rows:
-        # 按涨跌幅降序排列
         rows.sort(key=lambda r: float(r["涨跌幅"].replace("%", "").replace("+", "")), reverse=True)
         df = pd.DataFrame(rows)
         chinese_dataframe(df)
@@ -445,57 +452,59 @@ def _show_hot_stocks():
         st.info("暂无自选股行情数据")
 
 
-def _generate_daily_report():
-    """生成每日复盘报告"""
-    today = datetime.now().strftime("%Y-%m-%d")
+def _render_daily_report():
+    """渲染每日复盘报告（自选股表现 + 今日信号 + 数据库状态）"""
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    today_date = datetime.now().strftime("%Y%m%d")
     watchlist = get_watchlist()
-    stock_df = get_instrument_list()
-    name_map = dict(zip(stock_df["ts_code"], stock_df["name"]))
-    signals = get_signals(trade_date=datetime.now().strftime("%Y%m%d"), limit=50)
+    stock_df = cached_instrument_list()
+    name_map = dict(zip(stock_df["ts_code"], stock_df["name"])) if stock_df is not None and not stock_df.empty else {}
+    signals = get_signals(trade_date=today_date, limit=50)
 
-    lines = [f"# 📊 每日复盘报告 — {today}", ""]
+    lines = [f"# 📊 每日复盘深度报告 — {today_str}", ""]
 
-    # 自选股表现
+    # 1. 自选股表现
     lines.append("## ⭐ 自选股表现")
-    lines.append("| 股票 | 名称 | 最新价 | 涨跌幅 |")
-    lines.append("|------|------|--------|--------|")
-    for _, wl in watchlist.iterrows():
-        ts_code = wl["ts_code"]
-        df = get_daily(ts_code)
-        if not df.empty:
-            latest = df.iloc[-1]
-            prev = df.iloc[-2] if len(df) > 1 else latest
-            pct = ((latest["close"] - prev["close"]) / prev["close"]) * 100
-            lines.append(f"| {ts_code} | {name_map.get(ts_code, '')} "
-                         f"| ¥{latest['close']:.2f} | {pct:+.2f}% |")
+    if not watchlist.empty:
+        lines.append("| 标的代码 | 证券名称 | 最新收盘价 | 今日涨跌幅 |")
+        lines.append("| :--- | :--- | :--- | :--- |")
+        for _, wl in watchlist.iterrows():
+            ts_code = wl["ts_code"]
+            df = get_daily(ts_code, limit=2)
+            if not df.empty:
+                latest = df.iloc[-1]
+                prev = df.iloc[-2] if len(df) > 1 else latest
+                pct = ((latest["close"] - prev["close"]) / prev["close"]) * 100 if prev["close"] > 0 else 0
+                lines.append(f"| {ts_code} | {name_map.get(ts_code, '')} | ¥{latest['close']:.2f} | {pct:+.2f}% |")
+    else:
+        lines.append("暂无自选股记录")
     lines.append("")
 
-    # 今日信号
-    lines.append("## 📡 今日信号")
+    # 2. 今日信号
+    lines.append("## 📡 今日策略信号")
     if not signals.empty:
         for _, sig in signals.iterrows():
-            direction = "🟢 买入" if sig["direction"] == "BUY" else "🔴 卖出"
-            lines.append(f"- {direction} {sig['ts_code']} "
-                         f"{name_map.get(sig['ts_code'], '')} "
-                         f"| 评分 {sig['score']:.2f} | {sig.get('reason', '')}")
+            direction = format_direction_cn(sig["direction"], with_icon=True)
+            lines.append(f"- {direction} **{sig['ts_code']} {name_map.get(sig['ts_code'], '')}** "
+                         f"| 评分 {sig['score']:.2f} | 策略: {format_strategy_cn(sig['strategy'])} | {sig.get('reason', '')}")
     else:
-        lines.append("暂无信号")
+        lines.append("今日暂无策略触发信号（可前往「信号中心」执行扫描）")
     lines.append("")
 
-    # 数据状态
-    lines.append("## ⚙️ 数据状态")
-    freshness = check_data_freshness()
-    lines.append(f"- 数据更新至: {freshness.get('latest_date', '未知')}")
-    lines.append(f"- 自选股: {len(watchlist)} 只")
-    lines.append(f"- 日线数据: {freshness.get('total_rows', 0):,} 条")
+    # 3. 数据状态
+    lines.append("## ⚙️ 数据资产状态")
+    freshness = cached_check_data_freshness()
+    lines.append(f"- 数据库最新行情日: **{freshness.get('latest_date', '未知')}**")
+    lines.append(f"- 监控自选股总数: **{len(watchlist)}** 只")
+    lines.append(f"- 数据库有效日线记录: **{freshness.get('total_rows', 0):,}** 条")
 
-    report = "\n".join(lines)
+    report_md = "\n".join(lines)
+    st.markdown(report_md)
+    st.download_button(
+        "📥 导出为 Markdown 报告",
+        data=report_md.encode("utf-8"),
+        file_name=f"复盘报告_{today_date}.md",
+        mime="text/markdown",
+        use_container_width=True,
+    )
 
-    with st.popover("📋 复盘报告", use_container_width=True):
-        st.markdown(report)
-        st.download_button(
-            "📥 导出 Markdown",
-            data=report.encode("utf-8"),
-            file_name=f"复盘报告_{today}.md",
-            mime="text/markdown",
-        )
