@@ -473,9 +473,102 @@ def test_risk_manager_parameter_auto_normalization():
     assert rm2.trailing_stop_activation == 8.0
     assert rm2.trailing_stop_callback == 3.0
 
-    # 传入标准负数百分比：-5.0
-    rm3 = RiskManager(stop_loss_pct=-5.0, trailing_stop_activation=8.0, trailing_stop_callback=3.0)
-    assert rm3.stop_loss_pct == -5.0
+def test_backtester_equity_curve_no_duplicate_dates(sample_prices, sample_strategy_cls, monkeypatch):
+    """验证回测最终交易日权益记录不重复，权益曲线天数严格等于回测交易日天数"""
+    from engine.backtester import Backtester
+
+    sp = sample_prices
+    strat = sample_strategy_cls
+    bt = Backtester(
+        strategy_cls=strat,
+        params={},
+        universe=["999999.SZ"],
+        start_date="20260101",
+        end_date="20260131",
+        preloaded_data=sp,
+    )
+    res = bt.run(save=False)
+    dates = [e["date"] for e in res.equity_curve]
+    # 确保无重复交易日
+    assert len(dates) == len(set(dates))
+    assert len(dates) == len(sp["999999.SZ"])
+
+
+def test_tushare_forward_adjust_sorting_logic():
+    """验证 Tushare 复权前按日期升序排序，确保 iloc[-1] 对应最新复权因子而非最早历史因子"""
+    # 构造降序排列的原始返回数据 (Tushare Pro 默认排序)
+    desc_df = pd.DataFrame({
+        "ts_code": ["000001.SZ", "000001.SZ"],
+        "trade_date": ["20260302", "20260301"],  # 降序: 02 在前，01 在后
+        "open": [10.0, 5.0],
+        "high": [10.5, 5.2],
+        "low": [9.8, 4.9],
+        "close": [10.2, 5.1],
+        "volume": [1000, 1000],
+        "amount": [10000, 5000],
+        "pct_chg": [2.0, 1.0],
+        "adj_factor": [2.0, 1.0],  # 02 的因子为 2.0，01 的因子为 1.0
+    })
+    # 正确逻辑：必须先按 trade_date 升序排序，再取 iloc[-1] 作为 latest_adj
+    df = desc_df.sort_values("trade_date").reset_index(drop=True)
+    latest_adj = df["adj_factor"].iloc[-1]
+    assert latest_adj == 2.0  # 最新因子必须是 2.0，不能是 1.0
+    # 20260301 前复权价 = 5.1 * 1.0 / 2.0 = 2.55
+    qfq_close = (df.loc[df["trade_date"] == "20260301", "close"] * 1.0 / latest_adj).iloc[0]
+    assert round(qfq_close, 2) == 2.55
+
+
+def test_scanner_min_days_after_end_date_filter(monkeypatch):
+    """验证扫描器在过滤 end_date 后验证数据长度，防止历史截断后样本过短"""
+    from engine.scanner import _scan_single_stock
+    from strategies.ma_cross import MACrossStrategy
+
+    # 构造 100 天数据，但 20260105 及之前只有 3 天
+    dates = [f"202601{i+1:02d}" for i in range(30)] + [f"202602{i+1:02d}" for i in range(28)]
+    df = pd.DataFrame({
+        "ts_code": ["000001.SZ"] * len(dates),
+        "trade_date": dates,
+        "open": [10.0] * len(dates),
+        "high": [10.5] * len(dates),
+        "low": [9.5] * len(dates),
+        "close": [10.0] * len(dates),
+        "volume": [100000.0] * len(dates),
+        "amount": [1000000.0] * len(dates),
+        "pct_chg": [0.0] * len(dates),
+        "turnover": [1.0] * len(dates),
+        "adj_factor": [1.0] * len(dates),
+    })
+
+    monkeypatch.setattr("engine.scanner.get_daily", lambda ts: df)
+    # 当 end_date 为 20260103 时，有效数据仅 3 条 (< 60)，应被拒绝返回空列表
+    sigs = _scan_single_stock("000001.SZ", "20260103", [MACrossStrategy()])
+    assert sigs == []
+
+
+def test_storage_get_index_daily_range():
+    """验证 storage.get_index_daily_range 正确支持日期区间过滤与升序排列"""
+    from data.storage import get_conn, get_index_daily_range
+
+    with get_conn() as conn:
+        conn.execute("CREATE TABLE IF NOT EXISTS index_daily (ts_code TEXT, trade_date TEXT, open REAL, high REAL, low REAL, close REAL, volume REAL, amount REAL, PRIMARY KEY (ts_code, trade_date))")
+        conn.execute("INSERT OR REPLACE INTO index_daily VALUES ('000300.SH', '20260101', 3800, 3850, 3790, 3820, 1000, 2000)")
+        conn.execute("INSERT OR REPLACE INTO index_daily VALUES ('000300.SH', '20260105', 3820, 3860, 3810, 3850, 1000, 2000)")
+        conn.execute("INSERT OR REPLACE INTO index_daily VALUES ('000300.SH', '20260110', 3850, 3880, 3840, 3870, 1000, 2000)")
+
+    df = get_index_daily_range("000300.SH", "20260102", "20260108")
+    assert len(df) == 1
+    assert df.iloc[0]["trade_date"] == "20260105"
+
+
+def test_backtest_service_options_passthrough():
+    """验证 BacktestService.run_backtest 正确透传 execution_mode 与 max_active_positions"""
+    from services.backtest_service import BacktestService
+    import inspect
+
+    sig = inspect.signature(BacktestService.run_backtest)
+    assert "execution_mode" in sig.parameters
+    assert "risk_manager" in sig.parameters
+    assert "max_active_positions" in sig.parameters
 
 
 

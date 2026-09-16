@@ -380,7 +380,7 @@ def fetch_etf_daily(ts_code: str, start_date: str = "",
 
 def fetch_instrument_daily(ts_code: str, start_date: str,
                            end_date: str) -> pd.DataFrame:
-    """按标类型拉取日线：ETF 走 TickFlow，股票走多源级联
+    """按标类型拉取日线：ETF 走 TickFlow/AKShare，股票走多源级联
 
     参数:
         ts_code:    标的代码 e.g. "510300.SH"(ETF) 或 "000001.SZ"(股票)
@@ -392,8 +392,11 @@ def fetch_instrument_daily(ts_code: str, start_date: str,
     """
     from data.storage import get_etf_list
     etf_df = get_etf_list()
-    if not etf_df.empty and ts_code in set(etf_df["ts_code"]):
-        return fetch_etf_daily(ts_code, start_date, end_date)
+    is_etf = (not etf_df.empty and ts_code in set(etf_df["ts_code"])) or ts_code.startswith(("51", "58", "56", "15", "16"))
+    if is_etf:
+        res = fetch_etf_daily(ts_code, start_date, end_date)
+        if not res.empty:
+            return res
     return fetch_daily(ts_code, start_date, end_date)
 
 
@@ -591,6 +594,8 @@ def _fetch_daily_tushare(ts_code: str, start_date: str,
             df["turnover"] = 0.0                          # Tushare不直接提供换手率，置0
 
             # ---------- 第三步：计算前复权价格 ----------
+            # 先按交易日升序排列，确保 iloc[-1] 严格对应最新交易日
+            df = df.sort_values("trade_date").reset_index(drop=True)
             # 公式：前复权 = 未复权 × (当日复权因子 / 最新复权因子)
             latest_adj = df["adj_factor"].iloc[-1] if not df.empty else 1.0  # 取最新复权因子
             if latest_adj > 0:
@@ -599,7 +604,7 @@ def _fetch_daily_tushare(ts_code: str, start_date: str,
                 df["adj_factor"] = 1.0                    # 已前复权，复权因子置1
 
             logger.info(f"{ts_code} Tushare ✓ ({len(df)}条)")
-            return df[DAILY_COLUMNS].sort_values("trade_date").reset_index(drop=True)
+            return df[DAILY_COLUMNS].reset_index(drop=True)
 
         except Exception as e:
             logger.debug(f"{ts_code} Tushare第{attempt}次失败: {e}")

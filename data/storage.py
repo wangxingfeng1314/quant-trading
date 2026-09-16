@@ -966,6 +966,35 @@ def get_index_daily(ts_code: str, limit: int = 2) -> pd.DataFrame:
     return df
 
 
+def get_index_daily_range(ts_code: str, start_date: str = "", end_date: str = "") -> pd.DataFrame:
+    """获取大盘指数指定日期区间的日线数据
+
+    参数:
+        ts_code:    指数代码 e.g. "000300.SH" 或 "399300.SZ"
+        start_date: 起始日期 "YYYYMMDD"
+        end_date:   结束日期 "YYYYMMDD"
+
+    返回:
+        按日期升序排列的 DataFrame
+    """
+    sql = "SELECT * FROM index_daily WHERE ts_code = ?"
+    params = [ts_code]
+    if start_date:
+        sql += " AND trade_date >= ?"
+        params.append(start_date)
+    if end_date:
+        sql += " AND trade_date <= ?"
+        params.append(end_date)
+    sql += " ORDER BY trade_date ASC"
+
+    with get_conn() as conn:
+        df = pd.read_sql(sql, conn, params=params)
+    if not df.empty:
+        df["trade_date"] = df["trade_date"].astype(str)
+        df = df.sort_values("trade_date").reset_index(drop=True)
+    return df
+
+
 def get_index_latest_date() -> str:
     """获取指数数据最新日期"""
     with get_conn() as conn:

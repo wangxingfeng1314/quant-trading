@@ -354,7 +354,9 @@ def show():
     with col6:
         st.metric("最低", f"¥{latest['low']:.2f}")
     with col7:
-        st.metric("成交量", f"{latest['volume'] / 10000:.0f}万手")
+        vol_shares = float(latest.get("volume", 0) or 0)
+        vol_str = f"{vol_shares / 1e6:.2f}万手" if vol_shares >= 1e6 else f"{vol_shares / 100:.0f}手"
+        st.metric("成交量", vol_str)
     with col8:
         st.metric("成交额", f"{latest['amount'] / 1e8:.2f}亿" if latest['amount'] else "N/A")
 
@@ -373,9 +375,10 @@ def show():
         display_cols = ["trade_date", "open", "high", "low", "close",
                         "volume", "pct_chg"]
         display_df = df[display_cols].tail(30).copy()
+        display_df["volume"] = (display_df["volume"] / 100).round(0).astype(int)
         display_df = display_df.rename(columns={
             "trade_date": "日期", "open": "开盘", "high": "最高",
-            "low": "最低", "close": "收盘", "volume": "成交量",
+            "low": "最低", "close": "收盘", "volume": "成交量(手)",
             "pct_chg": "涨跌幅%",
         })
         chinese_dataframe(display_df)

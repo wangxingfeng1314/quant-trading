@@ -29,7 +29,10 @@ class BacktestService:
     @staticmethod
     def run_backtest(strategy_name: str, params: dict, universe: list,
                      start_date: str, end_date: str,
-                     capital: float = None, save: bool = True):
+                     capital: float = None, save: bool = True,
+                     execution_mode: str = "current_close",
+                     risk_manager = None,
+                     max_active_positions: int = 0):
         """执行单次回测
 
         Args:
@@ -40,6 +43,9 @@ class BacktestService:
             end_date: 结束日期 YYYYMMDD
             capital: 初始资金（默认用 DEFAULT_CAPITAL）
             save: 是否保存到数据库
+            execution_mode: 撮合模式 "current_close" 或 "next_open"
+            risk_manager: 独立风控拦截器 RiskManager 实例
+            max_active_positions: 最大持仓只数控制
 
         Returns:
             BacktestResult 对象
@@ -69,6 +75,9 @@ class BacktestService:
             start_date=start_date,
             end_date=end_date,
             initial_capital=capital,
+            execution_mode=execution_mode,
+            risk_manager=risk_manager,
+            max_active_positions=max_active_positions,
         )
         return bt.run(save=save)
 

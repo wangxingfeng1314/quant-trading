@@ -88,7 +88,7 @@ def _scan_single_stock(
         该股票产生的 Signal 列表
     """
     df = get_daily(ts_code)
-    if df.empty or len(df) < SCANNER_MIN_DATA_DAYS:
+    if df.empty:
         return []
 
     df = clean_daily(df)
@@ -96,8 +96,11 @@ def _scan_single_stock(
         return []
 
     # 只取到 end_date 的数据
-    df = df[df["trade_date"] <= end_date]
-    if df.empty:
+    if end_date:
+        df = df[df["trade_date"] <= end_date]
+
+    # 截断后必须满足最小有效数据天数，防止历史扫描时因前序K线过短产生虚假指标或计算异常
+    if df.empty or len(df) < SCANNER_MIN_DATA_DAYS:
         return []
 
     # 流动性与停牌守卫检查

@@ -79,15 +79,24 @@ class DataService:
         """
         validate_stock_code(ts_code)
         try:
+            from datetime import timedelta
+            from data.fetcher import fetch_instrument_daily
             latest = get_latest_date(ts_code)
-            df = fetch_daily(ts_code, start_date=latest or "", days=days)
+            end_date = datetime.now().strftime("%Y%m%d")
+            if latest:
+                start_date = latest
+            else:
+                start_date = (datetime.now() - timedelta(days=days)).strftime("%Y%m%d")
+
+            df = fetch_instrument_daily(ts_code, start_date=start_date, end_date=end_date)
             if df is not None and not df.empty:
+                df = clean_daily(df)
                 save_daily(df)
                 logger.info(f"更新 {ts_code}: +{len(df)} 条")
                 return True
             return False
         except Exception as e:
-            logger.error(f"更新 {ts_code} 失败: {type(e).__name__}")
+            logger.error(f"更新 {ts_code} 失败: {e}")
             return False
 
     @staticmethod

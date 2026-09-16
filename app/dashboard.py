@@ -433,14 +433,17 @@ def _show_hot_stocks():
             continue
         latest = df.iloc[-1]
         prev = df.iloc[-2] if len(df) > 1 else latest
-        pct = ((latest["close"] - prev["close"]) / prev["close"]) * 100
+        pct = ((latest["close"] - prev["close"]) / prev["close"]) * 100 if prev["close"] > 0 else 0.0
+
+        vol_val = latest.get("volume", latest.get("vol", 0)) or 0
+        vol_lots = int(float(vol_val) / 100)
 
         rows.append({
             "代码": ts_code,
             "名称": name_map.get(ts_code, ""),
             "现价": f"¥{latest['close']:.2f}",
             "涨跌幅": f"{pct:+.2f}%",
-            "成交量(手)": f"{latest.get('vol', 0):,}",
+            "成交量(手)": f"{vol_lots:,}",
         })
 
     if rows:

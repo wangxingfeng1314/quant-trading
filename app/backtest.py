@@ -280,21 +280,28 @@ def _show_run_backtest():
                 res = r["result"]
                 compare_rows.append({
                     "股票": f"{r['ts_code']} {name_map.get(r['ts_code'], '')}",
-                    "总收益%": f"{res.total_return:+.2f}",
-                    "年化%": f"{res.annual_return:+.2f}",
-                    "夏普": f"{res.sharpe_ratio:.2f}",
-                    "最大回撤%": f"{res.max_drawdown:.2f}",
-                    "胜率%": f"{res.win_rate:.1f}",
-                    "交易次数": res.trade_count,
+                    "总收益%": float(res.total_return),
+                    "年化%": float(res.annual_return),
+                    "夏普": float(res.sharpe_ratio),
+                    "最大回撤%": float(res.max_drawdown),
+                    "胜率%": float(res.win_rate),
+                    "交易次数": int(res.trade_count),
                 })
 
             df_compare = pd.DataFrame(compare_rows)
             st.subheader("📊 自选股回测对比")
-            st.dataframe(
-                df_compare.style.highlight_max(subset=["总收益%", "夏普", "胜率%"],
-                                                color="#90EE90"),
-                hide_index=True, use_container_width=True,
+            styled_compare = (
+                df_compare.style.highlight_max(subset=["总收益%", "夏普", "胜率%"], color="#90EE90")
+                                .highlight_min(subset=["最大回撤%"], color="#90EE90")
+                                .format({
+                                    "总收益%": "{:+.2f}%",
+                                    "年化%": "{:+.2f}%",
+                                    "夏普": "{:.2f}",
+                                    "最大回撤%": "{:.2f}%",
+                                    "胜率%": "{:.1f}%",
+                                })
             )
+            st.dataframe(styled_compare, hide_index=True, use_container_width=True)
 
             # 最佳结果展示
             best = max(results, key=lambda r: r["result"].total_return)
@@ -1171,8 +1178,20 @@ def _draw_rolling_metrics(eq_df):
 
 
 def _get_benchmark_curve(start_date: str, end_date: str) -> list:
-    """获取沪深300基准收益曲线（从AKShare实时拉取）"""
+    """获取沪深300基准收益曲线（优先本地数据库，失败则尝试外网拉取）"""
     try:
+        from data.storage import get_index_daily_range
+        # 优先读取本地数据库沪深300指数 (000300.SH 或 399300.SZ)
+        for code in ["000300.SH", "399300.SZ", "000001.SH"]:
+            df_local = get_index_daily_range(code, start_date, end_date)
+            if not df_local.empty and len(df_local) >= 2:
+                first_close = float(df_local["close"].iloc[0])
+                if first_close > 0:
+                    return [
+                        {"date": str(row["trade_date"]), "equity": float(row["close"]) / first_close * 1000}
+                        for _, row in df_local.iterrows()
+                    ]
+
         import akshare as ak
         df = ak.stock_zh_index_daily(symbol="sh000300")
         if df is None or df.empty:
@@ -1186,12 +1205,14 @@ def _get_benchmark_curve(start_date: str, end_date: str) -> list:
         df = df[(df["trade_date"] >= start_date) & (df["trade_date"] <= end_date)]
         if df.empty:
             return None
-        first_close = df["close"].iloc[0]
+        first_close = float(df["close"].iloc[0])
+        if first_close <= 0:
+            return None
         curve = []
         for _, row in df.iterrows():
             curve.append({
                 "date": row["trade_date"],
-                "equity": row["close"] / first_close * 1000,
+                "equity": float(row["close"]) / first_close * 1000,
             })
         return curve
     except Exception:
@@ -1301,20 +1322,27 @@ def _show_comparison(backtest_ids: list):
             "ID": r["id"],
             "策略": format_strategy_cn(r["strategy"]),
             "日期范围": f"{r['start_date']}~{r['end_date']}",
-            "总收益%": f"{r.get('total_return', 0):+.2f}",
-            "年化%": f"{r.get('annual_return', 0):+.2f}",
-            "夏普": f"{r.get('sharpe_ratio', 0):.2f}",
-            "最大回撤%": f"{r.get('max_drawdown', 0):.2f}",
-            "胜率%": f"{r.get('win_rate', 0):.1f}",
-            "交易次数": r.get("trade_count", 0),
+            "总收益%": float(r.get("total_return", 0) or 0),
+            "年化%": float(r.get("annual_return", 0) or 0),
+            "夏普": float(r.get("sharpe_ratio", 0) or 0),
+            "最大回撤%": float(r.get("max_drawdown", 0) or 0),
+            "胜率%": float(r.get("win_rate", 0) or 0),
+            "交易次数": int(r.get("trade_count", 0) or 0),
         })
     df_compare = pd.DataFrame(compare_rows)
-    st.dataframe(
+    styled_compare = (
         df_compare.style.highlight_max(
             subset=["总收益%", "年化%", "夏普", "胜率%"], color="#90EE90"
-        ).highlight_min(subset=["最大回撤%"], color="#FFB3B3"),
-        hide_index=True, use_container_width=True,
+        ).highlight_min(subset=["最大回撤%"], color="#FFB3B3")
+        .format({
+            "总收益%": "{:+.2f}%",
+            "年化%": "{:+.2f}%",
+            "夏普": "{:.2f}",
+            "最大回撤%": "{:.2f}%",
+            "胜率%": "{:.1f}%",
+        })
     )
+    st.dataframe(styled_compare, hide_index=True, use_container_width=True)
 
     # 导出对比结果
     csv_data = df_compare.to_csv(index=False).encode("utf-8-sig")

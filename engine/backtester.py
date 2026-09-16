@@ -255,16 +255,7 @@ class Backtester:
             # 记录权益
             portfolio.record_equity(date, prices)
 
-        # 5. 最终权益记录
-        if trade_dates:
-            last_prices = {}
-            for ts_code, df in stock_data.items():
-                last_row = df.iloc[-1]
-                if last_row["trade_date"] <= self.end_date:
-                    last_prices[ts_code] = last_row["close"]
-            portfolio.record_equity(trade_dates[-1], last_prices)
-
-        # 6. 计算指标
+        # 5. 计算指标
         metrics = portfolio.calc_metrics()
 
         result = BacktestResult(
@@ -286,7 +277,7 @@ class Backtester:
             trades=portfolio.trades,
         )
 
-        # 7. 保存到数据库
+        # 6. 保存到数据库
         if save and portfolio.trades:
             bt_id = save_backtest_result(result)
             save_backtest_trades(bt_id, portfolio.trades)

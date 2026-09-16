@@ -183,7 +183,7 @@ def show():
                             if ("type" in stock_df.columns and (stock_df["ts_code"] == ts_code).any()) else "",
                     "最新价": latest["close"],
                     "涨跌幅%": round(chg, 2) if pd.notna(chg) else 0,
-                    "成交量(万手)": round(latest["volume"] / 10000, 0) if latest["volume"] else 0,
+                    "成交量(万手)": round(float(latest["volume"]) / 1e6, 2) if latest.get("volume") else 0.0,
                     "MA5": round(latest.get("ma5", 0), 2),
                     "MA20": round(latest.get("ma20", 0), 2),
                     "MA60": round(latest.get("ma60", 0), 2),
@@ -215,7 +215,7 @@ def show():
     display["MA5"] = display["MA5"].apply(lambda x: f"¥{x:.2f}")
     display["MA20"] = display["MA20"].apply(lambda x: f"¥{x:.2f}")
     display["MA60"] = display["MA60"].apply(lambda x: f"¥{x:.2f}")
-    display["成交量(万手)"] = display["成交量(万手)"].apply(lambda x: f"{x:.0f}")
+    display["成交量(万手)"] = display["成交量(万手)"].apply(lambda x: f"{x:.2f}")
 
     chinese_dataframe(display)
 
