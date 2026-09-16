@@ -1101,7 +1101,7 @@ def fetch_index_daily(index_code: str, start_date: str = "",
             })
             df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.strftime("%Y%m%d")  # 统一日期格式
             df["ts_code"] = index_code                           # 标记指数代码
-            df["pct_chg"] = df["close"].pct_change() * 100       # 计算涨跌幅（百分比）
+            df["pct_chg"] = (df["close"].pct_change() * 100).fillna(0.0)  # 计算涨跌幅（百分比）
 
             # 按标准列序整理
             cols = ["ts_code", "trade_date", "open", "high", "low", "close",

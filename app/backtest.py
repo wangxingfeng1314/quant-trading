@@ -167,14 +167,14 @@ def _show_run_backtest():
                 universe = [ts_code]
             else:
                 st.warning(f"未找到匹配标的（当前仅有 {len(stock_df_data)} 个标的有数据）")
-                return
+                universe = []
         elif mode == "全部自选股":
             watchlist = get_watchlist()
             universe = watchlist["ts_code"].tolist() if not watchlist.empty else []
             if not universe:
                 st.warning("自选股列表为空，请先添加自选股")
-                return
-            st.caption(f"📊 将对 {len(universe)} 只自选股逐只回测并对比结果")
+            else:
+                st.caption(f"📊 将对 {len(universe)} 只自选股逐只回测并对比结果")
         else:
             codes_input = st.text_area(
                 "输入股票代码（每行一个）",

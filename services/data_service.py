@@ -11,7 +11,7 @@ from data.storage import (
     acquire_update_lock, release_update_lock,
     check_split_dividend_anomaly, clear_daily,
 )
-from data.fetcher import fetch_daily, fetch_stock_list, fetch_etf_list, fetch_index_daily
+from data.fetcher import fetch_daily, fetch_stock_list, fetch_etf_list, fetch_index_daily, INDEX_CODES
 from data.cleaner import clean_daily
 from services.validators import validate_stock_code, validate_date
 
@@ -165,7 +165,7 @@ class DataService:
     def update_index_data():
         """更新大盘指数数据"""
         try:
-            for code in ["000001.SH", "399001.SZ", "399006.SZ", "000300.SH"]:
+            for code in INDEX_CODES:
                 df = fetch_index_daily(code)
                 if df is not None and not df.empty:
                     save_index_daily(df)

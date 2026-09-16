@@ -34,12 +34,12 @@ import os
 from dotenv import load_dotenv
 load_dotenv(PROJECT_ROOT / ".env")
 
-SERVER_CHAN_KEY = os.getenv("SERVER_CHAN_KEY", "")
-PUSHPLUS_TOKEN = os.getenv("PUSHPLUS_TOKEN", "")
-WECOM_WEBHOOK = os.getenv("WECOM_WEBHOOK", "")    # 企业微信机器人 Webhook URL
-DINGTALK_WEBHOOK = os.getenv("DINGTALK_WEBHOOK", "")  # 钉钉机器人 Webhook URL
-DINGTALK_SECRET = os.getenv("DINGTALK_SECRET", "")     # 钉钉加签密钥（可选）
-FEISHU_WEBHOOK = os.getenv("FEISHU_WEBHOOK", "")       # 飞书机器人 Webhook URL
+SERVER_CHAN_KEY = os.getenv("SERVER_CHAN_KEY", "").strip()
+PUSHPLUS_TOKEN = os.getenv("PUSHPLUS_TOKEN", "").strip()
+WECOM_WEBHOOK = os.getenv("WECOM_WEBHOOK", "").strip()      # 企业微信机器人 Webhook URL
+DINGTALK_WEBHOOK = os.getenv("DINGTALK_WEBHOOK", "").strip()  # 钉钉机器人 Webhook URL
+DINGTALK_SECRET = os.getenv("DINGTALK_SECRET", "").strip()    # 钉钉加签密钥（可选）
+FEISHU_WEBHOOK = os.getenv("FEISHU_WEBHOOK", "").strip()      # 飞书机器人 Webhook URL
 
 
 def send_notification(title: str, content: str, msg_type: str = "markdown") -> bool:
@@ -138,8 +138,11 @@ def _send_wecom(title: str, content: str) -> bool:
         是否发送成功
     """
     try:
-        # 企业微信 Markdown 消息格式
+        # 企业微信 Markdown 消息格式，硬性限制单条不超过 4096 字节
         md_content = f"## {title}\n{content}"
+        encoded = md_content.encode("utf-8")
+        if len(encoded) > 4000:
+            md_content = encoded[:3900].decode("utf-8", errors="ignore") + "\n\n*(内容过长已截断)*"
         payload = {
             "msgtype": "markdown",
             "markdown": {"content": md_content},
@@ -171,11 +174,15 @@ def _send_dingtalk(title: str, content: str) -> bool:
     """
     try:
         # 钉钉 Markdown 消息格式
+        md_text = f"## {title}\n\n{content}"
+        encoded = md_text.encode("utf-8")
+        if len(encoded) > 19000:
+            md_text = encoded[:18500].decode("utf-8", errors="ignore") + "\n\n*(内容过长已截断)*"
         payload = {
             "msgtype": "markdown",
             "markdown": {
                 "title": title,
-                "text": f"## {title}\n\n{content}",
+                "text": md_text,
             },
         }
 

@@ -155,6 +155,7 @@ def clean_daily(df: pd.DataFrame) -> pd.DataFrame:
             .str.replace("-", "", regex=False)
             .str.replace("/", "", regex=False)
             .str.strip()
+            .str[:8]
         )
     # 防止多次数据拉取导致同一日期的重复记录
     if "ts_code" in df.columns and "trade_date" in df.columns:

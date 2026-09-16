@@ -1095,6 +1095,114 @@ def test_create_candlestick_chart_empty_dataframe_safe():
     assert fig_none is not None
 
 
+def test_backtester_sub_one_price_volume():
+    """验证回测引擎对价格低于 1 元的标的（如 ETF、低价股）按真实价格折算手数，不受 max(price, 1) 限制"""
+    from engine.backtester import Backtester
+    from strategies.base import BaseStrategy
+    from core.models import Signal
+
+    class SubOneDummyStrategy(BaseStrategy):
+        name = "sub_one_dummy"
+        def on_bar(self, trade_date, data, portfolio=None):
+            # 仅在第一天发出买入信号
+            if trade_date == "20240102":
+                return [Signal(
+                    ts_code="510300.SH",
+                    trade_date=trade_date,
+                    strategy=self.name,
+                    direction="BUY",
+                    score=1.0,
+                    price_ref=0.80,
+                )]
+            return []
+
+    # 构造标的价格为 0.80 元的数据
+    df = pd.DataFrame({
+        "ts_code": ["510300.SH"] * 2,
+        "trade_date": ["20240102", "20240103"],
+        "open": [0.80, 0.85],
+        "high": [0.85, 0.90],
+        "low": [0.78, 0.80],
+        "close": [0.82, 0.88],
+        "volume": [1000000.0] * 2,
+        "vol": [1000000.0] * 2,
+        "amount": [800000.0] * 2,
+    })
+
+    bt = Backtester(
+        strategy_cls=SubOneDummyStrategy,
+        params={},
+        universe=["510300.SH"],
+        start_date="20240102",
+        end_date="20240103",
+        initial_capital=100000.0,
+        preloaded_data={"510300.SH": df},
+        execution_mode="next_open",
+    )
+    res = bt.run(save=False)
+
+    buy_trades = [t for t in res.trades if t.direction == "BUY"]
+    assert len(buy_trades) == 1
+    # 预算约 100,000 * 0.20 = 20,000 元
+    # 次日 open 为 0.85，按 0.85 计算：20,000 / 0.85 ≈ 23529 股 -> 23500 股
+    # 若被 max(open_price, 1) 限制，则算为 20,000 / 1.0 = 20000 股
+    assert buy_trades[0].volume == 23500
+
+
+def test_clean_daily_trade_date_truncation():
+    """验证 clean_daily 将含时分秒的 trade_date 安全截断为 8 位 YYYYMMDD"""
+    from data.cleaner import clean_daily
+
+    df = pd.DataFrame({
+        "ts_code": ["000001.SZ"],
+        "trade_date": ["2025-01-02 09:30:00"],
+        "open": [10.0],
+        "high": [10.5],
+        "low": [9.8],
+        "close": [10.2],
+        "volume": [100000.0],
+        "amount": [1000000.0],
+    })
+    cleaned = clean_daily(df)
+    assert len(cleaned) == 1
+    assert cleaned["trade_date"].iloc[0] == "20250102"
+
+
+def test_push_wecom_and_dingtalk_truncation(monkeypatch):
+    """验证企业微信与钉钉推送对超长内容安全截断，防止超出官方接口字节上限"""
+    from notifier.push import _send_wecom, _send_dingtalk
+    import requests
+
+    sent_payload = {}
+    class MockResponse:
+        def json(self):
+            return {"errcode": 0}
+
+    def mock_post(url, json=None, timeout=None):
+        sent_payload["json"] = json
+        return MockResponse()
+
+    monkeypatch.setattr(requests, "post", mock_post)
+    monkeypatch.setattr("notifier.push.WECOM_WEBHOOK", "https://mock.wecom.webhook")
+    monkeypatch.setattr("notifier.push.DINGTALK_WEBHOOK", "https://mock.dingtalk.webhook")
+
+    huge_content = "超长测试字符" * 1000  # 约 18000 字节，远超企业微信 4096 字节
+    ok_wecom = _send_wecom("企业微信测试", huge_content)
+    assert ok_wecom is True
+    wecom_content = sent_payload["json"]["markdown"]["content"]
+    assert len(wecom_content.encode("utf-8")) <= 4096
+    assert "已截断" in wecom_content
+
+    # 测试钉钉超大内容 (大于 20000 字节)
+    super_huge = "超长测试字符" * 2000  # 约 36000 字节
+    ok_ding = _send_dingtalk("钉钉测试", super_huge)
+    assert ok_ding is True
+    ding_text = sent_payload["json"]["markdown"]["text"]
+    assert len(ding_text.encode("utf-8")) <= 20000
+    assert "已截断" in ding_text
+
+
+
 
 
 

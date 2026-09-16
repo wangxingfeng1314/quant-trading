@@ -172,8 +172,10 @@ class Backtester:
                             if portfolio.active_position_count >= self.max_active_positions:
                                 continue
 
+                        if open_price <= 0:
+                            continue
                         budget = self._calc_buy_budget(portfolio, sig)
-                        volume = int(budget / max(open_price, 1)) // 100 * 100
+                        volume = int(budget / open_price) // 100 * 100
                         if volume > 0:
                             portfolio.buy(
                                 ts_code=ts_code,
@@ -238,8 +240,10 @@ class Backtester:
                             if portfolio.active_position_count >= self.max_active_positions:
                                 continue
 
+                        if sig.price_ref <= 0:
+                            continue
                         budget = self._calc_buy_budget(portfolio, sig)
-                        volume = int(budget / max(sig.price_ref, 1)) // 100 * 100
+                        volume = int(budget / sig.price_ref) // 100 * 100
                         if volume > 0:
                             portfolio.buy(
                                 ts_code=sig.ts_code,
