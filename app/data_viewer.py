@@ -36,6 +36,16 @@ def create_candlestick_chart(df: pd.DataFrame, ts_code: str, name: str,
         sell_dates: 卖出日期列表 ['YYYYMMDD', ...]，标注绿色"卖"箭头
         height:     图表高度（默认自动计算）
     """
+    if df is None or df.empty:
+        fig = go.Figure()
+        fig.update_layout(
+            template="plotly_dark",
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(13,21,38,0.6)",
+            title=f"{name or ts_code} - 暂无行情数据",
+        )
+        return fig
+
     # 同花顺均线配色：MA5白 / MA10黄 / MA20品红 / MA60亮绿
     MA_COLORS = {
         "ma5": "#FFFFFF",

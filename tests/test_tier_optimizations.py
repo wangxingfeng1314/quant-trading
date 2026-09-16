@@ -1083,6 +1083,19 @@ def test_index_codes_includes_hs300():
     assert INDEX_CODES["000300.SH"] == "沪深300"
 
 
+def test_create_candlestick_chart_empty_dataframe_safe():
+    """验证 create_candlestick_chart 在输入空 DataFrame 或 None 时优雅返回空图表，不抛出 IndexError"""
+    from app.data_viewer import create_candlestick_chart
+
+    fig_empty = create_candlestick_chart(pd.DataFrame(), "000001.SZ", "平安银行")
+    assert fig_empty is not None
+    assert "平安银行" in fig_empty.layout.title.text
+
+    fig_none = create_candlestick_chart(None, "000001.SZ", "平安银行")
+    assert fig_none is not None
+
+
+
 
 
 
