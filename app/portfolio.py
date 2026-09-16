@@ -345,107 +345,109 @@ def _show_auto_trade():
     st.subheader("📡 信号自动跟单")
     st.caption("根据信号中心的最新买入/卖出信号，自动生成模拟交易建议")
 
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns([2, 2, 1])
     with col1:
         auto_days = st.selectbox("取最近N天的信号", [1, 3, 5, 7], index=0)
     with col2:
         min_score = st.slider("最低信号评分", 0.0, 1.0, 0.6, 0.05)
+    with col3:
+        st.markdown("")  # 对齐
+        refresh_clicked = st.button("🔄 刷新信号", type="secondary", use_container_width=True)
 
-    if st.button("🔄 读取最新信号并生成跟单建议", type="primary"):
-        # 获取最近的信号
-        trade_date = (datetime.now() - timedelta(days=auto_days)).strftime("%Y%m%d")
-        signals_df = get_signals(limit=200)
+    # 获取最近的信号（通过 start_date 在数据库层面精准过滤）
+    trade_date = (datetime.now() - timedelta(days=auto_days)).strftime("%Y%m%d")
+    signals_df = get_signals(start_date=trade_date, limit=200)
 
-        if signals_df.empty:
-            st.info("暂无信号数据，请先在信号中心运行扫描")
-            return
+    if signals_df.empty:
+        st.info("暂无信号数据，请先在信号中心运行扫描")
+        return
 
-        # 过滤
-        if trade_date:
-            signals_df = signals_df[signals_df["trade_date"] >= trade_date]
-        signals_df = signals_df[signals_df["score"] >= min_score]
+    # 过滤最低评分
+    signals_df = signals_df[signals_df["score"] >= min_score]
 
-        if signals_df.empty:
-            st.info(f"最近{auto_days}天无评分≥{min_score}的信号")
-            return
+    if signals_df.empty:
+        st.info(f"最近{auto_days}天无评分≥{min_score}的信号")
+        return
 
-        stock_df = get_instrument_list()
-        name_map = {}
-        if not stock_df.empty:
-            name_map = dict(zip(stock_df["ts_code"], stock_df["name"]))
+    stock_df = get_instrument_list()
+    name_map = {}
+    if not stock_df.empty:
+        name_map = dict(zip(stock_df["ts_code"], stock_df["name"]))
 
-        buy_signals = signals_df[signals_df["direction"] == "BUY"]
-        sell_signals = signals_df[signals_df["direction"] == "SELL"]
+    buy_signals = signals_df[signals_df["direction"] == "BUY"]
+    sell_signals = signals_df[signals_df["direction"] == "SELL"]
 
-        existing_positions = get_positions()
-        existing_codes = [p["ts_code"] for p in existing_positions]
+    existing_positions = get_positions()
+    existing_codes = [p["ts_code"] for p in existing_positions]
 
-        # 自动跟单建议
-        st.subheader(f"🟢 买入建议 ({len(buy_signals)})")
-        if not buy_signals.empty:
-            buy_rows = []
+    # 自动跟单建议
+    st.subheader(f"🟢 买入建议 ({len(buy_signals)})")
+    if not buy_signals.empty:
+        buy_rows = []
+        for _, sig in buy_signals.iterrows():
+            has_pos = "已有" if sig["ts_code"] in existing_codes else "新开"
+
+            buy_rows.append({
+                "股票": f"{sig['ts_code']} {name_map.get(sig['ts_code'], '')}",
+                "信号价": f"¥{sig['price_ref']:.2f}" if sig["price_ref"] else "-",
+                "评分": sig["score"],
+                "策略": format_strategy_cn(sig["strategy"]),
+                "状态": has_pos,
+                "原因": sig.get("reason", ""),
+            })
+
+        df_buy = pd.DataFrame(buy_rows)
+        chinese_dataframe(df_buy)
+
+        # 一键跟单按钮（顶层无嵌套，点击绝不闪退）
+        if st.button("📥 一键跟入（将买入信号加入持仓）", type="primary", key="btn_auto_buy"):
+            added = 0
+            existing_set = set(existing_codes)
+            seen_codes = set()
             for _, sig in buy_signals.iterrows():
-                has_pos = "已有" if sig["ts_code"] in existing_codes else "新开"
+                code = sig["ts_code"]
+                if code not in existing_set and code not in seen_codes and sig["price_ref"] > 0:
+                    budget_per_stock = 50000
+                    shares = int(budget_per_stock / sig["price_ref"]) // 100 * 100
+                    if shares >= 100:
+                        add_position(code, sig["price_ref"], shares, sig["trade_date"])
+                        added += 1
+                        existing_set.add(code)
+                        seen_codes.add(code)
+            st.toast(f"✅ 已成功跟入 {added} 只标的到模拟持仓", icon="📥")
+            st.rerun()
+    else:
+        st.info("无买入信号")
 
-                buy_rows.append({
-                    "股票": f"{sig['ts_code']} {name_map.get(sig['ts_code'], '')}",
-                    "信号价": f"¥{sig['price_ref']:.2f}" if sig["price_ref"] else "-",
-                    "评分": sig["score"],
-                    "策略": format_strategy_cn(sig["strategy"]),
-                    "状态": has_pos,
-                    "原因": sig.get("reason", ""),
-                })
+    st.subheader(f"🔴 卖出建议 ({len(sell_signals)})")
+    if not sell_signals.empty:
+        sell_rows = []
+        for _, sig in sell_signals.iterrows():
+            pos = next((p for p in existing_positions if p["ts_code"] == sig["ts_code"]), None)
+            sell_rows.append({
+                "股票": f"{sig['ts_code']} {name_map.get(sig['ts_code'], '')}",
+                "信号价": f"¥{sig['price_ref']:.2f}" if sig["price_ref"] else "-",
+                "评分": sig["score"],
+                "策略": format_strategy_cn(sig["strategy"]),
+                "持仓": f"{pos['shares']}股" if pos else "无",
+                "原因": sig.get("reason", ""),
+            })
 
-            df_buy = pd.DataFrame(buy_rows)
-            chinese_dataframe(df_buy)
+        df_sell = pd.DataFrame(sell_rows)
+        chinese_dataframe(df_sell)
 
-            # 一键跟单按钮
-            if st.button("📥 一键跟入（将买入信号加入持仓）"):
-                added = 0
-                existing_set = set(existing_codes)
-                for _, sig in buy_signals.iterrows():
-                    code = sig["ts_code"]
-                    if code not in existing_set and sig["price_ref"] > 0:
-                        budget_per_stock = 50000
-                        shares = int(budget_per_stock / sig["price_ref"]) // 100 * 100
-                        if shares >= 100:
-                            add_position(code, sig["price_ref"], shares, sig["trade_date"])
-                            added += 1
-                            existing_set.add(code)
-                st.success(f"已跟入 {added} 只股票到模拟持仓")
-                st.rerun()
-        else:
-            st.info("无买入信号")
-
-        st.subheader(f"🔴 卖出建议 ({len(sell_signals)})")
-        if not sell_signals.empty:
-            sell_rows = []
-            for _, sig in sell_signals.iterrows():
-                pos = next((p for p in existing_positions if p["ts_code"] == sig["ts_code"]), None)
-                sell_rows.append({
-                    "股票": f"{sig['ts_code']} {name_map.get(sig['ts_code'], '')}",
-                    "信号价": f"¥{sig['price_ref']:.2f}" if sig["price_ref"] else "-",
-                    "评分": sig["score"],
-                    "策略": format_strategy_cn(sig["strategy"]),
-                    "持仓": f"{pos['shares']}股" if pos else "无",
-                    "原因": sig.get("reason", ""),
-                })
-
-            df_sell = pd.DataFrame(sell_rows)
-            chinese_dataframe(df_sell)
-
-            if st.button("📤 一键跟出（将卖出信号从持仓移除）"):
-                removed = 0
-                target_codes = set(sell_signals["ts_code"].tolist())
-                current_positions = get_positions()
-                for pos in current_positions:
-                    if pos["ts_code"] in target_codes:
-                        remove_position(pos["_id"])
-                        removed += 1
-                st.success(f"已移除 {removed} 只持仓")
-                st.rerun()
-        else:
-            st.info("无卖出信号")
+        if st.button("📤 一键跟出（将卖出信号从持仓移除）", type="secondary", key="btn_auto_sell"):
+            removed = 0
+            target_codes = set(sell_signals["ts_code"].tolist())
+            current_positions = get_positions()
+            for pos in current_positions:
+                if pos["ts_code"] in target_codes:
+                    remove_position(pos["_id"])
+                    removed += 1
+            st.toast(f"✅ 已移除 {removed} 只持仓", icon="📤")
+            st.rerun()
+    else:
+        st.info("无卖出信号")
 
     # 显示当前持仓的买卖点标注在K线上
     st.subheader("📈 持仓K线（含买卖点标注）")

@@ -39,6 +39,18 @@ class RiskManager:
         if trailing_callback_pct is not None:
             trailing_stop_callback = trailing_callback_pct
 
+        # 智能归一化兼容各类输入（小数如 0.05/0.08、正数如 5.0 等）
+        if 0 < abs(stop_loss_pct) < 1.0:
+            stop_loss_pct = stop_loss_pct * 100.0
+        if stop_loss_pct > 0:
+            stop_loss_pct = -stop_loss_pct
+
+        if 0 < trailing_stop_activation < 1.0:
+            trailing_stop_activation = trailing_stop_activation * 100.0
+
+        if 0 < trailing_stop_callback < 1.0:
+            trailing_stop_callback = trailing_stop_callback * 100.0
+
         self.stop_loss_pct = stop_loss_pct
         self.trailing_stop_activation = trailing_stop_activation
         self.trailing_stop_callback = trailing_stop_callback

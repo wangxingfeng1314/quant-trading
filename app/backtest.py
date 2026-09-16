@@ -208,20 +208,20 @@ def _show_run_backtest():
             exec_mode = "next_open" if "next_open" in exec_mode_opt else "current_close"
 
             enable_rm = st.checkbox("启用独立出场风控管理器 (RiskManager)", value=True, key="bt_enable_rm")
-            rm_stop_loss = 0.05
-            rm_trail_start = 0.08
-            rm_trail_callback = 0.03
+            rm_stop_loss = -5.0
+            rm_trail_start = 8.0
+            rm_trail_callback = 3.0
             rm_max_days = 0
             if enable_rm:
                 rm_c1, rm_c2 = st.columns(2)
                 with rm_c1:
                     stop_loss_pct = st.number_input("硬止损阈值 (%)", value=5.0, min_value=1.0, max_value=20.0, step=0.5, key="bt_sl_pct")
-                    rm_stop_loss = stop_loss_pct / 100.0
+                    rm_stop_loss = -abs(float(stop_loss_pct))
                     trail_start_pct = st.number_input("移动止盈启动浮盈 (%)", value=8.0, min_value=2.0, max_value=50.0, step=1.0, key="bt_ts_pct")
-                    rm_trail_start = trail_start_pct / 100.0
+                    rm_trail_start = float(trail_start_pct)
                 with rm_c2:
                     trail_pullback_pct = st.number_input("移动止盈高点回撤 (%)", value=3.0, min_value=1.0, max_value=20.0, step=0.5, key="bt_tp_pct")
-                    rm_trail_callback = trail_pullback_pct / 100.0
+                    rm_trail_callback = float(trail_pullback_pct)
                     max_days_val = st.number_input("最长持仓天数 (0=不限)", value=30, min_value=0, max_value=250, step=5, key="bt_max_days")
                     rm_max_days = int(max_days_val)
 

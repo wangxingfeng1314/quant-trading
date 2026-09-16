@@ -458,4 +458,25 @@ def test_get_signals_with_start_date():
     assert (df_filtered["trade_date"] >= "20260305").all()
 
 
+def test_risk_manager_parameter_auto_normalization():
+    """验证 RiskManager 对小数与正数百分比输入的自适应归一化能力"""
+    from engine.risk_manager import RiskManager
+    # 传入小数：0.05, 0.08, 0.03
+    rm1 = RiskManager(stop_loss_pct=0.05, trailing_stop_activation=0.08, trailing_stop_callback=0.03)
+    assert rm1.stop_loss_pct == -5.0
+    assert rm1.trailing_stop_activation == 8.0
+    assert rm1.trailing_stop_callback == 3.0
+
+    # 传入正数百分比：5.0
+    rm2 = RiskManager(stop_loss_pct=5.0, trailing_stop_activation=8.0, trailing_stop_callback=3.0)
+    assert rm2.stop_loss_pct == -5.0
+    assert rm2.trailing_stop_activation == 8.0
+    assert rm2.trailing_stop_callback == 3.0
+
+    # 传入标准负数百分比：-5.0
+    rm3 = RiskManager(stop_loss_pct=-5.0, trailing_stop_activation=8.0, trailing_stop_callback=3.0)
+    assert rm3.stop_loss_pct == -5.0
+
+
+
 
