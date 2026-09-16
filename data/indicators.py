@@ -201,6 +201,9 @@ def apply_indicators(df: pd.DataFrame, indicators: list = None) -> pd.DataFrame:
     返回:
         添加了指标列的新 DataFrame（不修改输入数据）
     """
+    if df is None or df.empty:
+        return df if df is not None else pd.DataFrame()
+
     # 所有支持的指标及其对应的计算函数
     all_indicators = {
         "ma": lambda d: add_ma(d),

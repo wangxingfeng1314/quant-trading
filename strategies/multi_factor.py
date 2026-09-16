@@ -1,5 +1,6 @@
 """多因子综合评分策略（组合策略）"""
 from typing import List
+import pandas as pd
 from strategies.base import BaseStrategy
 from core.models import Signal
 
@@ -163,8 +164,10 @@ class MultiFactorStrategy(BaseStrategy):
                       f"RSI={s_rsi:+.1f} 量能={s_vol:+.1f} 布林={s_boll:+.1f} "
                       f"总分={total:+.1f}")
 
+            has_position = portfolio is not None and portfolio.get_position(ts_code) is not None and not portfolio.get_position(ts_code).is_empty
+
             # 买入信号
-            if total >= self.buy_threshold:
+            if not has_position and total >= self.buy_threshold:
                 score = round(min(total / 5.0, 1.0), 2)
                 signals.append(Signal(
                     ts_code=ts_code, trade_date=trade_date,
@@ -174,14 +177,13 @@ class MultiFactorStrategy(BaseStrategy):
                 ))
 
             # 卖出信号（持仓中或总分极低）
-            elif total <= self.sell_threshold:
-                if portfolio is None or portfolio.get_position(ts_code):
-                    score = round(min(abs(total) / 5.0, 1.0), 2)
-                    signals.append(Signal(
-                        ts_code=ts_code, trade_date=trade_date,
-                        strategy=self.name, direction="SELL",
-                        score=score, reason=detail,
-                        price_ref=price,
-                    ))
+            elif (portfolio is None or has_position) and total <= self.sell_threshold:
+                score = round(min(abs(total) / 5.0, 1.0), 2)
+                signals.append(Signal(
+                    ts_code=ts_code, trade_date=trade_date,
+                    strategy=self.name, direction="SELL",
+                    score=score, reason=detail,
+                    price_ref=price,
+                ))
 
         return signals

@@ -35,7 +35,9 @@ sys.path.insert(0, str(PROJECT_ROOT))  # 确保能 import 项目模块
 
 # ---------- 导入数据模块 ----------
 from core.config import DATA_START_DATE                     # 数据起始日期
-from data.storage import init_db, save_stock_list, save_daily, get_instrument_list, get_latest_date, get_watchlist, save_etf_list
+from data.storage import (init_db, save_stock_list, save_daily, get_instrument_list,
+                          get_latest_date, get_watchlist, save_etf_list,
+                          check_split_dividend_anomaly, clear_daily)
 from data.fetcher import (fetch_stock_list, fetch_daily, fetch_index_components,
                           check_data_freshness, update_all_indices, INDEX_CODES,
                           fetch_index_daily, fetch_etf_list, fetch_instrument_daily)
@@ -140,9 +142,9 @@ def main():
     if args.update:
         # 检查数据库是否已有数据
         freshness = check_data_freshness()
-        if not freshness["latest_date"]:
+        if not freshness.get("latest_date"):
             logger.error("数据库为空，请先运行完整初始化: python scripts/init_data.py --stocks 300")
-            sys.exit(1)
+            return 1
 
         logger.info("=" * 50)
         logger.info(f"增量更新模式: 补足最近 {args.days} 天数据")
@@ -158,7 +160,7 @@ def main():
         stock_df = get_instrument_list()
         if stock_df.empty:
             logger.error("数据库中无标的数据，请先运行完整初始化")
-            sys.exit(1)
+            return 1
 
         # 自选股模式：只更新自选股
         if args.watchlist:
@@ -218,6 +220,15 @@ def main():
                 df = clean_daily(df)
                 if df.empty:
                     continue
+
+                # 除权除息断层保护：检测到前复权基准迁移时全量重新拉取
+                if check_split_dividend_anomaly(ts_code, df):
+                    logger.warning(f"[{ts_code}] 检测到除权除息跳空断层，清空本地缓存并全量重新同步...")
+                    clear_daily(ts_code)
+                    full_start = (datetime.now() - timedelta(days=730)).strftime("%Y%m%d")
+                    full_df = fetch_instrument_daily(ts_code, full_start, end_date)
+                    if not full_df.empty:
+                        df = clean_daily(full_df)
 
                 # 写入数据库（INSERT OR REPLACE，安全重复执行）
                 save_daily(df)
@@ -398,4 +409,6 @@ def main():
 
 
 if __name__ == "__main__":
-    main()  # 脚本入口
+    code = main()  # 脚本入口
+    if code:
+        sys.exit(code)

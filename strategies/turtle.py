@@ -30,29 +30,33 @@ class TurtleStrategy(BaseStrategy):
                 continue
 
             price = df["close"].iloc[-1]
+            prev_close = df["close"].iloc[-2]
 
             # 跳过停牌
             if df["volume"].iloc[-1] == 0:
                 continue
 
-            # 入场信号: 价格突破N日最高
+            # 入场信号: 昨日收在N日最高下方，今日突破N日最高
             high_n = df["high"].iloc[-(self.entry_period + 1):-1].max()
-            if price > high_n:
-                score = min((price / high_n - 1) * 10, 1.0)
+            prev_high_n = df["high"].iloc[-(self.entry_period + 2):-2].max() if len(df) >= self.entry_period + 2 else df["high"].iloc[:-2].max()
+            has_position = portfolio is not None and portfolio.get_position(ts_code) is not None and not portfolio.get_position(ts_code).is_empty
+            if not has_position and prev_close <= prev_high_n and price > high_n:
+                score = round(min(0.6 + (price / high_n - 1) * 10, 1.0), 2)
                 signals.append(Signal(
                     ts_code=ts_code,
                     trade_date=trade_date,
                     strategy=self.name,
                     direction="BUY",
-                    score=round(score, 2),
+                    score=score,
                     reason=f"突破{self.entry_period}日高点{high_n:.2f}",
                     price_ref=price,
                 ))
 
-            # 出场信号: 价格跌破M日最低
-            if portfolio is None or portfolio.get_position(ts_code):
+            # 出场信号: 昨日收在M日最低上方，今日跌破M日最低
+            if portfolio is None or has_position:
                 low_m = df["low"].iloc[-(self.exit_period + 1):-1].min()
-                if price < low_m:
+                prev_low_m = df["low"].iloc[-(self.exit_period + 2):-2].min() if len(df) >= self.exit_period + 2 else df["low"].iloc[:-2].min()
+                if prev_close >= prev_low_m and price < low_m:
                     signals.append(Signal(
                         ts_code=ts_code,
                         trade_date=trade_date,

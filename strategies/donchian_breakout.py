@@ -31,7 +31,7 @@ class DonchianBreakoutStrategy(BaseStrategy):
     def on_bar(self, trade_date: str, data: dict, portfolio=None) -> List[Signal]:
         signals = []
         for ts_code, df in data.items():
-            if len(df) < self.entry_period + 2:
+            if len(df) < self.entry_period + 1:
                 continue
             if df["volume"].iloc[-1] == 0:
                 continue
@@ -41,8 +41,10 @@ class DonchianBreakoutStrategy(BaseStrategy):
 
             # 唐奇安通道上轨 = 最高价中的最高值
             upper = df["high"].iloc[-(self.entry_period + 1):-1].max()
+            prev_upper = df["high"].iloc[-(self.entry_period + 2):-2].max() if len(df) >= self.entry_period + 2 else df["high"].iloc[:-2].max()
             # 唐奇安通道下轨 = 最低价中的最低值
             lower = df["low"].iloc[-(self.exit_period + 1):-1].min()
+            prev_lower = df["low"].iloc[-(self.exit_period + 2):-2].min() if len(df) >= self.exit_period + 2 else df["low"].iloc[:-2].min()
             # 通道中轨
             mid = (upper + lower) / 2
 
@@ -53,8 +55,10 @@ class DonchianBreakoutStrategy(BaseStrategy):
                 recent_range = df["high"].iloc[-(20+1):-1] - df["low"].iloc[-(20+1):-1]
                 atr = recent_range.mean()
 
+            has_position = portfolio is not None and portfolio.get_position(ts_code) is not None and not portfolio.get_position(ts_code).is_empty
+
             # 入场信号: 价格突破上轨，且从下方接近（确认突破有效）
-            if prev_close <= upper and price > upper:
+            if not has_position and prev_close <= prev_upper and price > upper:
                 # 突破强度：超出的比例 / ATR，越大越强
                 strength = (price - upper) / max(atr, 0.01)
                 score = round(min(strength * 0.5, 1.0), 2)
@@ -67,14 +71,13 @@ class DonchianBreakoutStrategy(BaseStrategy):
                 ))
 
             # 出场信号: 价格跌破下轨
-            if portfolio is None or portfolio.get_position(ts_code):
-                if prev_close >= lower and price < lower:
-                    signals.append(Signal(
-                        ts_code=ts_code, trade_date=trade_date,
-                        strategy=self.name, direction="SELL",
-                        score=0.8,
-                        reason=f"跌破唐奇安下轨{lower:.2f}（中轨{mid:.2f}）",
-                        price_ref=price,
-                    ))
+            if (portfolio is None or has_position) and prev_close >= prev_lower and price < lower:
+                signals.append(Signal(
+                    ts_code=ts_code, trade_date=trade_date,
+                    strategy=self.name, direction="SELL",
+                    score=0.8,
+                    reason=f"跌破唐奇安下轨{lower:.2f}（中轨{mid:.2f}）",
+                    price_ref=price,
+                ))
 
         return signals

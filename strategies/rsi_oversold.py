@@ -41,10 +41,11 @@ class RSIOversoldStrategy(BaseStrategy):
 
             if any(v != v for v in [curr_rsi, prev_rsi]):
                 continue
+            has_position = portfolio is not None and portfolio.get_position(ts_code) is not None and not portfolio.get_position(ts_code).is_empty
 
             # 买入: 前一日RSI < 超卖线，今日上穿超卖线
-            if prev_rsi < self.oversold and curr_rsi > self.oversold:
-                score = round(min((curr_rsi - self.oversold) / 30, 1.0), 2)
+            if not has_position and prev_rsi < self.oversold and curr_rsi > self.oversold:
+                score = round(min(0.5 + (curr_rsi - self.oversold) / 30, 1.0), 2)
                 signals.append(Signal(
                     ts_code=ts_code, trade_date=trade_date,
                     strategy=self.name, direction="BUY",
@@ -54,15 +55,14 @@ class RSIOversoldStrategy(BaseStrategy):
                 ))
 
             # 卖出: 前一日RSI > 超买线，今日下穿超买线
-            elif prev_rsi > self.overbought and curr_rsi < self.overbought:
-                if portfolio is None or portfolio.get_position(ts_code):
-                    score = round(min((self.overbought - curr_rsi) / 30, 1.0), 2)
-                    signals.append(Signal(
-                        ts_code=ts_code, trade_date=trade_date,
-                        strategy=self.name, direction="SELL",
-                        score=score,
-                        reason=f"RSI从{prev_rsi:.1f}下穿{self.overbought}至{curr_rsi:.1f}，超买回落",
-                        price_ref=price,
-                    ))
+            elif (portfolio is None or has_position) and prev_rsi > self.overbought and curr_rsi < self.overbought:
+                score = round(min(0.5 + (self.overbought - curr_rsi) / 30, 1.0), 2)
+                signals.append(Signal(
+                    ts_code=ts_code, trade_date=trade_date,
+                    strategy=self.name, direction="SELL",
+                    score=score,
+                    reason=f"RSI从{prev_rsi:.1f}下穿{self.overbought}至{curr_rsi:.1f}，超买回落",
+                    price_ref=price,
+                ))
 
         return signals

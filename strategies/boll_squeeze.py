@@ -41,18 +41,22 @@ class BollSqueezeStrategy(BaseStrategy):
 
         # 当前带宽
         curr_bw = (df["boll_upper"].iloc[-1] - df["boll_lower"].iloc[-1]) / mid
-        # 历史带宽序列（不含今日，防未来函数；按各自历史中轨归一化）
-        hist_mid = df["boll_mid"].iloc[-self.lookback - 1:-1] if "boll_mid" in df.columns else df["close"].iloc[-self.lookback - 1:-1]
+        # 昨日带宽（变盘前夕的蓄势收口状态，防止今日突破导致带宽瞬间扩张误杀）
+        prev_mid = df["boll_mid"].iloc[-2] if "boll_mid" in df.columns else df["close"].iloc[-2]
+        prev_bw = (df["boll_upper"].iloc[-2] - df["boll_lower"].iloc[-2]) / prev_mid if prev_mid > 0 else curr_bw
+
+        # 历史带宽序列（不含今日与昨日，防未来函数与自相关）
+        hist_mid = df["boll_mid"].iloc[-self.lookback - 1:-2] if "boll_mid" in df.columns else df["close"].iloc[-self.lookback - 1:-2]
         hist_mid = hist_mid.replace(0, float("nan"))
-        hist_bw = (df["boll_upper"].iloc[-self.lookback - 1:-1]
-                   - df["boll_lower"].iloc[-self.lookback - 1:-1]) / hist_mid
+        hist_bw = (df["boll_upper"].iloc[-self.lookback - 1:-2]
+                   - df["boll_lower"].iloc[-self.lookback - 1:-2]) / hist_mid
         hist_bw = hist_bw.dropna()
         if len(hist_bw) < 20:
             return False
 
-        # 当前带宽低于阈值分位 → 收口
+        # 当前带宽或昨日变盘前带宽低于阈值分位 → 均判定有效收口
         quantile_val = hist_bw.quantile(self.squeeze_quantile)
-        return curr_bw <= quantile_val
+        return (curr_bw <= quantile_val) or (prev_bw <= quantile_val)
 
     def on_bar(self, trade_date: str, data: dict, portfolio=None) -> List[Signal]:
         signals = []

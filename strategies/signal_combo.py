@@ -1,5 +1,6 @@
 """信号共振策略（综合多指标确认）"""
 from typing import List
+import pandas as pd
 from strategies.base import BaseStrategy
 from core.models import Signal
 
@@ -104,8 +105,10 @@ class SignalComboStrategy(BaseStrategy):
             price = df["close"].iloc[-1]
             total, detail = self._score(df)
 
+            has_position = portfolio is not None and portfolio.get_position(ts_code) is not None and not portfolio.get_position(ts_code).is_empty
+
             # 买入: 总分达到买入阈值（多维度共振看多）
-            if total >= self.buy_threshold:
+            if not has_position and total >= self.buy_threshold:
                 score = round(min(total / 4.0, 1.0), 2)
                 signals.append(Signal(
                     ts_code=ts_code, trade_date=trade_date,
@@ -116,15 +119,14 @@ class SignalComboStrategy(BaseStrategy):
                 ))
 
             # 卖出: 总分达到卖出阈值（多维度共振看空）
-            elif total <= self.sell_threshold:
-                if portfolio is None or portfolio.get_position(ts_code):
-                    score = round(min(abs(total) / 4.0, 1.0), 2)
-                    signals.append(Signal(
-                        ts_code=ts_code, trade_date=trade_date,
-                        strategy=self.name, direction="SELL",
-                        score=score,
-                        reason=f"信号共振看空({total:+.0f}分): {detail}",
-                        price_ref=price,
-                    ))
+            elif (portfolio is None or has_position) and total <= self.sell_threshold:
+                score = round(min(abs(total) / 4.0, 1.0), 2)
+                signals.append(Signal(
+                    ts_code=ts_code, trade_date=trade_date,
+                    strategy=self.name, direction="SELL",
+                    score=score,
+                    reason=f"信号共振看空({total:+.0f}分): {detail}",
+                    price_ref=price,
+                ))
 
         return signals

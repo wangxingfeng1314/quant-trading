@@ -25,6 +25,8 @@ def calc_cost(price: float, volume: int, direction: str,
         stamp_tax_rate = STAMP_TAX_RATE
 
     amount = price * volume
+    if amount <= 0 or volume <= 0:
+        return {"commission": 0.0, "tax": 0.0, "transfer_fee": 0.0, "total": 0.0}
 
     # 判断是否为场内基金/ETF/可转债（免征印花税）
     is_etf_or_bond = ts_code.startswith(("51", "56", "58", "15", "16", "11", "12"))

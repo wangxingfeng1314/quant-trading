@@ -43,9 +43,11 @@ class KDJCrossStrategy(BaseStrategy):
             if any(v != v for v in [curr_k, curr_d, prev_k, prev_d]):
                 continue
 
+            has_position = portfolio is not None and portfolio.get_position(ts_code) is not None and not portfolio.get_position(ts_code).is_empty
+
             # 金叉买入: K上穿D 且 K在低位(<40)
-            if prev_k <= prev_d and curr_k > curr_d and curr_k < 40:
-                score = round(min((40 - curr_k) / 40 + (curr_k - curr_d) / 100, 1.0), 2)
+            if not has_position and prev_k <= prev_d and curr_k > curr_d and curr_k < 40:
+                score = round(min(0.5 + (40 - curr_k) / 40 * 0.4 + (curr_k - curr_d) / 100, 1.0), 2)
                 signals.append(Signal(
                     ts_code=ts_code, trade_date=trade_date,
                     strategy=self.name, direction="BUY",
@@ -55,15 +57,14 @@ class KDJCrossStrategy(BaseStrategy):
                 ))
 
             # 死叉卖出: K下穿D 且 K在高位(>60)
-            elif prev_k >= prev_d and curr_k < curr_d and curr_k > 60:
-                if portfolio is None or portfolio.get_position(ts_code):
-                    score = round(min((curr_k - 60) / 40 + (curr_d - curr_k) / 100, 1.0), 2)
-                    signals.append(Signal(
-                        ts_code=ts_code, trade_date=trade_date,
-                        strategy=self.name, direction="SELL",
-                        score=score,
-                        reason=f"KDJ高位死叉: K={curr_k:.1f}下穿D={curr_d:.1f}",
-                        price_ref=price,
-                    ))
+            elif (portfolio is None or has_position) and prev_k >= prev_d and curr_k < curr_d and curr_k > 60:
+                score = round(min(0.5 + (curr_k - 60) / 40 * 0.4 + (curr_d - curr_k) / 100, 1.0), 2)
+                signals.append(Signal(
+                    ts_code=ts_code, trade_date=trade_date,
+                    strategy=self.name, direction="SELL",
+                    score=score,
+                    reason=f"KDJ高位死叉: K={curr_k:.1f}下穿D={curr_d:.1f}",
+                    price_ref=price,
+                ))
 
         return signals

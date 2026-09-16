@@ -35,12 +35,16 @@ class MACDDivergenceStrategy(BaseStrategy):
             if df["volume"].iloc[-1] == 0:
                 continue
 
-            # 底背离: 当前价格接近区间最低，但MACD柱高于之前最低点
-            price_min_idx = window["close"].idxmin()
-            price_min = window.loc[price_min_idx, "close"]
-            macd_at_price_min = window.loc[price_min_idx, "macd_hist"]
+            prev_window = window.iloc[:-3]
+            if len(prev_window) < 10:
+                continue
 
-            # 当前价格比最低价高不超过5%，且MACD柱比那时高
+            # 底背离: 历史区间最低点
+            price_min_idx = prev_window["close"].idxmin()
+            price_min = prev_window.loc[price_min_idx, "close"]
+            macd_at_price_min = prev_window.loc[price_min_idx, "macd_hist"]
+
+            # 当前价格比历史最低价高不超过5%（或创出新低），且MACD柱明显高于前低
             if (curr_close <= price_min * 1.05
                     and curr_macd > macd_at_price_min
                     and macd_at_price_min < 0
@@ -56,10 +60,10 @@ class MACDDivergenceStrategy(BaseStrategy):
                     price_ref=price,
                 ))
 
-            # 顶背离: 当前价格接近区间最高，但MACD柱低于之前最高点
-            price_max_idx = window["close"].idxmax()
-            price_max = window.loc[price_max_idx, "close"]
-            macd_at_price_max = window.loc[price_max_idx, "macd_hist"]
+            # 顶背离: 历史区间最高点
+            price_max_idx = prev_window["close"].idxmax()
+            price_max = prev_window.loc[price_max_idx, "close"]
+            macd_at_price_max = prev_window.loc[price_max_idx, "macd_hist"]
 
             if (curr_close >= price_max * 0.95
                     and curr_macd < macd_at_price_max

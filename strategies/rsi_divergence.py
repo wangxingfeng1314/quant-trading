@@ -40,11 +40,16 @@ class RSIDivergenceStrategy(BaseStrategy):
             if curr_rsi != curr_rsi:
                 continue
 
-            # 底背离: 当前价格接近区间最低，但RSI明显高于区间最低点的RSI
-            price_min_idx = window["close"].idxmin()
-            price_min = window.loc[price_min_idx, "close"]
-            rsi_at_price_min = window.loc[price_min_idx, self.rsi_col]
+            prev_window = window.iloc[:-3]
+            if len(prev_window) < 10:
+                continue
 
+            # 底背离: 历史区间最低点
+            price_min_idx = prev_window["close"].idxmin()
+            price_min = prev_window.loc[price_min_idx, "close"]
+            rsi_at_price_min = prev_window.loc[price_min_idx, self.rsi_col]
+
+            # 当前价格处于低位（接近或创新低），但RSI明显高于前低
             if (curr_rsi > rsi_at_price_min + 5
                     and price <= price_min * 1.05
                     and curr_rsi < 50):  # RSI在弱势区更有效
@@ -58,10 +63,10 @@ class RSIDivergenceStrategy(BaseStrategy):
                     price_ref=price,
                 ))
 
-            # 顶背离: 当前价格接近区间最高，但RSI明显低于区间最高点的RSI
-            price_max_idx = window["close"].idxmax()
-            price_max = window.loc[price_max_idx, "close"]
-            rsi_at_price_max = window.loc[price_max_idx, self.rsi_col]
+            # 顶背离: 历史区间最高点
+            price_max_idx = prev_window["close"].idxmax()
+            price_max = prev_window.loc[price_max_idx, "close"]
+            rsi_at_price_max = prev_window.loc[price_max_idx, self.rsi_col]
 
             if (curr_rsi < rsi_at_price_max - 5
                     and price >= price_max * 0.95

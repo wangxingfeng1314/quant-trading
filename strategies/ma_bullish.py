@@ -47,12 +47,14 @@ class MABullishStrategy(BaseStrategy):
             if df["volume"].iloc[-1] == 0:
                 continue
 
+            has_position = portfolio is not None and portfolio.get_position(ts_code) is not None and not portfolio.get_position(ts_code).is_empty
+
             # 买入: 今日多头排列，且之前不是多头排列（刚形成）
             is_bullish = f > m > s and price > f
             was_bullish = pf > pm > ps
 
-            if is_bullish and not was_bullish:
-                score = round(min((f / s - 1) * 10, 1.0), 2)
+            if not has_position and is_bullish and not was_bullish:
+                score = round(min(0.6 + max((f / s - 1) * 5, 0), 1.0), 2)
                 signals.append(Signal(
                     ts_code=ts_code, trade_date=trade_date,
                     strategy=self.name, direction="BUY",
@@ -63,15 +65,14 @@ class MABullishStrategy(BaseStrategy):
                 ))
 
             # 卖出: 多头排列被破坏（快线下穿中线）
-            elif pf > pm and f < m:
-                if portfolio is None or portfolio.get_position(ts_code):
-                    signals.append(Signal(
-                        ts_code=ts_code, trade_date=trade_date,
-                        strategy=self.name, direction="SELL",
-                        score=0.7,
-                        reason=f"多头排列破坏: MA{self.fast_period}={f:.2f} "
-                               f"下穿MA{self.mid_period}={m:.2f}",
-                        price_ref=price,
-                    ))
+            elif (portfolio is None or has_position) and pf > pm and f < m:
+                signals.append(Signal(
+                    ts_code=ts_code, trade_date=trade_date,
+                    strategy=self.name, direction="SELL",
+                    score=0.7,
+                    reason=f"多头排列破坏: MA{self.fast_period}={f:.2f} "
+                           f"下穿MA{self.mid_period}={m:.2f}",
+                    price_ref=price,
+                ))
 
         return signals

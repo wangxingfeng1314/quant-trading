@@ -571,5 +571,169 @@ def test_backtest_service_options_passthrough():
     assert "max_active_positions" in sig.parameters
 
 
+def test_divergence_reference_swing_excludes_current_bar():
+    """验证 MACD与RSI背离策略参考基准排除当前周期，确保创出新低/新高时背离能正常触发"""
+    from strategies.macd_divergence import MACDDivergenceStrategy
+    from strategies.rsi_divergence import RSIDivergenceStrategy
+
+    # 构造 30 天数据：
+    # 第 10 天最低价 10.0，MACD hist = -0.50，RSI = 25
+    # 第 11-28 天反弹至 12.0
+    # 第 29 天跌至 10.2
+    # 第 30 天 (今天) 创出更低价 9.80，但 MACD hist = -0.20 (抬高)，RSI = 35 (抬高)
+    closes = [12.0] * 30
+    closes[10] = 10.0
+    closes[-1] = 9.80  # 今天创出区间新低
+
+    macd_hist = [-0.1] * 30
+    macd_hist[10] = -0.50  # 前低时大幅探底
+    macd_hist[-1] = -0.20  # 今日新低时 MACD 显著抬高 (典型底背离)
+
+    rsi = [50.0] * 30
+    rsi[10] = 25.0         # 前低时超卖
+    rsi[-1] = 35.0         # 今日新低时 RSI 抬高 (典型底背离)
+
+    df = pd.DataFrame({
+        "ts_code": ["000001.SZ"] * 30,
+        "trade_date": [f"202601{i+1:02d}" for i in range(30)],
+        "close": closes,
+        "volume": [10000] * 30,
+        "macd_hist": macd_hist,
+        "rsi14": rsi,
+    })
+
+    # MACD 背离策略触发买入
+    strat_macd = MACDDivergenceStrategy(lookback=30)
+    sigs_macd = strat_macd.on_bar("20260130", {"000001.SZ": df})
+    assert len(sigs_macd) == 1
+    assert sigs_macd[0].direction == "BUY"
+
+    # RSI 背离策略触发买入
+    strat_rsi = RSIDivergenceStrategy(lookback=30)
+    sigs_rsi = strat_rsi.on_bar("20260130", {"000001.SZ": df})
+    assert len(sigs_rsi) == 1
+    assert sigs_rsi[0].direction == "BUY"
+
+
+def test_turtle_strategy_prev_close_cross_confirmation():
+    """验证海龟突破策略严格基于跨越突破(prev_close <= high_n and price > high_n)，防止连阳持续刷屏"""
+    from strategies.turtle import TurtleStrategy
+
+    # 前 20 天最高价 10.0，第 21 天收 10.5(首日突破)，第 22 天收 10.8(持续高位运行)
+    df_day1 = pd.DataFrame({
+        "ts_code": ["000001.SZ"] * 22,
+        "trade_date": [f"202601{i+1:02d}" for i in range(22)],
+        "high": [10.0] * 20 + [10.5, 10.8],
+        "low": [9.0] * 22,
+        "close": [9.5] * 20 + [10.5, 10.8],
+        "volume": [10000] * 22,
+    })
+
+    strat = TurtleStrategy(entry_period=20)
+    # 第 21 天 (突破首日): 昨日 9.5 <= 10.0，今日 10.5 > 10.0，必须触发买入
+    df_step1 = df_day1.iloc[:21]
+    sigs1 = strat.on_bar("20260121", {"000001.SZ": df_step1})
+    assert len(sigs1) == 1
+    assert sigs1[0].direction == "BUY"
+    assert sigs1[0].score >= 0.6  # 评分基线合理
+
+    # 第 22 天 (连阳次日): 昨日 10.5 已高于 high_n，今日 10.8，绝不能重复触发买入！
+    sigs2 = strat.on_bar("20260122", {"000001.SZ": df_day1})
+    assert len(sigs2) == 0
+
+
+def test_calc_cost_zero_volume_guard():
+    """验证 calc_cost 在数量或成交额为 0 时返回 0 费用，不触发 5 元起征"""
+    from engine.commission import calc_cost
+
+    cost = calc_cost(price=10.0, volume=0, direction="BUY")
+    assert cost["total"] == 0.0
+    assert cost["commission"] == 0.0
+
+
+def test_apply_indicators_empty_dataframe_safe():
+    """验证 apply_indicators 传入空 DataFrame 时安全返回不报错"""
+    from data.indicators import apply_indicators
+
+    df_empty = pd.DataFrame()
+    res = apply_indicators(df_empty)
+    assert res.empty
+
+
+def test_position_bool_evaluation():
+    """验证 Position 对象的布尔求值遵循 shares > 0 (空仓为 False)"""
+    from engine.position import Position
+
+    pos_empty = Position(ts_code="000001.SZ", shares=0)
+    assert not bool(pos_empty)
+    assert pos_empty.is_empty
+
+    pos_held = Position(ts_code="000001.SZ", shares=100)
+    assert bool(pos_held)
+    assert not pos_held.is_empty
+
+
+def test_donchian_breakout_prev_close_cross_confirmation():
+    """验证唐奇安通道突破策略基于跨越突破(prev_close <= prev_upper)，杜绝连阳持续发射买入信号"""
+    from strategies.donchian_breakout import DonchianBreakoutStrategy
+
+    df_day1 = pd.DataFrame({
+        "ts_code": ["000001.SZ"] * 23,
+        "trade_date": [f"202601{i+1:02d}" for i in range(23)],
+        "high": [10.0] * 20 + [10.5, 10.8, 11.0],
+        "low": [9.0] * 23,
+        "close": [9.5] * 20 + [10.5, 10.8, 11.0],
+        "volume": [10000] * 23,
+    })
+
+    strat = DonchianBreakoutStrategy(entry_period=20)
+    # 第 21 天 (突破首日): 昨日 9.5 <= 10.0，今日 10.5 > 10.0，触发买入
+    df_step1 = df_day1.iloc[:21]
+    sigs1 = strat.on_bar("20260121", {"000001.SZ": df_step1})
+    assert len(sigs1) == 1
+    assert sigs1[0].direction == "BUY"
+
+    # 第 22 天 (连阳次日): 昨日 10.5 已突破通道，今日 10.8，绝不重复买入
+    df_step2 = df_day1.iloc[:22]
+    sigs2 = strat.on_bar("20260122", {"000001.SZ": df_step2})
+    assert len(sigs2) == 0
+
+
+def test_multi_factor_and_signal_combo_with_pct_chg_column():
+    """验证 multi_factor 和 signal_combo 包含 pct_chg 列时安全调用 pd.notna 且不抛 NameError"""
+    from strategies.multi_factor import MultiFactorStrategy
+    from strategies.signal_combo import SignalComboStrategy
+
+    mf = MultiFactorStrategy(ma_period=5)
+    sc = SignalComboStrategy(ma_period=5)
+
+    df = pd.DataFrame({
+        "trade_date": [f"2026010{i}" for i in range(1, 35)],
+        "open": [10.0 + i * 0.1 for i in range(34)],
+        "high": [10.2 + i * 0.1 for i in range(34)],
+        "low": [9.8 + i * 0.1 for i in range(34)],
+        "close": [10.1 + i * 0.1 for i in range(34)],
+        "volume": [1000] * 33 + [3000],
+        "vol_ma5": [1000] * 34,
+        "ma5": [10.0 + i * 0.1 for i in range(34)],
+        "ma20": [9.5 + i * 0.05 for i in range(34)],
+        "dif": [0.5] * 34,
+        "dea": [0.3] * 34,
+        "macd_hist": [0.4] * 34,
+        "rsi14": [60.0] * 34,
+        "boll_upper": [15.0] * 34,
+        "boll_mid": [12.0] * 34,
+        "boll_lower": [9.0] * 34,
+        "pct_chg": [1.5] * 34,  # 带有 pct_chg 列
+    })
+
+    sigs_mf = mf.on_bar("20260134", {"000001.SZ": df})
+    assert isinstance(sigs_mf, list)
+
+    sigs_sc = sc.on_bar("20260134", {"000001.SZ": df})
+    assert isinstance(sigs_sc, list)
+
+
+
 
 

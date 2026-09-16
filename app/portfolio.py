@@ -294,8 +294,6 @@ def _show_portfolio():
 
         rows.append({
             "股票": format_stock_cn(ts_code, name_map),
-            "代码": ts_code,
-            "名称": name,
             "买入价": f"¥{pos['buy_price']:.2f}",
             "现价": f"¥{current_price:.2f}",
             "数量": pos["shares"],

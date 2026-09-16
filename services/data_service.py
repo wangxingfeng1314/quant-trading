@@ -9,6 +9,7 @@ from data.storage import (
     save_daily, save_stock_list, save_etf_list, save_index_daily,
     get_index_daily, check_db_integrity, init_db,
     acquire_update_lock, release_update_lock,
+    check_split_dividend_anomaly, clear_daily,
 )
 from data.fetcher import fetch_daily, fetch_stock_list, fetch_etf_list, fetch_index_daily
 from data.cleaner import clean_daily
@@ -91,6 +92,13 @@ class DataService:
             df = fetch_instrument_daily(ts_code, start_date=start_date, end_date=end_date)
             if df is not None and not df.empty:
                 df = clean_daily(df)
+                if check_split_dividend_anomaly(ts_code, df):
+                    logger.warning(f"[{ts_code}] 检测到除权除息价格断层，清空本地旧缓存并全量重新同步...")
+                    clear_daily(ts_code)
+                    full_start = (datetime.now() - timedelta(days=730)).strftime("%Y%m%d")
+                    full_df = fetch_instrument_daily(ts_code, start_date=full_start, end_date=end_date)
+                    if full_df is not None and not full_df.empty:
+                        df = clean_daily(full_df)
                 save_daily(df)
                 logger.info(f"更新 {ts_code}: +{len(df)} 条")
                 return True

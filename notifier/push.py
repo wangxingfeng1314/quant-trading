@@ -186,15 +186,15 @@ def _send_dingtalk(title: str, content: str) -> bool:
             import hmac
             import hashlib
             import base64
+            import urllib.parse
             timestamp = str(round(time.time() * 1000))
             sign_str = f"{timestamp}\n{DINGTALK_SECRET}"
-            signature = base64.b64encode(
-                hmac.new(
-                    DINGTALK_SECRET.encode("utf-8"),
-                    sign_str.encode("utf-8"),
-                    hashlib.sha256,
-                ).digest()
-            ).decode("utf-8")
+            hmac_code = hmac.new(
+                DINGTALK_SECRET.encode("utf-8"),
+                sign_str.encode("utf-8"),
+                hashlib.sha256,
+            ).digest()
+            signature = urllib.parse.quote_plus(base64.b64encode(hmac_code).decode("utf-8"))
             url = f"{url}&timestamp={timestamp}&sign={signature}"
 
         resp = requests.post(url, json=payload, timeout=10)
@@ -318,11 +318,14 @@ def notify_signals(signals, strategy_names: list = None):
         price = max(sig.price_ref, 0.01)
         pos_pct = BACKTEST_MIN_POSITION_PCT + sig.score * BACKTEST_POSITION_STEP
         budget = base_capital * pos_pct
-        shares = max(100, int(budget / price) // 100 * 100)
+        calc_shares = int(budget / price) // 100 * 100
+        shares = calc_shares if calc_shares > 0 else (100 if base_capital >= price * 100 else 0)
         est_cost = shares * price
         stop_loss = round(price * 0.95, 2)
         take_profit = round(price * 1.10, 2)
-        content += f"| {_label(sig)} | {sig.score:.2f} | ¥{price:.2f} | {shares}股 | ¥{est_cost:,.0f} | ¥{stop_loss:.2f} (-5%) | ¥{take_profit:.2f} (+10%) | {sig.reason} |\n"
+        shares_text = f"{shares}股" if shares > 0 else "资金不足1手"
+        cost_text = f"¥{est_cost:,.0f}" if shares > 0 else "-"
+        content += f"| {_label(sig)} | {sig.score:.2f} | ¥{price:.2f} | {shares_text} | {cost_text} | ¥{stop_loss:.2f} (-5%) | ¥{take_profit:.2f} (+10%) | {sig.reason} |\n"
 
     content += """
 ### 🔴 卖出信号 TOP5

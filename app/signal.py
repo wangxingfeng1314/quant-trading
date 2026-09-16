@@ -6,7 +6,7 @@ import pandas as pd
 from datetime import datetime, date
 
 from engine.scanner import scan_signals
-from data.storage import get_signals, get_instrument_list, get_daily, get_stocks_with_data, get_watchlist
+from data.storage import get_signals, get_instrument_list, get_daily, get_stocks_with_data, get_watchlist, get_positions
 from app.st_utils import (
     chinese_dataframe, chinese_date_picker, strategy_label,
     cached_get_stocks_with_data, cached_instrument_list,
@@ -181,6 +181,7 @@ def _render_broker_order_sheet(signals: list, scan_date_str: str, stock_map: dic
         txt_lines = []
 
         single_budget = capital * (max_pos_pct / 100.0)
+        held_map = {p["ts_code"]: p["shares"] for p in get_positions() if p.get("shares", 0) > 0}
 
         for sig in signals:
             name = stock_map.get(sig.ts_code, "")
@@ -196,7 +197,8 @@ def _render_broker_order_sheet(signals: list, scan_date_str: str, stock_map: dic
                 action_text = "买入"
             else:
                 order_price = round(ref_price * (1 - price_offset_pct / 100.0), 2)
-                shares = 100  # 卖出建议数量示例
+                # 优先匹配已有模拟持仓股数，无持仓默认建议100股示例
+                shares = held_map.get(sig.ts_code, 100)
                 est_amount = round(shares * order_price, 2)
                 stop_price = 0.0
                 action_text = "卖出"

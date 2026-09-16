@@ -18,6 +18,9 @@ class Position:
     def is_empty(self) -> bool:
         return self.shares <= 0
 
+    def __bool__(self) -> bool:
+        return not self.is_empty
+
     def on_new_day(self, trade_date: str):
         """进入新交易日，昨日冻结份额转为可用"""
         self.current_date = trade_date

@@ -34,6 +34,9 @@ class MACrossStrategy(BaseStrategy):
             if self.fast_col not in df.columns or self.slow_col not in df.columns:
                 continue
 
+            if df["volume"].iloc[-1] == 0:
+                continue
+
             # 最近两天的均线值
             curr_fast = df[self.fast_col].iloc[-1]
             curr_slow = df[self.slow_col].iloc[-1]
@@ -45,35 +48,34 @@ class MACrossStrategy(BaseStrategy):
                 continue
 
             price = df["close"].iloc[-1]
+            has_position = portfolio is not None and portfolio.get_position(ts_code) is not None and not portfolio.get_position(ts_code).is_empty
 
             # 金叉: 快线从下方穿越慢线
-            if prev_fast <= prev_slow and curr_fast > curr_slow:
-                # 跳过停牌
-                if df["volume"].iloc[-1] == 0:
-                    continue
+            if not has_position and prev_fast <= prev_slow and curr_fast > curr_slow:
+                score = round(min(0.5 + (curr_fast / curr_slow - 1) * 10, 1.0), 2)
                 signals.append(Signal(
                     ts_code=ts_code,
                     trade_date=trade_date,
                     strategy=self.name,
                     direction="BUY",
-                    score=round(min(curr_fast / curr_slow - 1, 0.1) * 10, 2),
+                    score=score,
                     reason=f"MA{self.fast_period}({curr_fast:.2f}) 上穿 "
                            f"MA{self.slow_period}({curr_slow:.2f})，金叉",
                     price_ref=price,
                 ))
 
             # 死叉: 快线从上方穿越慢线
-            elif prev_fast >= prev_slow and curr_fast < curr_slow:
-                if portfolio is None or portfolio.get_position(ts_code):
-                    signals.append(Signal(
-                        ts_code=ts_code,
-                        trade_date=trade_date,
-                        strategy=self.name,
-                        direction="SELL",
-                        score=round(min(1 - curr_fast / curr_slow, 0.1) * 10, 2),
-                        reason=f"MA{self.fast_period}({curr_fast:.2f}) 下穿 "
-                               f"MA{self.slow_period}({curr_slow:.2f})，死叉",
-                        price_ref=price,
-                    ))
+            elif (portfolio is None or has_position) and prev_fast >= prev_slow and curr_fast < curr_slow:
+                score = round(min(0.5 + (1 - curr_fast / curr_slow) * 10, 1.0), 2)
+                signals.append(Signal(
+                    ts_code=ts_code,
+                    trade_date=trade_date,
+                    strategy=self.name,
+                    direction="SELL",
+                    score=score,
+                    reason=f"MA{self.fast_period}({curr_fast:.2f}) 下穿 "
+                           f"MA{self.slow_period}({curr_slow:.2f})，死叉",
+                    price_ref=price,
+                ))
 
         return signals
