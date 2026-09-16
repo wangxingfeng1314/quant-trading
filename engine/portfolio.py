@@ -255,15 +255,21 @@ class Portfolio:
         # Alpha / Beta（需要基准数据）
         alpha = 0.0
         beta = 0.0
-        if len(returns) > 1 and benchmark_returns and len(benchmark_returns) > 1:
+        if len(returns) > 1 and benchmark_returns is not None and len(benchmark_returns) > 1:
             import numpy as np
             min_len = min(len(returns), len(benchmark_returns))
             strat_ret = returns[-min_len:]
-            bench_ret = benchmark_returns[-min_len:]
-            if np.std(bench_ret) > 0:
-                beta = np.cov(strat_ret, bench_ret)[0, 1] / np.var(bench_ret)
+            bench_ret = np.asarray(benchmark_returns[-min_len:], dtype=float)
+            bench_ret = np.where(np.isnan(bench_ret) | np.isinf(bench_ret), 0.0, bench_ret)
+            if np.std(bench_ret) > 0 and np.var(bench_ret) > 0:
+                cov_mat = np.cov(strat_ret, bench_ret)
+                b_val = float(cov_mat[0, 1] / np.var(bench_ret))
                 rf = 0.03 / 252  # 日化无风险利率
-                alpha = (np.mean(strat_ret) - rf - beta * (np.mean(bench_ret) - rf)) * 252 * 100
+                a_val = float((np.mean(strat_ret) - rf - b_val * (np.mean(bench_ret) - rf)) * 252 * 100)
+                if not np.isnan(b_val) and not np.isinf(b_val):
+                    beta = b_val
+                if not np.isnan(a_val) and not np.isinf(a_val):
+                    alpha = a_val
 
         # 胜率
         sell_trades = [t for t in self.trades if t.direction == "SELL"]

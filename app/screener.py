@@ -213,11 +213,11 @@ def show():
 
     # 格式化显示
     display = df_result.copy()
-    display["最新价"] = display["最新价"].apply(lambda x: f"¥{x:.2f}")
-    display["MA5"] = display["MA5"].apply(lambda x: f"¥{x:.2f}")
-    display["MA20"] = display["MA20"].apply(lambda x: f"¥{x:.2f}")
-    display["MA60"] = display["MA60"].apply(lambda x: f"¥{x:.2f}")
-    display["成交量(万手)"] = display["成交量(万手)"].apply(lambda x: f"{x:.2f}")
+    display["最新价"] = display["最新价"].apply(lambda x: f"¥{x:.2f}" if pd.notna(x) and x > 0 else "-")
+    display["MA5"] = display["MA5"].apply(lambda x: f"¥{x:.2f}" if pd.notna(x) and x > 0 else "-")
+    display["MA20"] = display["MA20"].apply(lambda x: f"¥{x:.2f}" if pd.notna(x) and x > 0 else "-")
+    display["MA60"] = display["MA60"].apply(lambda x: f"¥{x:.2f}" if pd.notna(x) and x > 0 else "-")
+    display["成交量(万手)"] = display["成交量(万手)"].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "0.00")
 
     chinese_dataframe(display)
 

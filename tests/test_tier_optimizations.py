@@ -992,6 +992,42 @@ def test_search_special_characters_regex_safety():
     assert test_df[mask_st].iloc[0]["name"] == "*ST左江"
 
 
+def test_portfolio_calc_metrics_benchmark_types():
+    """验证 Portfolio.calc_metrics 接收 pd.Series 和 np.ndarray 作为基准收益率时不抛出歧义异常，且正确计算 Alpha/Beta"""
+    from engine.portfolio import Portfolio
+
+    p = Portfolio(initial_capital=100000)
+    # 模拟 5 个交易日的净值
+    p.equity_curve = [
+        {"date": "20260101", "equity": 100000, "cash": 100000, "market_value": 0},
+        {"date": "20260102", "equity": 101000, "cash": 101000, "market_value": 0},
+        {"date": "20260103", "equity": 102000, "cash": 102000, "market_value": 0},
+        {"date": "20260104", "equity": 101500, "cash": 101500, "market_value": 0},
+        {"date": "20260105", "equity": 103000, "cash": 103000, "market_value": 0},
+    ]
+
+    bench_list = [0.005, 0.008, -0.002, 0.01]
+    bench_series = pd.Series(bench_list)
+    bench_array = np.array(bench_list)
+
+    # 1. 列表传参
+    res_list = p.calc_metrics(benchmark_returns=bench_list)
+    assert "alpha" in res_list and "beta" in res_list
+    assert not np.isnan(res_list["alpha"])
+    assert not np.isnan(res_list["beta"])
+
+    # 2. pd.Series 传参 (测试之前在 if benchmark_returns 处会抛出 Series is ambiguous)
+    res_series = p.calc_metrics(benchmark_returns=bench_series)
+    assert res_series["alpha"] == res_list["alpha"]
+    assert res_series["beta"] == res_list["beta"]
+
+    # 3. np.ndarray 传参 (测试之前在 if benchmark_returns 处会抛出 array with more than one element is ambiguous)
+    res_array = p.calc_metrics(benchmark_returns=bench_array)
+    assert res_array["alpha"] == res_list["alpha"]
+    assert res_array["beta"] == res_list["beta"]
+
+
+
 
 
 
