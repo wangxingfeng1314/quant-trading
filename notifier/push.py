@@ -325,7 +325,8 @@ def notify_signals(signals, strategy_names: list = None):
         take_profit = round(price * 1.10, 2)
         shares_text = f"{shares}股" if shares > 0 else "资金不足1手"
         cost_text = f"¥{est_cost:,.0f}" if shares > 0 else "-"
-        content += f"| {_label(sig)} | {sig.score:.2f} | ¥{price:.2f} | {shares_text} | {cost_text} | ¥{stop_loss:.2f} (-5%) | ¥{take_profit:.2f} (+10%) | {sig.reason} |\n"
+        safe_reason = (sig.reason or "").replace("|", "/")
+        content += f"| {_label(sig)} | {sig.score:.2f} | ¥{price:.2f} | {shares_text} | {cost_text} | ¥{stop_loss:.2f} (-5%) | ¥{take_profit:.2f} (+10%) | {safe_reason} |\n"
 
     content += """
 ### 🔴 卖出信号 TOP5
@@ -335,7 +336,8 @@ def notify_signals(signals, strategy_names: list = None):
     sell_signals = sorted([s for s in signals if s.direction == "SELL"],
                           key=lambda s: s.score, reverse=True)[:5]
     for sig in sell_signals:
-        content += f"| {_label(sig)} | {sig.score:.2f} | ¥{sig.price_ref:.2f} | 建议平仓/减半 | {sig.reason} |\n"
+        safe_reason = (sig.reason or "").replace("|", "/")
+        content += f"| {_label(sig)} | {sig.score:.2f} | ¥{sig.price_ref:.2f} | 建议平仓/减半 | {safe_reason} |\n"
 
     content += f"""
 ---
@@ -412,8 +414,9 @@ def notify_position_summary() -> bool:
 
             icon = "🟢" if pnl >= 0 else "🔴"
             name = get_instrument_name(ts_code)
+            note_str = f" · {str(pos.get('note')).strip()}" if pos.get("note") else ""
             rows.append(
-                f"{icon} **{name}** ({ts_code}{pos.get('note', '') and ' · ' + pos.get('note', '')})  "
+                f"{icon} **{name}** ({ts_code}{note_str})  "
                 f"成本¥{buy_price:.2f}→现¥{current_price:.2f}  "
                 f"**{pnl:+.0f}元 ({pnl_pct:+.1f}%)**"
             )

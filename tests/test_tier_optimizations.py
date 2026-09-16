@@ -866,6 +866,59 @@ def test_portfolio_apply_split_or_dividend():
     assert round(pos.avg_cost, 2) == round((initial_cost - 1.0) / 2.0, 2)
 
 
+def test_scheduler_logging_handlers_availability():
+    """验证 scheduler 模块及其独立服务入口中 logging.handlers 可用且不触发 AttributeError"""
+    import scheduler
+    import scheduler.service
+    import logging.handlers
+
+    assert hasattr(logging, "handlers")
+    assert hasattr(logging.handlers, "RotatingFileHandler")
+
+
+def test_update_lock_acquired_contract(monkeypatch):
+    """验证 update_lock 在超时未拿到锁时安全返回 False 且允许调用方优雅跳过"""
+    from data.storage import update_lock
+
+    # 模拟拿到锁
+    monkeypatch.setattr("data.storage.acquire_update_lock", lambda timeout=None: True)
+    monkeypatch.setattr("data.storage.release_update_lock", lambda: None)
+    with update_lock(timeout=10) as acq1:
+        assert acq1 is True
+
+    # 模拟未拿到锁（超时）
+    monkeypatch.setattr("data.storage.acquire_update_lock", lambda timeout=None: False)
+    with update_lock(timeout=10) as acq2:
+        assert acq2 is False
+
+
+def test_notify_signals_pipe_sanitization(monkeypatch):
+    """验证推送通知对 reason 中的 Markdown 管道符 '|' 进行安全转义，防止破坏表格格式"""
+    from notifier.push import notify_signals
+    from core.models import Signal
+
+    captured = []
+    monkeypatch.setattr("notifier.push.send_notification", lambda title, content: captured.append((title, content)))
+    monkeypatch.setattr("data.storage.get_instrument_name", lambda ts_code: "平安银行")
+
+    sig = Signal(
+        ts_code="000001.SZ",
+        trade_date="20240102",
+        strategy="ma_cross",
+        direction="BUY",
+        score=0.8,
+        price_ref=10.0,
+        reason="突破MA20 | 量能放大 | RSI超卖",
+    )
+    notify_signals([sig])
+
+    assert len(captured) == 1
+    content = captured[0][1]
+    # 原 reason 中的 '|' 应该被替换为 '/'，避免出现破坏表格的未转义管道
+    assert "突破MA20 / 量能放大 / RSI超卖" in content
+
+
+
 
 
 

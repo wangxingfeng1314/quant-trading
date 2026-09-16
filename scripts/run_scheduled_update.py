@@ -16,7 +16,10 @@ from scripts.init_data import run_update
 from scheduler import scan_and_notify
 
 if __name__ == "__main__":
-    with update_lock(timeout=300):
+    with update_lock(timeout=300) as acquired:
+        if not acquired:
+            print("未能获取数据库更新锁（超时300s），可能有其他更新进程正在运行，安全退出。")
+            sys.exit(0)
         # 1. 增量更新自选股数据
         run_update(days=3, watchlist=True)
         # 2. 扫描自选股信号 + 推送通知（含持仓盈亏日报）

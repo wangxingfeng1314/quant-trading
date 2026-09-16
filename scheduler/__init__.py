@@ -9,6 +9,7 @@
   数据更新（加写锁）→ 信号扫描 → 推送通知
 """
 import logging
+import logging.handlers
 import sys
 from pathlib import Path
 from datetime import datetime
@@ -86,7 +87,11 @@ def update_data_job():
         from scripts.init_data import run_update
         from data.storage import update_lock
 
-        with update_lock(timeout=300):
+        with update_lock(timeout=300) as acquired:
+            if not acquired:
+                logger.warning("未能获取数据库更新文件锁（超时300s），可能有其他更新任务正在运行，安全跳过本次调度")
+                return
+
             # ---------- Step 1: 更新数据 ----------
             run_update(days=5, watchlist=True)
             logger.info("定时任务完成：数据更新成功")
