@@ -46,11 +46,13 @@ def show():
                 )
 
         with tab_b:
-            col1, col2, col3 = st.columns(3)
+            col0, col1, col2, col3 = st.columns([1.2, 2, 2, 2])
+            with col0:
+                enable_pct_chg = st.checkbox("涨跌幅筛选", value=False)
             with col1:
-                pct_chg_min = st.number_input("今日涨幅 ≥ %", value=-10.0, step=0.5)
+                pct_chg_min = st.number_input("今日涨幅 ≥ %", value=-10.0, step=0.5, disabled=not enable_pct_chg)
             with col2:
-                pct_chg_max = st.number_input("今日涨幅 ≤ %", value=10.0, step=0.5)
+                pct_chg_max = st.number_input("今日涨幅 ≤ %", value=10.0, step=0.5, disabled=not enable_pct_chg)
             with col3:
                 turnover_min = st.number_input("换手率 ≥ %", value=0.0, step=0.5)
 
@@ -75,7 +77,7 @@ def show():
         results = []
 
         for ts_code in codes:
-            df = get_daily(ts_code)
+            df = get_daily(ts_code, limit=120)
             if df.empty or len(df) < 60:
                 continue
 
@@ -155,12 +157,12 @@ def show():
                     reasons.append("KDJ金叉")
 
             # 8. 涨跌幅
-            if match:
+            if match and enable_pct_chg:
                 chg = latest.get("pct_chg", 0)
                 if pd.notna(chg):
                     if chg < pct_chg_min or chg > pct_chg_max:
                         match = False
-                if match and chg is not None:
+                if match and pd.notna(chg):
                     reasons.append(f"涨{chg:.1f}%" if chg >= 0 else f"跌{chg:.1f}%")
 
             # 9. 换手率

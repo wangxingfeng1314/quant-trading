@@ -172,6 +172,26 @@ class Portfolio:
         self.trades.append(trade)
         return trade
 
+    def apply_split_or_dividend(self, ts_code: str, split_factor: float = 1.0,
+                                dividend_per_share: float = 0.0) -> float:
+        """处理标的的除权除息（送转股或现金分红）
+
+        Args:
+            ts_code: 标的代码
+            split_factor: 送转股倍数（如10送2为1.2）
+            dividend_per_share: 每股派现金额（元）
+
+        Returns:
+            归入组合可用现金的现金分红金额
+        """
+        pos = self.positions.get(ts_code)
+        if pos is None or pos.is_empty:
+            return 0.0
+        cash_dividend = pos.adjust_for_split(split_factor=split_factor, dividend_per_share=dividend_per_share)
+        if cash_dividend > 0:
+            self.cash = round(self.cash + cash_dividend, 2)
+        return cash_dividend
+
     def record_equity(self, trade_date: str, prices: dict):
         """记录当日权益"""
         mv = self.market_value(prices)

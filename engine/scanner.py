@@ -87,7 +87,10 @@ def _scan_single_stock(
     Returns:
         该股票产生的 Signal 列表
     """
-    df = get_daily(ts_code)
+    try:
+        df = get_daily(ts_code, end_date=end_date)
+    except TypeError:
+        df = get_daily(ts_code)
     if df.empty:
         return []
 
@@ -112,10 +115,12 @@ def _scan_single_stock(
     df = apply_indicators(df, ["ma", "macd", "rsi", "boll", "vol_ma", "kdj", "atr"])
     data_dict = {ts_code: df}
 
+    # 使用行情K线实际交易日触发策略，避免周末或假日扫描导致信号日期失真
+    bar_date = str(df["trade_date"].iloc[-1])
     signals = []
     for strategy in strategy_instances:
         try:
-            sigs = strategy.on_bar(end_date, data_dict)
+            sigs = strategy.on_bar(bar_date, data_dict)
             signals.extend(sigs)
         except Exception as e:
             logger.warning(f"{ts_code} {strategy.name} 扫描异常: {e}")

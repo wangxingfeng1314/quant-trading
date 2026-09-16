@@ -142,7 +142,16 @@ def clean_daily(df: pd.DataFrame) -> pd.DataFrame:
             logger.debug(f"剔除{suspended.sum()}条停牌数据")
             df = df[~suspended]
 
-    # ==================== 步骤8: 去重 ====================
+    # ==================== 步骤8: 日期格式归一化与去重 ====================
+    # 统一 trade_date 为标准 8 位 YYYYMMDD 字符串格式（剔除 - / 空格等异构格式）
+    if "trade_date" in df.columns:
+        df["trade_date"] = (
+            df["trade_date"]
+            .astype(str)
+            .str.replace("-", "", regex=False)
+            .str.replace("/", "", regex=False)
+            .str.strip()
+        )
     # 防止多次数据拉取导致同一日期的重复记录
     if "ts_code" in df.columns and "trade_date" in df.columns:
         df = df.drop_duplicates(subset=["ts_code", "trade_date"])

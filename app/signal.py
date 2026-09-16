@@ -360,6 +360,7 @@ def _show_signal_validation():
         name_map = dict(zip(stock_df["ts_code"], stock_df["name"]))
 
     results = []
+    stock_cache = {}
     with st.spinner("正在验证信号..."):
         for _, sig in signals_df.iterrows():
             ts_code = sig["ts_code"]
@@ -367,8 +368,10 @@ def _show_signal_validation():
             price_ref = sig["price_ref"]
             direction = sig["direction"]
 
-            # 获取信号发布后的行情
-            df = get_daily(ts_code)
+            # 获取信号发布后的行情（内存字典缓存，避免500次重复DB查询）
+            if ts_code not in stock_cache:
+                stock_cache[ts_code] = get_daily(ts_code)
+            df = stock_cache[ts_code]
             if df.empty:
                 continue
 
@@ -482,8 +485,9 @@ def _show_composite():
     composite["共识强度"] = composite["strategy_count"].apply(
         lambda x: "🔴 强共识" if x >= 4 else ("🟡 中共识" if x >= 2 else "⚪ 单策略")
     )
+    max_count = max(float(composite["signal_count"].max()), 1.0)
     composite["合成评分"] = (
-        composite["avg_score"] * 0.6 + composite["signal_count"] / composite["signal_count"].max() * 0.4
+        composite["avg_score"] * 0.6 + (composite["signal_count"] / max_count) * 0.4
     ).round(2)
 
     # 买入共识

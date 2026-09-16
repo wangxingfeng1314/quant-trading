@@ -826,6 +826,47 @@ def test_strategies_has_position_filtering():
     assert not any(s.direction == "BUY" for s in sigs_pullback)
 
 
+def test_clean_daily_date_format_normalization():
+    """验证 clean_daily 自动将异构日期（如 2024-01-02 或 2024/01/03）标准化为 8 位 YYYYMMDD"""
+    from data.cleaner import clean_daily
+
+    raw_df = pd.DataFrame({
+        "trade_date": ["2024-01-02", "2024/01/03", " 20240104 "],
+        "open": [10.0, 10.1, 10.2],
+        "high": [10.5, 10.6, 10.7],
+        "low": [9.9, 10.0, 10.1],
+        "close": [10.2, 10.3, 10.4],
+        "volume": [1000, 1000, 1000],
+        "amount": [10200, 10300, 10400],
+    })
+    cleaned = clean_daily(raw_df)
+    assert cleaned["trade_date"].tolist() == ["20240102", "20240103", "20240104"]
+
+
+def test_portfolio_apply_split_or_dividend():
+    """验证 Portfolio.apply_split_or_dividend 处理除权送转与现金分红的正确性及资金回流"""
+    from engine.portfolio import Portfolio
+
+    p = Portfolio(initial_capital=50000)
+    # 买入 1000 股，价格 10 元，初始现金 50000 - 10000 - 手续费 ≈ 39990
+    trade = p.buy("000001.SZ", price=10.0, volume=1000, trade_date="20240102")
+    pos = p.get_position("000001.SZ")
+    initial_cash = p.cash
+    initial_cost = pos.avg_cost
+
+    # 1. 现金分红：每股派息 1.0 元，分红 1000 元自动进入 cash
+    cash_div = p.apply_split_or_dividend("000001.SZ", split_factor=1.0, dividend_per_share=1.0)
+    assert cash_div == 1000.0
+    assert round(p.cash - initial_cash, 2) == 1000.0
+    assert round(pos.avg_cost, 2) == round(initial_cost - 1.0, 2)
+
+    # 2. 送转股：10送10 (split_factor=2.0)
+    p.apply_split_or_dividend("000001.SZ", split_factor=2.0, dividend_per_share=0.0)
+    assert pos.shares == 2000
+    assert round(pos.avg_cost, 2) == round((initial_cost - 1.0) / 2.0, 2)
+
+
+
 
 
 
