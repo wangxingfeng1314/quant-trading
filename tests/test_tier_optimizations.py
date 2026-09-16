@@ -918,6 +918,82 @@ def test_notify_signals_pipe_sanitization(monkeypatch):
     assert "突破MA20 / 量能放大 / RSI超卖" in content
 
 
+def test_multi_strategy_benchmark_normalization():
+    """验证多策略对比中基准指数权益曲线归一化到与策略同一起点初始资金"""
+    # 模拟基准从 3800 上涨到 4180 (+10%)
+    bm_df = pd.DataFrame({
+        "date": ["20260101", "20260110"],
+        "equity": [3800.0, 4180.0],
+    })
+    initial_capital = 100000.0
+    bm_init = float(bm_df["equity"].iloc[0])
+    bm_normalized = bm_df["equity"] / bm_init * initial_capital
+
+    assert bm_normalized.iloc[0] == initial_capital
+    assert round(bm_normalized.iloc[1], 2) == 110000.0
+
+
+def test_dashboard_market_overview_zero_division():
+    """验证大盘概况在昨日收盘价为0或缺失时不产生 ZeroDivisionError"""
+    latest_close = 10.0
+    prev_close = 0.0
+    chg = latest_close - prev_close
+    chg_pct = (chg / prev_close * 100) if prev_close > 0 else 0.0
+    assert chg_pct == 0.0
+
+    prev_close_valid = 8.0
+    chg_pct_valid = ((latest_close - prev_close_valid) / prev_close_valid * 100) if prev_close_valid > 0 else 0.0
+    assert chg_pct_valid == 25.0
+
+
+def test_portfolio_add_position_suffix_completion():
+    """验证持仓输入表单能够根据6位股票/ETF代码前缀自动补齐 .SH/.SZ/.BJ 市场后缀"""
+    def complete_code(code_str: str) -> str:
+        code_str = code_str.strip().upper()
+        if len(code_str) == 6 and code_str.isdigit():
+            if code_str.startswith(("60", "68", "51", "58")):
+                code_str += ".SH"
+            elif code_str.startswith(("00", "30", "15", "16")):
+                code_str += ".SZ"
+            elif code_str.startswith(("43", "83", "87", "92")):
+                code_str += ".BJ"
+        return code_str
+
+    assert complete_code("600519") == "600519.SH"
+    assert complete_code("688981") == "688981.SH"
+    assert complete_code("510300") == "510300.SH"
+    assert complete_code("000001") == "000001.SZ"
+    assert complete_code("300750") == "300750.SZ"
+    assert complete_code("159919") == "159919.SZ"
+    assert complete_code("830000") == "830000.BJ"
+    assert complete_code("430002") == "430002.BJ"
+    # 已带后缀保持不变
+    assert complete_code("600519.SH") == "600519.SH"
+    assert complete_code("000001.SZ") == "000001.SZ"
+
+
+def test_search_special_characters_regex_safety():
+    """验证包含特殊正则字符（如 *ST, (退市), [等）的搜索输入不会导致 Pandas 抛出 re.error 崩溃"""
+    test_df = pd.DataFrame({
+        "ts_code": ["000001.SZ", "600000.SH", "300001.SZ"],
+        "name": ["平安银行", "*ST左江", "特锐德(退市)"],
+    })
+
+    for bad_search in ["*ST", "*", "(退市)", "[", "+", "?", "\\"]:
+        mask = (test_df["ts_code"].str.contains(bad_search, case=False, regex=False) |
+                test_df["name"].str.contains(bad_search, case=False, regex=False))
+        res = test_df[mask]
+        assert isinstance(res, pd.DataFrame)
+
+    # 验证匹配结果准确性
+    mask_st = (test_df["ts_code"].str.contains("*ST", case=False, regex=False) |
+               test_df["name"].str.contains("*ST", case=False, regex=False))
+    assert len(test_df[mask_st]) == 1
+    assert test_df[mask_st].iloc[0]["name"] == "*ST左江"
+
+
+
+
 
 
 

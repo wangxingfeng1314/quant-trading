@@ -268,8 +268,8 @@ def show():
                                    label_visibility="collapsed")
 
             if search:
-                mask = (stock_df["ts_code"].str.contains(search, case=False) |
-                        stock_df["name"].str.contains(search, case=False))
+                mask = (stock_df["ts_code"].str.contains(search, case=False, regex=False) |
+                        stock_df["name"].str.contains(search, case=False, regex=False))
                 filtered = stock_df[mask]
             else:
                 # 默认只显示有数据的标的（自选股优先）

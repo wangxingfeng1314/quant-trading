@@ -153,13 +153,20 @@ if st.sidebar.button("🔄 更新自选股数据", type="primary", use_container
         status_text.text(f"⏳ [{current}/{total}] {name} ({ts_code})")
 
     try:
-        from scripts.init_data import run_update, set_progress_callback
-        set_progress_callback(_on_progress)
-        run_update(days=14, watchlist=True)
-        progress_bar.empty()
-        status_text.empty()
-        st.sidebar.success(f"✅ 数据更新完成 ({datetime.now().strftime('%H:%M')})")
-        st.rerun()
+        from data.storage import update_lock
+        with update_lock(timeout=10) as acquired:
+            if not acquired:
+                progress_bar.empty()
+                status_text.empty()
+                st.sidebar.warning("⏳ 另一个更新任务正在运行中，请稍后再试")
+            else:
+                from scripts.init_data import run_update, set_progress_callback
+                set_progress_callback(_on_progress)
+                run_update(days=14, watchlist=True)
+                progress_bar.empty()
+                status_text.empty()
+                st.sidebar.success(f"✅ 数据更新完成 ({datetime.now().strftime('%H:%M')})")
+                st.rerun()
     except Exception as e:
         progress_bar.empty()
         status_text.empty()

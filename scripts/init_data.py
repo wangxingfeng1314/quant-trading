@@ -298,6 +298,7 @@ def main():
     # ---------- Step 2.5: 获取 ETF 列表 ----------
     logger.info("=" * 50)
     logger.info("Step 2.5: 获取 ETF 列表（TickFlow）")
+    etf_df = pd.DataFrame()
     try:
         etf_df = fetch_etf_list()
         if not etf_df.empty:
@@ -310,14 +311,15 @@ def main():
 
     # ---------- Step 3: 确定要下载的股票池 ----------
     logger.info("=" * 50)
+    all_instruments = pd.concat([stock_df, etf_df], ignore_index=True) if not etf_df.empty else stock_df
     if args.watchlist:
-        # 自选股模式：只下载自选股数据
+        # 自选股模式：下载自选股列表中的所有标的（含股票与ETF）
         watchlist_df = get_watchlist()
         if watchlist_df.empty:
             logger.error("自选股列表为空，请先添加自选股")
             sys.exit(1)
-        target_stocks = stock_df[stock_df["ts_code"].isin(watchlist_df["ts_code"])]
-        logger.info(f"Step 3: 自选股模式，共 {len(target_stocks)} 只股票")
+        target_stocks = all_instruments[all_instruments["ts_code"].isin(watchlist_df["ts_code"])].drop_duplicates("ts_code")
+        logger.info(f"Step 3: 自选股模式，共 {len(target_stocks)} 只标的（含股票与ETF）")
     else:
         logger.info("Step 3: 获取沪深300成分股")
         hs300_codes = fetch_index_components("399300.SZ")  # 获取沪深300成分股
@@ -337,7 +339,7 @@ def main():
         target_stocks = stock_df[stock_df["ts_code"].isin(hs300_codes[:args.stocks])]
 
     save_stock_list(stock_df)  # 保存完整股票列表到数据库
-    logger.info(f"目标下载: {len(target_stocks)} 只股票")
+    logger.info(f"目标下载: {len(target_stocks)} 只标的")
 
     # ---------- Step 4: 批量下载日线数据 ----------
     logger.info("=" * 50)
@@ -350,6 +352,10 @@ def main():
         ts_code = row["ts_code"]
         name = row["name"]
 
+        # 进度回调
+        if _progress_callback:
+            _progress_callback(i, total, ts_code, name)
+
         # 断点续传：如果股票已有最新数据则跳过
         if args.resume:
             latest = get_latest_date(ts_code)
@@ -359,8 +365,8 @@ def main():
                 continue
 
         try:
-            # 拉取该股票的完整历史日线
-            df = fetch_daily(ts_code, args.start, end_date)
+            # 拉取该标的的完整历史日线（股票+ETF多源路由）
+            df = fetch_instrument_daily(ts_code, args.start, end_date)
             if df.empty:
                 logger.warning(f"[{i}/{total}] {ts_code} {name} 无数据")
                 fail_count += 1

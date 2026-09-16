@@ -47,8 +47,8 @@ def _show_watchlist():
         note = st.text_input("备注", placeholder="如: 看好新能源", key="wl_note")
 
     if search and stock_df is not None and not stock_df.empty:
-        mask = (stock_df["ts_code"].str.contains(search, case=False) |
-                stock_df["name"].str.contains(search, case=False))
+        mask = (stock_df["ts_code"].str.contains(search, case=False, regex=False) |
+                stock_df["name"].str.contains(search, case=False, regex=False))
         filtered = stock_df[mask].head(10)
         if not filtered.empty:
             options = filtered.apply(
@@ -229,7 +229,7 @@ def _show_watchlist():
         )
         if selected_code:
             stock_display_name = name_map.get(selected_code, selected_code)
-            df = get_daily(selected_code)
+            df = get_daily(selected_code, limit=250)
             if not df.empty:
                 df = apply_indicators(df, ["ma", "vol_ma"])
                 fig = create_candlestick_chart(
@@ -264,7 +264,15 @@ def _show_portfolio():
 
         if st.form_submit_button("添加"):
             if code_input and buy_price > 0 and shares > 0:
-                add_position(code_input.strip(), buy_price, shares, buy_date)
+                code_str = code_input.strip().upper()
+                if "." not in code_str and len(code_str) == 6:
+                    if code_str.startswith(("60", "68", "51", "58", "56")):
+                        code_str += ".SH"
+                    elif code_str.startswith(("00", "30", "15", "16")):
+                        code_str += ".SZ"
+                    elif code_str.startswith(("43", "83", "87", "92")):
+                        code_str += ".BJ"
+                add_position(code_str, buy_price, shares, buy_date)
                 st.rerun()
 
     positions = get_positions()
@@ -279,7 +287,7 @@ def _show_portfolio():
 
     for pos in positions:
         ts_code = pos["ts_code"]
-        df = get_daily(ts_code)
+        df = get_daily(ts_code, limit=1)
         current_price = df.iloc[-1]["close"] if not df.empty else pos["buy_price"]
 
         cost = pos["buy_price"] * pos["shares"]

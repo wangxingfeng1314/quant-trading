@@ -150,8 +150,8 @@ def _show_run_backtest():
         if mode == "单只股票":
             search = st.text_input("搜索标的", placeholder="代码或名称", key="bt_search")
             if search:
-                mask = (stock_df_data["ts_code"].str.contains(search, case=False) |
-                        stock_df_data["name"].str.contains(search, case=False))
+                mask = (stock_df_data["ts_code"].str.contains(search, case=False, regex=False) |
+                        stock_df_data["name"].str.contains(search, case=False, regex=False))
                 filtered = stock_df_data[mask]
             else:
                 filtered = stock_df_data.head(50)
@@ -414,8 +414,8 @@ def _show_grid_search():
     if mode == "单只标的":
         gs_search = st.text_input("搜索标的", placeholder="输入代码或中文名称过滤", key="gs_search")
         if gs_search:
-            mask = (stock_df_data["ts_code"].str.contains(gs_search, case=False) |
-                    stock_df_data["name"].str.contains(gs_search, case=False))
+            mask = (stock_df_data["ts_code"].str.contains(gs_search, case=False, regex=False) |
+                    stock_df_data["name"].str.contains(gs_search, case=False, regex=False))
             filtered = stock_df_data[mask]
         else:
             filtered = stock_df_data.head(100)
@@ -726,16 +726,20 @@ def _show_multi_strategy():
                 line=dict(width=2),
             ))
 
-        # 叠加沪深300
+        # 叠加沪深300基准（归一化到与策略同一起点）
         if show_benchmark:
             benchmark_curve = _get_benchmark_curve(start_str, end_str)
             if benchmark_curve:
                 bm_df = pd.DataFrame(benchmark_curve)
-                fig.add_trace(go.Scatter(
-                    x=bm_df["date"], y=bm_df["equity"],
-                    mode="lines", name="沪深300 (基准)",
-                    line=dict(width=2, dash="dash", color="gray"),
-                ))
+                if not bm_df.empty and len(bm_df) >= 2:
+                    bm_init = float(bm_df["equity"].iloc[0])
+                    bm_normalized = bm_df["equity"] / bm_init * DEFAULT_CAPITAL
+                    total_bm_ret = (float(bm_df["equity"].iloc[-1]) / bm_init - 1) * 100
+                    fig.add_trace(go.Scatter(
+                        x=bm_df["date"], y=bm_normalized,
+                        mode="lines", name=f"沪深300基准 ({total_bm_ret:+.1f}%)",
+                        line=dict(width=2, dash="dash", color="gray"),
+                    ))
 
         fig.update_layout(
             title="多策略权益曲线对比",

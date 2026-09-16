@@ -104,12 +104,14 @@ def _show_market_overview():
         if not df.empty:
             latest = df.iloc[-1]
             prev = df.iloc[-2] if len(df) > 1 else latest
-            chg = float(latest.get("close", 0)) - float(prev.get("close", 0))
-            chg_pct = (chg / float(prev.get("close", 1))) * 100
+            latest_close = float(latest.get("close", 0) or 0)
+            prev_close = float(prev.get("close", 0) or 0)
+            chg = latest_close - prev_close
+            chg_pct = (chg / prev_close * 100) if prev_close > 0 else 0.0
             cards.append({
                 "name": name,
                 "code": code,
-                "price": float(latest["close"]),
+                "price": latest_close,
                 "chg": chg,
                 "chg_pct": chg_pct,
             })
@@ -295,10 +297,15 @@ def _show_system_status():
     col_a, col_b, col_c = st.columns(3)
     with col_a:
         if st.button("🔄 更新自选股数据", use_container_width=True, type="primary"):
-            from scripts.init_data import run_update
-            with st.spinner("正在更新数据..."):
-                run_update(watchlist=True)
-            st.rerun()
+            from data.storage import update_lock
+            with update_lock(timeout=10) as acquired:
+                if not acquired:
+                    st.warning("⏳ 另一个更新任务正在运行中，请稍后再试")
+                else:
+                    from scripts.init_data import run_update
+                    with st.spinner("正在更新数据..."):
+                        run_update(watchlist=True)
+                    st.rerun()
     with col_b:
         st.markdown(f"🏷️ 版本: v0.4.0 | 🗄️ `data/quant.db`")
     with col_c:
