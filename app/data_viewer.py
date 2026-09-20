@@ -344,15 +344,15 @@ def show():
     latest = df.iloc[-1]
     prev = df.iloc[-2] if len(df) > 1 else latest
     chg = float(latest.get("pct_chg", 0) or 0)
-    chg_color = "normal"  # 交给 delta_color 按正负显示
+    chg_color = "inverse"  # 交给 delta_color 按正负显示 (红涨绿跌)
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("最新价", f"¥{latest['close']:.2f}",
-                  delta=f"{chg:+.2f}%", delta_color="normal")
+                  delta=f"{chg:+.2f}%", delta_color="inverse")
     with col2:
         st.metric("今开", f"¥{latest['open']:.2f}",
                   delta=f"{latest['open'] - prev['close']:+.2f}",
-                  delta_color="normal")
+                  delta_color="inverse")
     with col3:
         st.metric("昨收", f"¥{prev['close']:.2f}")
     with col4:

@@ -313,10 +313,11 @@ def _show_portfolio():
     total_pnl_pct = (total_value / total_cost - 1) * 100 if total_cost > 0 else 0
 
     c1, c2, c3, c4 = st.columns(4)
+    total_pnl_sign = "+" if total_pnl > 0 else "-" if total_pnl < 0 else ""
     c1.metric("总成本", f"¥{total_cost:,.0f}")
     c2.metric("总市值", f"¥{total_value:,.0f}")
-    c3.metric("总盈亏", f"¥{total_pnl:,.0f}")
-    c4.metric("收益率", f"{total_pnl_pct:.2f}%")
+    c3.metric("总盈亏", f"{total_pnl_sign}¥{abs(total_pnl):,.0f}")
+    c4.metric("收益率", f"{total_pnl_pct:+.2f}%")
 
     col_del1, col_del2 = st.columns([1, 1])
     with col_del1:

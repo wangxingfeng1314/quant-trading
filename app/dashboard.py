@@ -120,12 +120,11 @@ def _show_market_overview():
         cols = st.columns(len(cards))
         for i, c in enumerate(cards):
             with cols[i]:
-                delta_color = "normal" if c["chg"] >= 0 else "inverse"
                 st.metric(
                     label=f"{c['name']} ({c['code']})",
                     value=f"¥{c['price']:.2f}",
                     delta=f"{c['chg']:.2f} ({c['chg_pct']:.2f}%)",
-                    delta_color=delta_color,
+                    delta_color="inverse",
                 )
     else:
         st.info("暂无指数数据，请先运行数据初始化脚本")
