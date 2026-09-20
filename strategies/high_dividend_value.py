@@ -95,16 +95,20 @@ class HighDividendValueStrategy(BaseStrategy):
             # 基准均线走平或上扬（允许微小日度波动，斜率 >= -0.1%）
             is_slow_healthy = ma_slow >= prev_slow * 0.999
 
-            # 信号特征：
-            # A: 快线上穿慢线形成多头金叉 (突破启动)
-            # B: 处于 MA60 上方，前日收盘在 MA10 附近或跌破，今日收阳重新站上 MA10 (回踩企稳)
+            # 模式 A: 顺势突破或回踩企稳 (均线多头金叉 或 站稳趋势均线)
             golden_cross = (prev_fast <= prev_slow and ma_fast > ma_slow)
             trend_rebound = (prev_price <= prev_fast * 1.008 and price > ma_fast and price > ma_slow)
 
-            if not has_position and is_slow_healthy and (golden_cross or trend_rebound):
-                # 需同时满足 RSI 强弱健康门槛且未过度偏离透支基准均线
-                if rsi >= self.rsi_filter and bias <= self.bias_entry_max:
-                    # 金叉加权 0.9，回踩企稳 0.8
+            # 模式 B: 深度超跌左侧/右侧拐点 (当优质高股息蓝筹被错杀导致股息率处于历史极值时)
+            kdj_k = curr.get("kdj_k", 50)
+            kdj_d = curr.get("kdj_d", 50)
+            prev_k = prev.get("kdj_k", 50)
+            prev_d = prev.get("kdj_d", 50)
+            kdj_gold = (prev_k <= prev_d and kdj_k > kdj_d and kdj_k < 35)
+            oversold_value = (rsi < 36 or kdj_gold) and price > curr["open"] and bias < -5.0
+
+            if not has_position and bias <= self.bias_entry_max:
+                if is_slow_healthy and (golden_cross or trend_rebound) and rsi >= self.rsi_filter:
                     score = 0.9 if golden_cross else 0.8
                     entry_type = "金叉突破启动" if golden_cross else "回踩企稳再起"
                     signals.append(Signal(
@@ -117,11 +121,22 @@ class HighDividendValueStrategy(BaseStrategy):
                                 f"偏离MA{self.slow_ma}={bias:.1f}%, RSI={rsi:.0f}"),
                         price_ref=price,
                     ))
+                elif oversold_value:
+                    signals.append(Signal(
+                        ts_code=ts_code,
+                        trade_date=trade_date,
+                        strategy=self.name,
+                        direction="BUY",
+                        score=0.82,
+                        reason=(f"大市值高股息超跌价值底: 偏离MA{self.slow_ma}={bias:.1f}%, "
+                                f"RSI={rsi:.0f}, KDJ={kdj_k:.0f}, 股息率凸显极高配置价值"),
+                        price_ref=price,
+                    ))
 
             # ----------------------------------------------------
             # 2. 卖出/减仓判定：高位过热止盈 或 趋势破位防守
             # ----------------------------------------------------
-            elif portfolio is None or has_position:
+            if portfolio is None or has_position:
                 # 卖出条件 1: 股价短期加速远离60日线（严重偏离），股息率被严重稀释，获利了结
                 if bias >= self.bias_exit_pct:
                     signals.append(Signal(

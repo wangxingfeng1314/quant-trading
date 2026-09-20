@@ -219,17 +219,19 @@ def _show_run_backtest():
             if enable_rm:
                 rm_c1, rm_c2 = st.columns(2)
                 with rm_c1:
-                    stop_loss_pct = st.number_input("硬止损阈值 (%)", value=5.0, min_value=1.0, max_value=20.0, step=0.5, key="bt_sl_pct")
+                    stop_loss_pct = st.number_input("硬止损阈值 (%)", value=6.0, min_value=1.0, max_value=20.0, step=0.5, key="bt_sl_pct")
                     rm_stop_loss = -abs(float(stop_loss_pct))
-                    trail_start_pct = st.number_input("移动止盈启动浮盈 (%)", value=8.0, min_value=2.0, max_value=50.0, step=1.0, key="bt_ts_pct")
+                    trail_start_pct = st.number_input("移动止盈启动浮盈 (%)", value=12.0, min_value=2.0, max_value=50.0, step=1.0, key="bt_ts_pct")
                     rm_trail_start = float(trail_start_pct)
                 with rm_c2:
-                    trail_pullback_pct = st.number_input("移动止盈高点回撤 (%)", value=3.0, min_value=1.0, max_value=20.0, step=0.5, key="bt_tp_pct")
+                    trail_pullback_pct = st.number_input("移动止盈高点回撤 (%)", value=4.0, min_value=1.0, max_value=20.0, step=0.5, key="bt_tp_pct")
                     rm_trail_callback = float(trail_pullback_pct)
-                    max_days_val = st.number_input("最长持仓天数 (0=不限)", value=30, min_value=0, max_value=250, step=5, key="bt_max_days")
+                    max_days_val = st.number_input("最长持仓天数 (0=不限)", value=0, min_value=0, max_value=250, step=5, key="bt_max_days", help="推荐设为0(不强制平仓)，避免波段策略被30天硬中断")
                     rm_max_days = int(max_days_val)
 
-            max_pos_val = st.number_input("最大并发持仓股票数 (0=不限)", value=5, min_value=0, max_value=50, step=1, key="bt_max_pos")
+            # 单只股票回测默认 1 (全仓)，多只股票组合默认 4
+            default_max_pos = 1 if (mode == "单只标的" or len(universe) <= 1) else 4
+            max_pos_val = st.number_input("最大并发持仓股票数 (0=不限)", value=default_max_pos, min_value=0, max_value=50, step=1, key="bt_max_pos", help="单只标的回测请保持1以全额使用资金，多只股票组合建议设为3~5只")
 
     if st.button("🚀 运行回测", type="primary", width='stretch'):
         if not universe:
