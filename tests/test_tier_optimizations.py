@@ -1340,17 +1340,114 @@ def test_risk_manager_date_slice_and_zero_highest():
     assert isinstance(sigs2, list)
 
 
+def test_scheduler_scan_and_notify_isolated_exceptions(monkeypatch):
+    """验证调度器 scan_and_notify 信号扫描发生异常时，持仓盈亏日报推送不受阻断"""
+    import scheduler
+    from unittest.mock import MagicMock
+
+    # mock get_watchlist
+    monkeypatch.setattr("data.storage.get_watchlist", lambda: pd.DataFrame([{"ts_code": "000001.SZ"}]))
+    # mock scan_signals 抛出严重网络或数据异常
+    mock_scan = MagicMock(side_effect=RuntimeError("Tushare API limit reached"))
+    monkeypatch.setattr("engine.scanner.scan_signals", mock_scan)
+
+    # mock notify_position_summary 正常执行
+    mock_pos_summary = MagicMock(return_value=True)
+    monkeypatch.setattr("notifier.push.notify_position_summary", mock_pos_summary)
+
+    # 执行 scan_and_notify，应当捕获信号扫描的异常，并不中断持仓日报的推送
+    scheduler.scan_and_notify()
+
+    mock_scan.assert_called_once()
+    mock_pos_summary.assert_called_once()
 
 
+def test_dashboard_daily_report_prioritizes_pct_chg(monkeypatch):
+    """验证复盘报告优先采用真实 pct_chg 字段，防止送转除权除息导致的 -50% 假摔"""
+    import app.dashboard as dashboard
+
+    monkeypatch.setattr("app.dashboard.get_watchlist", lambda: pd.DataFrame([{"ts_code": "600519.SH"}]))
+    monkeypatch.setattr("app.dashboard.cached_instrument_list", lambda: pd.DataFrame([{"ts_code": "600519.SH", "name": "贵州茅台"}]))
+    monkeypatch.setattr("app.dashboard.get_signals", lambda **kwargs: pd.DataFrame())
+    monkeypatch.setattr("app.dashboard.cached_check_data_freshness", lambda: {"latest_date": "20240520", "total_rows": 1000})
+
+    # 构造送转行情：前日收盘 100.0，今日 10 送 10 除权后收盘 50.5。若直接用 (50.5-100)/100 会算出 -49.5%，但真实 pct_chg 是 +1.0%
+    ex_div_df = pd.DataFrame([
+        {"ts_code": "600519.SH", "trade_date": "20240519", "close": 100.0, "pct_chg": 0.0},
+        {"ts_code": "600519.SH", "trade_date": "20240520", "close": 50.5, "pct_chg": 1.0},
+    ])
+    monkeypatch.setattr("app.dashboard.get_daily", lambda ts_code, limit=None: ex_div_df)
+
+    rendered_markdowns = []
+    monkeypatch.setattr("streamlit.markdown", lambda content: rendered_markdowns.append(content))
+    monkeypatch.setattr("streamlit.download_button", lambda *args, **kwargs: None)
+
+    dashboard._render_daily_report()
+
+    assert len(rendered_markdowns) == 1
+    report_text = rendered_markdowns[0]
+    # 验证输出报告中包含真实涨跌幅 +1.00%，而不是断层假摔的 -49.50%
+    assert "+1.00%" in report_text
+    assert "-49.50%" not in report_text
 
 
+def test_clean_daily_handles_string_inputs():
+    """验证 clean_daily 面对字符串类型数据（如 Baostock 原始输出）时能安全完成转换与单位归一化，不抛出 TypeError"""
+    from data.cleaner import clean_daily
+
+    # 构造全字符串类型的原始输入（模拟 Baostock/外部 API 返回）
+    raw_df = pd.DataFrame([
+        {
+            "ts_code": "000001.SZ",
+            "trade_date": "2024-01-02",
+            "open": "10.0",
+            "high": "10.5",
+            "low": "9.8",
+            "close": "10.2",
+            "volume": "1000",   # 字符串
+            "amount": "10200",  # 字符串
+        }
+    ])
+    cleaned = clean_daily(raw_df)
+    assert not cleaned.empty
+    assert cleaned.iloc[0]["trade_date"] == "20240102"
+    assert isinstance(cleaned.iloc[0]["close"], float)
+    assert cleaned.iloc[0]["close"] == 10.2
+    assert cleaned.iloc[0]["volume"] == 1000.0
 
 
+def test_clean_daily_rejects_non_positive_high_or_low():
+    """验证 clean_daily 能够识别并剔除 high <= 0 或 low <= 0 的脏数据行"""
+    from data.cleaner import clean_daily
+
+    df = pd.DataFrame([
+        {"ts_code": "000001.SZ", "trade_date": "20240102", "open": 10.0, "high": 0.0, "low": 9.0, "close": 9.5, "volume": 100, "amount": 950},
+        {"ts_code": "000001.SZ", "trade_date": "20240103", "open": 10.0, "high": 10.5, "low": -1.0, "close": 10.2, "volume": 100, "amount": 1020},
+        {"ts_code": "000001.SZ", "trade_date": "20240104", "open": 10.0, "high": 10.5, "low": 9.8, "close": 10.2, "volume": 100, "amount": 1020},
+    ])
+    cleaned = clean_daily(df)
+    assert len(cleaned) == 1
+    assert cleaned.iloc[0]["trade_date"] == "20240104"
 
 
+def test_data_service_watchlist_name_fallback(monkeypatch):
+    """验证 DataService.update_watchlist_data 在自选股 note 为空时，正确回退到真实标的名称"""
+    from services.data_service import DataService
 
+    # 构造自选股，note 为空
+    mock_wl = pd.DataFrame([{"ts_code": "510300.SH", "note": ""}])
+    monkeypatch.setattr("data.storage.get_watchlist", lambda: mock_wl)
+    monkeypatch.setattr("services.data_service.acquire_update_lock", lambda: True)
+    monkeypatch.setattr("services.data_service.release_update_lock", lambda: None)
+    monkeypatch.setattr("services.data_service.DataService.update_stock_data", lambda ts, d: True)
+    monkeypatch.setattr("services.data_service.get_instrument_name", lambda ts: "沪深300ETF")
 
+    callback_records = []
+    def on_progress(cur, tot, code, name):
+        callback_records.append((cur, tot, code, name))
 
-
-
+    res = DataService.update_watchlist_data(days=5, progress_callback=on_progress)
+    assert res["success"] == 1
+    assert len(callback_records) == 1
+    assert callback_records[0][3] == "沪深300ETF"
 

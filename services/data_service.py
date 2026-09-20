@@ -9,7 +9,7 @@ from data.storage import (
     save_daily, save_stock_list, save_etf_list, save_index_daily,
     get_index_daily, check_db_integrity, init_db,
     acquire_update_lock, release_update_lock,
-    check_split_dividend_anomaly, clear_daily,
+    check_split_dividend_anomaly, clear_daily, get_instrument_name,
 )
 from data.fetcher import fetch_daily, fetch_stock_list, fetch_etf_list, fetch_index_daily, INDEX_CODES
 from data.cleaner import clean_daily
@@ -92,6 +92,8 @@ class DataService:
             df = fetch_instrument_daily(ts_code, start_date=start_date, end_date=end_date)
             if df is not None and not df.empty:
                 df = clean_daily(df)
+                if df.empty:
+                    return False
                 if check_split_dividend_anomaly(ts_code, df):
                     logger.warning(f"[{ts_code}] 检测到除权除息价格断层，清空本地旧缓存并全量重新同步...")
                     clear_daily(ts_code)
@@ -99,6 +101,8 @@ class DataService:
                     full_df = fetch_instrument_daily(ts_code, start_date=full_start, end_date=end_date)
                     if full_df is not None and not full_df.empty:
                         df = clean_daily(full_df)
+                if df.empty:
+                    return False
                 save_daily(df)
                 logger.info(f"更新 {ts_code}: +{len(df)} 条")
                 return True
@@ -141,7 +145,8 @@ class DataService:
                     failed += 1
 
                 if progress_callback:
-                    name = watchlist[watchlist["ts_code"] == ts_code].iloc[0].get("note", "")
+                    note = watchlist[watchlist["ts_code"] == ts_code].iloc[0].get("note", "")
+                    name = note if note else get_instrument_name(ts_code)
                     progress_callback(i + 1, total, ts_code, name)
         finally:
             release_update_lock()

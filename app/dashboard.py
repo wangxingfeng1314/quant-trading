@@ -445,7 +445,10 @@ def _show_hot_stocks():
             continue
         latest = df.iloc[-1]
         prev = df.iloc[-2] if len(df) > 1 else latest
-        pct = ((latest["close"] - prev["close"]) / prev["close"]) * 100 if prev["close"] > 0 else 0.0
+        if "pct_chg" in latest and pd.notna(latest["pct_chg"]):
+            pct = float(latest["pct_chg"])
+        else:
+            pct = ((latest["close"] - prev["close"]) / prev["close"]) * 100 if prev["close"] > 0 else 0.0
 
         vol_val = latest.get("volume", latest.get("vol", 0)) or 0
         vol_lots = int(float(vol_val) / 100)
@@ -489,7 +492,10 @@ def _render_daily_report():
             if not df.empty:
                 latest = df.iloc[-1]
                 prev = df.iloc[-2] if len(df) > 1 else latest
-                pct = ((latest["close"] - prev["close"]) / prev["close"]) * 100 if prev["close"] > 0 else 0
+                if "pct_chg" in latest and pd.notna(latest["pct_chg"]):
+                    pct = float(latest["pct_chg"])
+                else:
+                    pct = ((latest["close"] - prev["close"]) / prev["close"]) * 100 if prev["close"] > 0 else 0.0
                 lines.append(f"| {ts_code} | {name_map.get(ts_code, '')} | ¥{latest['close']:.2f} | {pct:+.2f}% |")
     else:
         lines.append("暂无自选股记录")

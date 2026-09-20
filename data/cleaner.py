@@ -52,7 +52,24 @@ def clean_daily(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()                                   # 复制一份，避免污染原始数据
     original_len = len(df)                           # 记录清洗前的行数
 
-    # ==================== 步骤0: 成交量/额单位归一化 ====================
+    # ==================== 步骤1: 关键列检查与数值类型转换 ====================
+    ohlc_cols = ["open", "high", "low", "close"]
+    if not all(c in df.columns for c in ohlc_cols):
+        logger.warning(f"数据缺失OHLC关键列: {[c for c in ohlc_cols if c not in df.columns]}")
+        return pd.DataFrame()
+
+    # 原始数据(特别是Baostock或部分外部源)可能是字符串类型
+    # pd.to_numeric 将字符串转为浮点数，无效值变为 NaN
+    for col in ["open", "high", "low", "close", "volume", "amount", "pct_chg", "turnover"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # 关键价格字段(OHLC)任一为空 → 该行无法使用，直接去除
+    df = df.dropna(subset=ohlc_cols)
+    if df.empty:
+        return df
+
+    # ==================== 步骤2: 成交量/额单位归一化 ====================
     #
     # 兼容 AKShare API 不同版本返回的三种数据格式：
     #   DataFrame 中 volume 和 amount 的单位可能不一致
@@ -95,21 +112,6 @@ def clean_daily(df: pd.DataFrame) -> pd.DataFrame:
                 df.loc[idx, "volume"] *= 100
                 logger.info(f"规范化{len(idx)}条混合格式数据: V手→V股(×100), Amt不变")
 
-    # ==================== 步骤1: 去除空行 ====================
-    # 关键价格字段(OHLC)任一为空 → 该行无法使用，直接去除
-    ohlc_cols = ["open", "high", "low", "close"]
-    if not all(c in df.columns for c in ohlc_cols):
-        logger.warning(f"数据缺失OHLC关键列: {[c for c in ohlc_cols if c not in df.columns]}")
-        return pd.DataFrame()
-    df = df.dropna(subset=ohlc_cols)
-
-    # ==================== 步骤2: 数值类型转换 ====================
-    # 原始数据(特别是Baostock返回的)可能是字符串类型
-    # pd.to_numeric 将字符串转为浮点数，无效值变为 NaN
-    for col in ["open", "high", "low", "close", "volume", "amount", "pct_chg", "turnover"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-
     # ==================== 步骤3: high >= low 验证 ====================
     # 最高价必须 ≥ 最低价，否则数据有误，直接剔除
     invalid_hl = df["high"] < df["low"]
@@ -132,7 +134,7 @@ def clean_daily(df: pd.DataFrame) -> pd.DataFrame:
 
     # ==================== 步骤6: 去除价格 <= 0 ====================
     # 正常股票价格必须为正数，价格为0或负数说明数据错误
-    price_zero = (df["close"] <= 0) | (df["open"] <= 0)
+    price_zero = (df["close"] <= 0) | (df["open"] <= 0) | (df["high"] <= 0) | (df["low"] <= 0)
     if price_zero.any():
         logger.warning(f"发现{price_zero.sum()}条价格<=0的记录，已剔除")
         df = df[~price_zero]

@@ -214,11 +214,13 @@ def main():
                 # 按标的类型路由：ETF 走 TickFlow，股票走多源级联
                 df = fetch_instrument_daily(ts_code, fetch_start, end_date)
                 if df.empty:
-                    continue    # 所有数据源均无数据，跳过
+                    fail_count += 1
+                    continue    # 所有数据源均无数据，记录失败并跳过
 
                 # 数据清洗（OHLC验证、停牌处理、去重等）
                 df = clean_daily(df)
                 if df.empty:
+                    fail_count += 1
                     continue
 
                 # 除权除息断层保护：检测到前复权基准迁移时全量重新拉取

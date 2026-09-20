@@ -47,27 +47,33 @@ def scan_and_notify():
     from engine.scanner import scan_signals
     from notifier.push import notify_signals, notify_position_summary
 
-    # ---------- 扫描自选股信号 ----------
-    watchlist = get_watchlist()
-    if not watchlist.empty:
-        stocks = watchlist["ts_code"].tolist()
-        logger.info(f"开始扫描 {len(stocks)} 只自选股信号...")
-        signals = scan_signals(universe=stocks, save=True)
-        logger.info(f"信号扫描完成：共 {len(signals)} 条信号")
+    # ---------- 1. 扫描自选股信号并推送 ----------
+    try:
+        watchlist = get_watchlist()
+        if not watchlist.empty:
+            stocks = watchlist["ts_code"].tolist()
+            logger.info(f"开始扫描 {len(stocks)} 只自选股信号...")
+            signals = scan_signals(universe=stocks, save=True)
+            logger.info(f"信号扫描完成：共 {len(signals)} 条信号")
 
-        # ---------- 推送信号通知 ----------
-        if signals:
-            notify_signals(signals)
-            logger.info(f"已推送 {len(signals)} 条信号通知")
-    else:
-        logger.info("自选股为空，跳过信号扫描")
+            # 推送信号通知
+            if signals:
+                notify_signals(signals)
+                logger.info(f"已推送 {len(signals)} 条信号通知")
+        else:
+            logger.info("自选股为空，跳过信号扫描")
+    except Exception as e:
+        logger.error(f"自选股信号扫描/推送发生异常: {e}", exc_info=True)
 
-    # ---------- 推送持仓盈亏日报 ----------
-    pushed = notify_position_summary()
-    if pushed:
-        logger.info("持仓盈亏日报已推送")
-    else:
-        logger.info("本次未推送持仓日报（无持仓或推送失败）")
+    # ---------- 2. 推送持仓盈亏日报 ----------
+    try:
+        pushed = notify_position_summary()
+        if pushed:
+            logger.info("持仓盈亏日报已推送")
+        else:
+            logger.info("本次未推送持仓日报（无持仓或推送失败）")
+    except Exception as e:
+        logger.error(f"持仓盈亏日报推送发生异常: {e}", exc_info=True)
 
 
 def update_data_job():
