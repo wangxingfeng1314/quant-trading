@@ -17,6 +17,7 @@ from app.data_viewer import create_candlestick_chart
 from data.indicators import apply_indicators
 from strategies import STRATEGY_REGISTRY
 from engine.scanner import scan_signals
+from services.validators import normalize_stock_code
 
 
 def show():
@@ -171,7 +172,7 @@ def _show_watchlist():
             )
             col_rm1, col_rm2 = st.columns([1, 2])
             with col_rm1:
-                confirm_del = st.form_submit_button("🗑️ 确认批量移除", type="primary", use_container_width=True)
+                confirm_del = st.form_submit_button("🗑️ 确认批量移除", type="primary", width="stretch")
             with col_rm2:
                 st.caption("💡 提示：支持同时勾选多只股票/ETF，点击按钮后一次性批量移除，操作过程中绝不跳动页面")
 
@@ -207,7 +208,7 @@ def _show_watchlist():
                     key="group_name_input",
                 )
 
-            submit_group = st.form_submit_button("💾 保存分组设置", type="primary", use_container_width=False)
+            submit_group = st.form_submit_button("💾 保存分组设置", type="primary", width="content")
             if submit_group:
                 if not group_codes:
                     st.warning("请至少勾选一只股票")
@@ -264,14 +265,7 @@ def _show_portfolio():
 
         if st.form_submit_button("添加"):
             if code_input and buy_price > 0 and shares > 0:
-                code_str = code_input.strip().upper()
-                if "." not in code_str and len(code_str) == 6:
-                    if code_str.startswith(("60", "68", "51", "58", "56")):
-                        code_str += ".SH"
-                    elif code_str.startswith(("00", "30", "15", "16")):
-                        code_str += ".SZ"
-                    elif code_str.startswith(("43", "83", "87", "92")):
-                        code_str += ".BJ"
+                code_str = normalize_stock_code(code_input)
                 add_position(code_str, buy_price, shares, buy_date)
                 st.rerun()
 
@@ -358,7 +352,7 @@ def _show_auto_trade():
         min_score = st.slider("最低信号评分", 0.0, 1.0, 0.6, 0.05)
     with col3:
         st.markdown("")  # 对齐
-        refresh_clicked = st.button("🔄 刷新信号", type="secondary", use_container_width=True)
+        refresh_clicked = st.button("🔄 刷新信号", type="secondary", width="stretch")
 
     # 获取最近的信号（通过 start_date 在数据库层面精准过滤）
     trade_date = (datetime.now() - timedelta(days=auto_days)).strftime("%Y%m%d")

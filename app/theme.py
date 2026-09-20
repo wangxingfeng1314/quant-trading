@@ -397,7 +397,10 @@ def inject_page_transition_js():
     })();
     </script>
     """
-    components.html(js_code, height=0)
+    if hasattr(st, "iframe"):
+        st.iframe(js_code, height=0)
+    else:
+        components.html(js_code, height=0)
 
 
 def card_html(title: str, content_html: str, accent: str = "#ef5350") -> str:

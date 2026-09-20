@@ -36,7 +36,7 @@ def chinese_date_input(label: str, default_start: date = None,
     for col, (label_p, (s, e)) in zip(pc, presets.items()):
         with col:
             if st.button(label_p, key=f"{key}_preset_{label_p}",
-                         use_container_width=True):
+                         width="stretch"):
                 st.session_state[f"{key}_sy"] = s.year
                 st.session_state[f"{key}_sm"] = s.month
                 st.session_state[f"{key}_sd"] = s.day

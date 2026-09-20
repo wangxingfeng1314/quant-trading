@@ -10,6 +10,46 @@ _STOCK_CODE_PATTERN = re.compile(r"^\d{6}\.(SH|SZ|BJ)$")
 _DATE_PATTERN = re.compile(r"^\d{8}$")
 
 
+def normalize_stock_code(code: str) -> str:
+    """智能归一化股票/ETF代码为标准格式 (如 600519.SH)
+
+    支持格式兼容：
+      - 纯6位数字: "600519" -> "600519.SH", "000001" -> "000001.SZ", "830001" -> "830001.BJ"
+      - 前缀小写/大写: "sh600519" -> "600519.SH", "SZ000001" -> "000001.SZ", "bj920002" -> "920002.BJ"
+      - 后缀小写: "600519.sh" -> "600519.SH"
+      - 常见分隔符: "600519-SH" / "600519_SH" / "600519。SH" -> "600519.SH"
+    """
+    if not code:
+        return ""
+    s = str(code).strip().upper().replace("。", ".").replace("-", ".").replace("_", ".")
+
+    # 1. 匹配类似 SH600519 / SZ000001 / BJ830001 的前缀格式
+    m_prefix = re.match(r"^(SH|SZ|BJ)(\d{6})$", s)
+    if m_prefix:
+        return f"{m_prefix.group(2)}.{m_prefix.group(1)}"
+
+    # 2. 匹配已有点号后缀的格式
+    if "." in s:
+        parts = s.split(".")
+        if len(parts) == 2 and len(parts[0]) == 6 and parts[1] in ("SH", "SZ", "BJ"):
+            return f"{parts[0]}.{parts[1]}"
+
+    # 3. 匹配纯6位数字格式，智能推断市场后缀
+    m_digits = re.match(r"^(\d{6})$", s)
+    if m_digits:
+        num = m_digits.group(1)
+        if num.startswith(("60", "68", "51", "58", "56", "90")):
+            return f"{num}.SH"
+        elif num.startswith(("00", "30", "15", "16", "20")):
+            return f"{num}.SZ"
+        elif num.startswith(("43", "83", "87", "92")):
+            return f"{num}.BJ"
+        # 默认按沪市
+        return f"{num}.SH"
+
+    return s
+
+
 def validate_stock_code(code: str) -> str:
     """校验股票代码格式
 

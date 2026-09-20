@@ -33,7 +33,7 @@ if APP_AUTH_ENABLED:
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
             password = st.text_input("请输入密码", type="password", key="auth_pwd")
-            if st.button("登录", type="primary", use_container_width=True):
+            if st.button("登录", type="primary", width="stretch"):
                 expected = APP_AUTH_PASSWORD or "quant123"
                 if password == expected:
                     st.session_state["authenticated"] = True
@@ -134,7 +134,7 @@ st.sidebar.markdown(
 
 # 登出按钮（仅认证模式下显示）
 if APP_AUTH_ENABLED:
-    if st.sidebar.button("🚪 登出", use_container_width=True):
+    if st.sidebar.button("🚪 登出", width="stretch"):
         st.session_state["authenticated"] = False
         st.rerun()
 
@@ -144,7 +144,7 @@ st.sidebar.caption(_cached_schtasks_caption())
 # 一键更新数据按钮
 st.sidebar.markdown("---")
 st.sidebar.markdown("**🔄 数据维护**")
-if st.sidebar.button("🔄 更新自选股数据", type="primary", use_container_width=True):
+if st.sidebar.button("🔄 更新自选股数据", type="primary", width="stretch"):
     progress_bar = st.sidebar.progress(0)
     status_text = st.sidebar.empty()
 
@@ -158,7 +158,12 @@ if st.sidebar.button("🔄 更新自选股数据", type="primary", use_container
             if not acquired:
                 progress_bar.empty()
                 status_text.empty()
-                st.sidebar.warning("⏳ 另一个更新任务正在运行中，请稍后再试")
+                st.sidebar.warning("⏳ 另一个更新任务正在运行中")
+                if st.sidebar.button("🔓 强制重置更新锁", key="main_reset_lock", width="stretch"):
+                    from data.storage import force_release_update_lock
+                    force_release_update_lock()
+                    st.sidebar.success("锁已重置，请重试")
+                    st.rerun()
             else:
                 from scripts.init_data import run_update, set_progress_callback
                 set_progress_callback(_on_progress)
@@ -178,7 +183,7 @@ import shutil
 backup_dir = DB_PATH.parent / "backups"
 backup_dir.mkdir(exist_ok=True)
 
-if st.sidebar.button("💾 备份数据库", use_container_width=True):
+if st.sidebar.button("💾 备份数据库", width="stretch"):
     backup_name = f"quant_{datetime.now().strftime('%Y%m%d_%H%M')}.db"
     backup_path = backup_dir / backup_name
     try:

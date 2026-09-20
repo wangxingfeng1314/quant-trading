@@ -1202,6 +1202,145 @@ def test_push_wecom_and_dingtalk_truncation(monkeypatch):
     assert "已截断" in ding_text
 
 
+def test_update_lock_stale_orphan_recovery(tmp_path, monkeypatch):
+    """验证更新锁在遇到陈旧孤儿锁（PID已死亡或超时）时自动触发回收自愈"""
+    import os
+    import json
+    import time
+    from pathlib import Path
+    from data.storage import acquire_update_lock, release_update_lock, force_release_update_lock
+
+    mock_lock = tmp_path / ".mock_update.lock"
+    monkeypatch.setattr("data.storage._LOCK_FILE", mock_lock)
+
+    # 1. 人工模拟一个死进程持有的陈旧锁
+    mock_lock.mkdir()
+    info_file = mock_lock / "lock_info.json"
+    info_file.write_text(json.dumps({
+        "pid": 99999999,  # 绝不存在的死 PID
+        "created_at": time.time() - 3600,
+    }), encoding="utf-8")
+
+    assert mock_lock.exists()
+
+    # 2. 尝试获取锁：由于持有者 PID 99999999 已死且已过去 1 小时，应自动回收孤儿锁并获取成功
+    acquired = acquire_update_lock(timeout=2, max_stale_seconds=10)
+    try:
+        assert acquired is True
+        assert mock_lock.exists()
+        # 验证新锁已被当前进程接管
+        meta = json.loads((mock_lock / "lock_info.json").read_text(encoding="utf-8"))
+        assert meta["pid"] == os.getpid()
+    finally:
+        release_update_lock()
+
+    assert not mock_lock.exists()
+
+
+def test_update_lock_force_release(tmp_path, monkeypatch):
+    """验证 force_release_update_lock 幂等安全清理锁目录"""
+    from data.storage import force_release_update_lock
+
+    mock_lock = tmp_path / ".mock_force.lock"
+    monkeypatch.setattr("data.storage._LOCK_FILE", mock_lock)
+
+    # 不存在时安全返回
+    force_release_update_lock()
+    assert not mock_lock.exists()
+
+    # 创建并放置脏文件
+    mock_lock.mkdir()
+    (mock_lock / "dirty.txt").write_text("junk", encoding="utf-8")
+    assert mock_lock.exists()
+
+    # 强制释放应递归清理
+    force_release_update_lock()
+    assert not mock_lock.exists()
+
+
+def test_normalize_stock_code():
+    """验证 normalize_stock_code 对各种异构格式代码的智能归一化"""
+    from services.validators import normalize_stock_code
+
+    # 1. 纯 6 位代码
+    assert normalize_stock_code("600519") == "600519.SH"
+    assert normalize_stock_code("000001") == "000001.SZ"
+    assert normalize_stock_code("300750") == "300750.SZ"
+    assert normalize_stock_code("688981") == "688981.SH"
+    assert normalize_stock_code("510300") == "510300.SH"
+    assert normalize_stock_code("159915") == "159915.SZ"
+    assert normalize_stock_code("830001") == "830001.BJ"
+
+    # 2. 前缀格式（大写/小写）
+    assert normalize_stock_code("sh600519") == "600519.SH"
+    assert normalize_stock_code("SZ000001") == "000001.SZ"
+    assert normalize_stock_code("bj920002") == "920002.BJ"
+
+    # 3. 常见分隔符与全角点
+    assert normalize_stock_code("600519。SH") == "600519.SH"
+    assert normalize_stock_code("000001-sz") == "000001.SZ"
+    assert normalize_stock_code("830001_bj") == "830001.BJ"
+    assert normalize_stock_code("600519.sh") == "600519.SH"
+
+    # 4. 空与非法
+    assert normalize_stock_code("") == ""
+
+
+def test_position_partial_sell_and_clear_buy_date():
+    """验证 Position 减仓时精确维护 total_cost 并在清仓时彻底重置 buy_date"""
+    from engine.position import Position
+
+    pos = Position(ts_code="600519.SH")
+    pos.buy(price=100.0, volume=1000, cost=10.0, trade_date="20240102")
+    pos.on_new_day("20240103")
+
+    assert pos.shares == 1000
+    assert pos.buy_date == "20240102"
+    assert pos.total_cost == 100010.0
+    expected_avg = 100010.0 / 1000  # 100.01
+
+    # 1. 部分减仓 400 股
+    pos.sell(volume=400, price=110.0, cost=5.0)
+    assert pos.shares == 600
+    assert pos.available_shares == 600
+    assert pos.buy_date == "20240102"  # 仍有持仓，保留买入日
+    # 验证 total_cost 按比例更新为当前持仓对应成本，而非残留 100010.0
+    assert pos.total_cost == round(pos.avg_cost * 600, 2)
+
+    # 2. 全部清仓剩余 600 股
+    pos.sell(volume=600, price=115.0, cost=5.0)
+    assert pos.is_empty
+    assert pos.shares == 0
+    assert pos.available_shares == 0
+    assert pos.total_cost == 0.0
+    assert pos.avg_cost == 0.0
+    assert pos.buy_date == ""  # 必须被清空！
+
+
+def test_risk_manager_date_slice_and_zero_highest():
+    """验证 RiskManager 在 buy_date 含时分秒时间戳时能准确识别周期，且最高价为0时不除零崩溃"""
+    from engine.risk_manager import RiskManager
+    from engine.portfolio import Portfolio
+
+    rm = RiskManager(max_holding_days=5, trailing_stop_activation=8.0, trailing_stop_callback=3.0)
+    p = Portfolio(initial_capital=100000)
+    pos = p.buy(ts_code="000001.SZ", price=10.0, volume=1000, trade_date="20240102")
+
+    # 人工注入包含长格式时间戳的 buy_date
+    pos.buy_date = "2024-01-02 09:30:00"
+
+    # 第 10 天 (超过 5 天上限)
+    sigs = rm.check_risks("2024-01-15 15:00:00", p, {"000001.SZ": 10.2})
+    assert len(sigs) == 1
+    assert sigs[0].context_snapshot["risk_type"] == "max_holding_days"
+
+    # 最高价异常为 0 时安全
+    rm.highest_prices["000001.SZ"] = 0.0
+    sigs2 = rm.check_risks("20240103", p, {"000001.SZ": 10.2})
+    assert isinstance(sigs2, list)
+
+
+
 
 
 

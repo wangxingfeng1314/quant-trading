@@ -301,7 +301,7 @@ def _show_run_backtest():
                                     "胜率%": "{:.1f}%",
                                 })
             )
-            st.dataframe(styled_compare, hide_index=True, use_container_width=True)
+            st.dataframe(styled_compare, hide_index=True, width="stretch")
 
             # 最佳结果展示
             best = max(results, key=lambda r: r["result"].total_return)
@@ -1248,7 +1248,7 @@ def _show_history():
     with col_btn:
         compare_clicked = st.button("📊 对比选中", type="primary",
                                      disabled=len(selected_ids) < 2,
-                                     use_container_width=True)
+                                     width="stretch")
 
     if compare_clicked and len(selected_ids) >= 2:
         _show_comparison(selected_ids[:5])
@@ -1317,7 +1317,7 @@ def _show_comparison(backtest_ids: list):
         xaxis=dict(type="category", nticks=20),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
     # 指标对比表格
     compare_rows = []
@@ -1346,7 +1346,7 @@ def _show_comparison(backtest_ids: list):
             "胜率%": "{:.1f}%",
         })
     )
-    st.dataframe(styled_compare, hide_index=True, use_container_width=True)
+    st.dataframe(styled_compare, hide_index=True, width="stretch")
 
     # 导出对比结果
     csv_data = df_compare.to_csv(index=False).encode("utf-8-sig")

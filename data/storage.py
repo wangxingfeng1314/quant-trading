@@ -28,56 +28,147 @@ from core.config import DB_PATH
 
 _LOCK_FILE = DB_PATH.parent / ".update.lock"
 _LOCK_TIMEOUT = 60  # 最长等待 60 秒
+_STALE_LOCK_TIMEOUT = 600  # 陈旧孤儿锁超时时间 (10分钟)
 
 logger = logging.getLogger(__name__)
 
 
-def acquire_update_lock(timeout: int = None) -> bool:
-    """尝试获取更新锁（文件锁，非阻塞式）
+def _is_pid_running(pid: int) -> bool:
+    """检查指定 PID 进程是否存活"""
+    if pid <= 0:
+        return False
+    try:
+        if os.name == "nt":
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            SYNCHRONIZE = 0x00100000
+            handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, False, pid)
+            if handle:
+                exit_code = ctypes.c_ulong()
+                kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+                kernel32.CloseHandle(handle)
+                return exit_code.value == 259  # STILL_ACTIVE
+            return False
+        else:
+            os.kill(pid, 0)
+            return True
+    except Exception:
+        return False
 
-    使用原子性 os.mkdir 实现跨平台文件锁。
-    定时任务和手动更新同时触发时，只有一个能拿到锁。
+
+def force_release_update_lock():
+    """强制释放更新锁（清理陈旧或异常终止遗留的锁目录）"""
+    lock_path = Path(_LOCK_FILE)
+    try:
+        if lock_path.exists():
+            import shutil
+            if lock_path.is_dir():
+                shutil.rmtree(str(lock_path), ignore_errors=True)
+            else:
+                lock_path.unlink(missing_ok=True)
+            logger.info("强制释放更新锁成功")
+    except Exception as e:
+        logger.warning(f"强制释放更新锁异常: {e}")
+
+
+def acquire_update_lock(timeout: int = None, max_stale_seconds: int = None) -> bool:
+    """尝试获取更新锁（文件锁，非阻塞式，含陈旧锁自动回收自愈机制）
+
+    使用原子性 os.mkdir 实现跨平台文件锁，并记录 PID 及创建时间戳。
+    若发现锁持有者已崩溃退出，或锁存活时长已超过 max_stale_seconds，
+    将自动判定为孤儿陈旧锁并强行释放回收，防止系统永久死锁。
 
     Args:
-        timeout: 超时秒数（默认 _LOCK_TIMEOUT=60）
+        timeout: 最长等待秒数（默认 _LOCK_TIMEOUT=60）
+        max_stale_seconds: 孤儿锁过期判定时长（默认 _STALE_LOCK_TIMEOUT=600 秒）
 
     Returns:
         True=拿到锁, False=超时未拿到
     """
     if timeout is None:
         timeout = _LOCK_TIMEOUT
-    lock_path = str(_LOCK_FILE)
+    if max_stale_seconds is None:
+        max_stale_seconds = _STALE_LOCK_TIMEOUT
+
+    lock_path = Path(_LOCK_FILE)
     deadline = time.time() + timeout
+
     while time.time() < deadline:
         try:
-            os.mkdir(lock_path)  # 原子操作：目录不存在则创建成功
+            os.mkdir(str(lock_path))  # 原子操作：目录不存在则创建成功
+            # 记录当前进程与时间戳信息
+            try:
+                info_file = lock_path / "lock_info.json"
+                info_data = {
+                    "pid": os.getpid(),
+                    "created_at": time.time(),
+                    "created_str": time.strftime("%Y-%m-%d %H:%M:%S"),
+                }
+                info_file.write_text(json.dumps(info_data), encoding="utf-8")
+            except Exception:
+                pass
             logger.debug("获取更新锁成功")
             return True
         except FileExistsError:
+            # 检查现有锁是否是陈旧死锁
+            is_stale = False
+            info_file = lock_path / "lock_info.json"
+            if info_file.exists():
+                try:
+                    meta = json.loads(info_file.read_text(encoding="utf-8"))
+                    holder_pid = meta.get("pid", 0)
+                    created_at = meta.get("created_at", 0)
+                    age = time.time() - created_at
+                    # 1. 持有者进程已不存在；或 2. 存活时间超过 max_stale_seconds
+                    if (holder_pid and not _is_pid_running(holder_pid)) or (age > max_stale_seconds):
+                        logger.warning(
+                            f"检测到陈旧更新锁: PID={holder_pid} (存活={_is_pid_running(holder_pid)}), "
+                            f"已持有 {age:.0f}s (阈值 {max_stale_seconds}s)，正在执行自动回收..."
+                        )
+                        is_stale = True
+                except Exception:
+                    is_stale = True
+            else:
+                # 兼容旧版本无 info 文件的锁目录
+                try:
+                    mtime = os.path.getmtime(str(lock_path))
+                    age = time.time() - mtime
+                    if age > max_stale_seconds:
+                        logger.warning(
+                            f"检测到旧版无元数据更新锁: 已存在 {age:.0f}s (阈值 {max_stale_seconds}s)，正在执行自动回收..."
+                        )
+                        is_stale = True
+                except Exception:
+                    pass
+
+            if is_stale:
+                force_release_update_lock()
+                continue
+
             time.sleep(1)
-    logger.warning(f"等待更新锁超时 ({timeout}s)，可能是上一次更新还未完成")
+
+    logger.warning(f"等待更新锁超时 ({timeout}s)，当前仍有其他更新任务在运行")
     return False
 
 
 def release_update_lock():
     """释放更新锁"""
-    lock_path = str(_LOCK_FILE)
-    try:
-        os.rmdir(lock_path)
-        logger.debug("释放更新锁成功")
-    except FileNotFoundError:
-        pass  # 锁已经被释放
+    force_release_update_lock()
 
 
 @contextmanager
-def update_lock(timeout: int = None):
+def update_lock(timeout: int = None, max_stale_seconds: int = None):
     """获取/释放更新锁的上下文管理器
 
     用法:
         with update_lock():
             run_update(...)
     """
-    acquired = acquire_update_lock(timeout)
+    if max_stale_seconds is not None:
+        acquired = acquire_update_lock(timeout, max_stale_seconds=max_stale_seconds)
+    else:
+        acquired = acquire_update_lock(timeout)
     try:
         yield acquired
     finally:

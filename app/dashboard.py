@@ -63,7 +63,7 @@ def show():
         _show_market_overview()
     with col2:
         # 复盘报告按钮容器
-        with st.popover("📋 每日复盘报告 (查看/导出)", use_container_width=True):
+        with st.popover("📋 每日复盘报告 (查看/导出)", width="stretch"):
             _render_daily_report()
 
     st.markdown("---")
@@ -290,17 +290,22 @@ def _show_system_status():
                     "数据状态": st.column_config.TextColumn("数据状态", width="medium"),
                 },
                 hide_index=True,
-                use_container_width=True,
+                width="stretch",
             )
 
     # ---------- 操作按钮 ----------
     col_a, col_b, col_c = st.columns(3)
     with col_a:
-        if st.button("🔄 更新自选股数据", use_container_width=True, type="primary"):
+        if st.button("🔄 更新自选股数据", width="stretch", type="primary"):
             from data.storage import update_lock
             with update_lock(timeout=10) as acquired:
                 if not acquired:
-                    st.warning("⏳ 另一个更新任务正在运行中，请稍后再试")
+                    st.warning("⏳ 另一个更新任务正在运行中")
+                    if st.button("🔓 强制重置更新锁", key="dash_reset_lock", width="stretch"):
+                        from data.storage import force_release_update_lock
+                        force_release_update_lock()
+                        st.success("锁已重置，请重试")
+                        st.rerun()
                 else:
                     from scripts.init_data import run_update
                     with st.spinner("正在更新数据..."):
@@ -325,7 +330,7 @@ def _show_system_status():
             json.dumps(report, ensure_ascii=False, indent=2),
             file_name=f"data_health_{today}.json",
             mime="application/json",
-            use_container_width=True,
+            width="stretch",
         )
 
 
@@ -515,6 +520,6 @@ def _render_daily_report():
         data=report_md.encode("utf-8"),
         file_name=f"复盘报告_{today_date}.md",
         mime="text/markdown",
-        use_container_width=True,
+        width="stretch",
     )
 

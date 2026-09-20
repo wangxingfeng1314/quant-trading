@@ -142,7 +142,7 @@ class RiskManager:
             highest = self.highest_prices.get(ts_code, price)
             max_gain_pct = (highest / cost - 1) * 100
 
-            if self.trailing_stop_activation > 0 and max_gain_pct >= self.trailing_stop_activation:
+            if self.trailing_stop_activation > 0 and max_gain_pct >= self.trailing_stop_activation and highest > 0:
                 # 已经激活移动止盈，检测从最高点的回撤
                 drawdown_from_high = (1 - price / highest) * 100
                 if drawdown_from_high >= self.trailing_stop_callback:
@@ -170,8 +170,8 @@ class RiskManager:
             # --- 风控规则3: 最大持仓周期退出 ---
             if self.max_holding_days > 0 and pos.buy_date:
                 try:
-                    b_str = str(pos.buy_date).replace("-", "").replace("/", "")
-                    c_str = str(trade_date).replace("-", "").replace("/", "")
+                    b_str = str(pos.buy_date).replace("-", "").replace("/", "").strip()[:8]
+                    c_str = str(trade_date).replace("-", "").replace("/", "").strip()[:8]
                     b_dt = datetime.strptime(b_str, "%Y%m%d")
                     c_dt = datetime.strptime(c_str, "%Y%m%d")
                     holding_days = (c_dt - b_dt).days

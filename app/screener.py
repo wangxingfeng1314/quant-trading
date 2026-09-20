@@ -228,4 +228,5 @@ def show():
         data=csv,
         file_name=f"筛选结果_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.csv",
         mime="text/csv",
+        width="stretch",
     )

@@ -75,6 +75,9 @@ class Position:
             self.frozen_shares = 0
             self.avg_cost = 0.0
             self.total_cost = 0.0
+            self.buy_date = ""
+        else:
+            self.total_cost = round(self.avg_cost * self.shares, 2)
         return round(realized_pnl, 2)
 
     def market_value(self, current_price: float) -> float:
