@@ -420,7 +420,7 @@ def notify_position_summary() -> bool:
             total_market += market_value
 
             icon = "🟢" if pnl >= 0 else "🔴"
-            name = get_instrument_name(ts_code)
+            name = get_instrument_name(ts_code).replace("*", "\\*")
             note_str = f" · {str(pos.get('note')).strip()}" if pos.get("note") else ""
             rows.append(
                 f"{icon} **{name}** ({ts_code}{note_str})  "
@@ -432,6 +432,8 @@ def notify_position_summary() -> bool:
         total_pnl_pct = (total_pnl / total_cost * 100) if total_cost > 0 else 0.0
         total_icon = "🟢" if total_pnl >= 0 else "🔴"
 
+        total_pnl_sign = "+" if total_pnl > 0 else "-" if total_pnl < 0 else ""
+        
         title = f"📊 持仓日报 - {today}"
         content = f"""## 📊 持仓日报
 **日期**: {today}
@@ -442,7 +444,7 @@ def notify_position_summary() -> bool:
 | 持仓数 | {len(positions)} 只 |
 | 总成本 | ¥{total_cost:,.0f} |
 | 总市值 | ¥{total_market:,.0f} |
-| 总盈亏 | {total_icon} **¥{total_pnl:+,.0f} ({total_pnl_pct:+.1f}%)** |
+| 总盈亏 | {total_icon} **{total_pnl_sign}¥{abs(total_pnl):,.0f} ({total_pnl_pct:+.1f}%)** |
 
 **逐只明细**
 {chr(10).join(rows)}

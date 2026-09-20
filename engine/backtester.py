@@ -63,7 +63,21 @@ class Backtester:
         """
         import numpy as np
 
-        # 1. 加载并预处理所有股票数据（若已传入 preloaded_data 则免重复 I/O）
+        # 1. 初始化 ST 标的缓存 (解决 is_st 判定失效问题)
+        from data.storage import get_instrument_list
+        instruments = get_instrument_list()
+        self.st_lookup = {}
+        if not instruments.empty:
+            for _, row in instruments.iterrows():
+                code = row["ts_code"]
+                is_st = False
+                if "is_st" in row and row["is_st"] == 1:
+                    is_st = True
+                elif "name" in row and isinstance(row["name"], str) and "ST" in row["name"].upper():
+                    is_st = True
+                self.st_lookup[code] = is_st
+
+        # 2. 加载并预处理所有股票数据（若已传入 preloaded_data 则免重复 I/O）
         if self.preloaded_data is not None and self.preloaded_data:
             stock_data = {
                 ts_code: self.preloaded_data[ts_code]
@@ -160,7 +174,7 @@ class Backtester:
                     df_stock = stock_data[ts_code]
                     open_price = float(df_stock.iloc[curr_idx]["open"])
                     prev_close = float(df_stock.iloc[curr_idx - 1]["close"]) if curr_idx > 0 else 0.0
-                    is_st = "ST" in ts_code
+                    is_st = self.st_lookup.get(ts_code, False)
                     is_cy = ts_code.startswith(("300", "301", "688"))
                     is_bj = ts_code.startswith(("43", "83", "87", "92")) or ts_code.endswith(".BJ")
                     snapshot = self._build_snapshot(sig, df_stock, curr_idx)
@@ -191,7 +205,7 @@ class Backtester:
                     elif sig.direction == "SELL":
                         pos = portfolio.get_position(ts_code)
                         if pos and not pos.is_empty:
-                            sell_vol = pos.available_shares if pos.buy_date else (pos.available_shares if pos.available_shares > 0 else pos.shares)
+                            sell_vol = pos.available_shares
                             portfolio.sell(
                                 ts_code=ts_code,
                                 price=open_price,
@@ -228,7 +242,7 @@ class Backtester:
                     df_stock = stock_data.get(ts_code)
                     curr_idx = date_index[ts_code][date] if (df_stock is not None and date in date_index.get(ts_code, {})) else 0
                     prev_close = float(df_stock.iloc[curr_idx - 1]["close"]) if (df_stock is not None and curr_idx > 0) else 0.0
-                    is_st = "ST" in ts_code
+                    is_st = self.st_lookup.get(ts_code, False)
                     is_cy = ts_code.startswith(("300", "301", "688"))
                     is_bj = ts_code.startswith(("43", "83", "87", "92")) or ts_code.endswith(".BJ")
                     snapshot = self._build_snapshot(sig, df_stock, curr_idx)
@@ -259,7 +273,7 @@ class Backtester:
                     elif sig.direction == "SELL":
                         pos = portfolio.get_position(sig.ts_code)
                         if pos and not pos.is_empty:
-                            sell_vol = pos.available_shares if pos.buy_date else (pos.available_shares if pos.available_shares > 0 else pos.shares)
+                            sell_vol = pos.available_shares
                             portfolio.sell(
                                 ts_code=sig.ts_code,
                                 price=sig.price_ref,
