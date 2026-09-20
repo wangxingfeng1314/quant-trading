@@ -398,7 +398,10 @@ def inject_page_transition_js():
     </script>
     """
     if hasattr(st, "iframe"):
-        st.iframe(js_code, height=0)
+        try:
+            st.iframe(js_code, height="content")
+        except Exception:
+            components.html(js_code, height=0)
     else:
         components.html(js_code, height=0)
 
