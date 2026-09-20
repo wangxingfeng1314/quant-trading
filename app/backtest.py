@@ -116,12 +116,16 @@ def _show_run_backtest():
                     default = default_params[pname]
                 desc = pinfo.get("desc", pname)
                 if isinstance(default, int):
+                    min_val = pinfo.get("min_value", min(0, default) if default <= 0 else 1)
+                    max_val = pinfo.get("max_value", None)
                     params[pname] = st.number_input(
-                        desc, value=default, min_value=1, key=f"bt_param_{pname}"
+                        desc, value=default, min_value=min_val, max_value=max_val, step=1, key=f"bt_param_{pname}"
                     )
                 elif isinstance(default, float):
+                    min_val = pinfo.get("min_value", None)
+                    max_val = pinfo.get("max_value", None)
                     params[pname] = st.number_input(
-                        desc, value=default, key=f"bt_param_{pname}"
+                        desc, value=default, min_value=min_val, max_value=max_val, step=0.1, key=f"bt_param_{pname}"
                     )
                 else:
                     params[pname] = st.text_input(desc, value=str(default), key=f"bt_param_{pname}")
@@ -398,16 +402,27 @@ def _show_grid_search():
             st.markdown(f"**{pinfo.get('desc', pname)}**")
 
             val_type = "int" if isinstance(default, int) else "float"
-            min_v = st.number_input("最小值", value=int(default * 0.5) if val_type == "int" else default * 0.5,
-                                     key=f"gs_min_{pname}")
-            max_v = st.number_input("最大值", value=int(default * 2) if val_type == "int" else default * 2,
-                                     key=f"gs_max_{pname}")
+            if default >= 0:
+                calc_min = int(default * 0.5) if val_type == "int" else round(default * 0.5, 2)
+                calc_max = int(default * 2) if val_type == "int" else round(default * 2, 2)
+            else:
+                calc_min = int(default * 2) if val_type == "int" else round(default * 2, 2)
+                calc_max = int(default * 0.5) if val_type == "int" else round(default * 0.5, 2)
+            if calc_min == calc_max:
+                calc_min -= 1
+                calc_max += 1
+
+            min_v = st.number_input("最小值", value=calc_min, key=f"gs_min_{pname}")
+            max_v = st.number_input("最大值", value=calc_max, key=f"gs_max_{pname}")
             steps = st.number_input("步数", value=5, min_value=2, max_value=20, key=f"gs_steps_{pname}")
 
+            low_v, high_v = min(min_v, max_v), max(min_v, max_v)
             if val_type == "int":
-                param_grid[pname] = list(range(int(min_v), int(max_v) + 1, max(1, int((max_v - min_v) / (steps - 1)))))
+                step_size = max(1, int(round((high_v - low_v) / max(1, steps - 1))))
+                param_grid[pname] = sorted(list(set(range(int(low_v), int(high_v) + 1, step_size))))
             else:
-                param_grid[pname] = [round(min_v + i * (max_v - min_v) / (steps - 1), 1) for i in range(steps)]
+                step_size = (high_v - low_v) / max(1, steps - 1)
+                param_grid[pname] = sorted(list(set([round(low_v + i * step_size, 2) for i in range(int(steps))])))
 
     # 股票选择
     mode = st.radio("标的", ["单只标的", "多只标的(手动)"], horizontal=True, key="gs_mode")
