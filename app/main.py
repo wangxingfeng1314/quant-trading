@@ -165,9 +165,8 @@ if st.sidebar.button("🔄 更新自选股数据", type="primary", width="stretc
                     st.sidebar.success("锁已重置，请重试")
                     st.rerun()
             else:
-                from scripts.init_data import run_update, set_progress_callback
-                set_progress_callback(_on_progress)
-                run_update(days=14, watchlist=True)
+                from scripts.init_data import run_update
+                run_update(days=14, watchlist=True, progress_callback=_on_progress)
                 progress_bar.empty()
                 status_text.empty()
                 st.sidebar.success(f"✅ 数据更新完成 ({datetime.now().strftime('%H:%M')})")
