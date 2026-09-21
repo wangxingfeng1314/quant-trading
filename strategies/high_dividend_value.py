@@ -41,31 +41,39 @@ DPS_HISTORY: Dict[str, Dict[int, float]] = {
 
 
 class HighDividendValueStrategy(BaseStrategy):
-    """500亿+大市值高股息顺势增强策略 (股息通道 + 均线右侧顺势 + 估值过热止盈)"""
+    """500亿+大市值高股息顺势/超跌复合增强策略 (股息通道 + 顺势/超跌均线选择 + 波段/过热止盈)"""
 
     name = "high_dividend_value"
-    description = "大市值高股息顺势增强策略（股息通道 + 均线右侧顺势 + 过热止盈）"
+    description = "大市值高股息复合策略（股息通道 + 顺势/超跌均线选择 + 波段/过热止盈）"
     style = "中长线"
     param_schema = {
         "buy_div_yield": {"default": 5.0, "desc": "买入股息率阈值 (%, 高于即买入)"},
-        "sell_div_yield": {"default": 3.5, "desc": "卖出股息率阈值 (%, 低于即卖出)"},
-        "use_trend_filter": {"default": 1, "desc": "启用均线顺势右侧买入过滤(1=是, 0=否纯股息)"},
-        "trend_ma_period": {"default": 20, "desc": "顺势均线周期 (日，支持20或60)"},
-        "bias_take_profit": {"default": 25.0, "desc": "短期偏离均线过热止盈(%, 0=不启用)"},
-        "custom_dps": {"default": 0.0, "desc": "自定义每股年分红(元，0=使用历年真实派息)"},
+        "sell_div_yield": {"default": 3.5, "desc": "卖出股息率阈值 (%, 低于即止盈)"},
+        "ma_entry_filter": {"default": 1, "desc": "买入均线条件 (1=站上均线顺势, -1=均线下方超跌抄底, 0=不限)"},
+        "trend_ma_period": {"default": 20, "desc": "均线周期 (日，如20/60/120)"},
+        "profit_target_pct": {"default": 0.0, "desc": "固定波段盈利止盈门槛 (%, 如8.0=盈利8%止盈, 0=不启用)"},
+        "bias_take_profit": {"default": 25.0, "desc": "短期偏离均线过热止盈 (%, 0=不启用)"},
+        "custom_dps": {"default": 0.0, "desc": "自定义每股年分红 (元，0=使用历年真实派息)"},
     }
 
     def __init__(self,
                  buy_div_yield: float = 5.0,
                  sell_div_yield: float = 3.5,
-                 use_trend_filter: int = 1,
+                 ma_entry_filter: int = 1,
                  trend_ma_period: int = 20,
+                 profit_target_pct: float = 0.0,
                  bias_take_profit: float = 25.0,
-                 custom_dps: float = 0.0):
+                 custom_dps: float = 0.0,
+                 use_trend_filter: Optional[int] = None):
         self.buy_div_yield = float(buy_div_yield)
         self.sell_div_yield = float(sell_div_yield)
-        self.use_trend_filter = int(use_trend_filter)
+        # 兼容旧参数 use_trend_filter
+        if use_trend_filter is not None:
+            self.ma_entry_filter = int(use_trend_filter)
+        else:
+            self.ma_entry_filter = int(ma_entry_filter)
         self.trend_ma_period = int(trend_ma_period)
+        self.profit_target_pct = float(profit_target_pct)
         self.bias_take_profit = float(bias_take_profit)
         self.custom_dps = float(custom_dps)
         self.ma_col = f"ma{self.trend_ma_period}"
@@ -134,39 +142,68 @@ class HighDividendValueStrategy(BaseStrategy):
             if div_yield is None:
                 continue
 
-            has_position = (portfolio is not None
-                            and portfolio.get_position(ts_code) is not None
-                            and not portfolio.get_position(ts_code).is_empty)
+            pos = portfolio.get_position(ts_code) if portfolio is not None else None
+            has_position = (pos is not None and not pos.is_empty)
 
-            # 获取均线参考值与顺势状态
-            ma_val = curr.get(self.ma_col, 0.0) if self.ma_col in curr else 0.0
+            # 获取均线参考值 (优先从列中读取，无列时快速取最近 N 行均值)
+            if self.ma_col in curr and pd.notna(curr[self.ma_col]):
+                ma_val = float(curr[self.ma_col])
+            else:
+                ma_val = float(df["close"].iloc[-self.trend_ma_period:].mean()) if len(df) > 0 else float(price)
+
             trend_ok = True
-            if self.use_trend_filter and self.ma_col in df.columns and pd.notna(ma_val) and ma_val > 0:
+            if self.ma_entry_filter == 1:
                 trend_ok = (price >= ma_val)
+            elif self.ma_entry_filter == -1:
+                trend_ok = (price < ma_val)
 
             # ----------------------------------------------------
-            # 1. 买入判定：高股息 + (顺势站上均线，防左侧接飞刀)
+            # 1. 买入判定：高股息 + (顺势站上均线 / 超跌在均线下方 / 不限)
             # ----------------------------------------------------
             if not has_position and div_yield >= self.buy_div_yield and trend_ok:
                 score = round(min(0.6 + (div_yield - self.buy_div_yield) * 0.1, 1.0), 2)
-                trend_str = f", 站上MA{self.trend_ma_period}({price:.2f}>={ma_val:.2f})" if (self.use_trend_filter and ma_val > 0) else ""
+                if self.ma_entry_filter == -1:
+                    trend_str = f", 价格处于MA{self.trend_ma_period}下方超跌({price:.2f}<{ma_val:.2f})"
+                    reason_prefix = "超跌高股息买入"
+                elif self.ma_entry_filter == 1:
+                    trend_str = f", 站上MA{self.trend_ma_period}顺势({price:.2f}>={ma_val:.2f})"
+                    reason_prefix = "高股息顺势买入"
+                else:
+                    trend_str = ""
+                    reason_prefix = "纯股息率买入"
+
                 signals.append(Signal(
                     ts_code=ts_code,
                     trade_date=trade_date,
                     strategy=self.name,
                     direction="BUY",
                     score=score,
-                    reason=(f"高股息顺势买入: 股息率达 {div_yield:.2f}% (>= {self.buy_div_yield:.1f}%){trend_str}, "
+                    reason=(f"{reason_prefix}: 股息率达 {div_yield:.2f}% (>= {self.buy_div_yield:.1f}%){trend_str}, "
                             f"具备高分红配置价值 (现价={price:.2f}元)"),
                     price_ref=price,
                 ))
 
             # ----------------------------------------------------
-            # 2. 卖出判定：估值修复止盈 (<=3.5%) 或 股价严重过热透支止盈
+            # 2. 卖出判定：固定波段止盈 / 估值修复止盈 / 股价严重过热止盈
             # ----------------------------------------------------
             elif (portfolio is None or has_position):
+                gain_pct = ((price / pos.avg_cost) - 1.0) * 100.0 if (pos is not None and pos.avg_cost > 0) else 0.0
                 bias = ((price / ma_val - 1) * 100) if (ma_val and ma_val > 0) else 0.0
-                if div_yield <= self.sell_div_yield:
+
+                # 条件 A: 固定波段盈利止盈 (如用户设定的盈利 7%~10% 即卖出)
+                if self.profit_target_pct > 0 and pos is not None and pos.avg_cost > 0 and gain_pct >= self.profit_target_pct:
+                    signals.append(Signal(
+                        ts_code=ts_code,
+                        trade_date=trade_date,
+                        strategy=self.name,
+                        direction="SELL",
+                        score=0.95,
+                        reason=(f"波段止盈卖出: 盈利达 {gain_pct:.2f}% (>= 目标 {self.profit_target_pct:.1f}%), "
+                                f"成本={pos.avg_cost:.2f}元, 现价={price:.2f}元"),
+                        price_ref=price,
+                    ))
+                # 条件 B: 估值修复止盈 (股息率降至 <= 3.5%)
+                elif div_yield <= self.sell_div_yield:
                     score = round(min(0.6 + (self.sell_div_yield - div_yield) * 0.1, 1.0), 2)
                     signals.append(Signal(
                         ts_code=ts_code,
@@ -178,6 +215,7 @@ class HighDividendValueStrategy(BaseStrategy):
                                 f"估值偏高分红性价比稀释 (现价={price:.2f}元)"),
                         price_ref=price,
                     ))
+                # 条件 C: 偏离均线暴涨过热止盈
                 elif self.bias_take_profit > 0 and bias >= self.bias_take_profit:
                     score = round(min(0.7 + (bias - self.bias_take_profit) * 0.05, 1.0), 2)
                     signals.append(Signal(
