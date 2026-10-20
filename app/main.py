@@ -176,9 +176,9 @@ if st.sidebar.button("🔄 更新自选股数据", type="primary", width="stretc
         status_text.empty()
         st.sidebar.error(f"❌ 更新失败: {e}")
 
-# 数据库备份/恢复
+# 数据库备份/恢复（使用 SQLite 原生在线热备 API，保障 WAL 模式一致性与文件锁安全）
 from core.config import DB_PATH
-import shutil
+from data.storage import backup_database, restore_database
 backup_dir = DB_PATH.parent / "backups"
 backup_dir.mkdir(exist_ok=True)
 
@@ -186,8 +186,8 @@ if st.sidebar.button("💾 备份数据库", width="stretch"):
     backup_name = f"quant_{datetime.now().strftime('%Y%m%d_%H%M')}.db"
     backup_path = backup_dir / backup_name
     try:
-        shutil.copy2(DB_PATH, backup_path)
-        st.sidebar.success(f"✅ 已备份: {backup_name}")
+        backup_database(backup_path)
+        st.sidebar.success(f"✅ 已安全热备: {backup_name}")
     except Exception as e:
         st.sidebar.error(f"❌ 备份失败: {e}")
 
@@ -202,7 +202,7 @@ if backups:
         confirm = st.checkbox("我确认要恢复", key="restore_confirm")
         if st.button("⚠️ 恢复此备份", type="secondary", disabled=not confirm):
             try:
-                shutil.copy2(backup_dir / selected, DB_PATH)
+                restore_database(backup_dir / selected)
                 st.success(f"✅ 已恢复: {selected}")
                 st.rerun()
             except Exception as e:

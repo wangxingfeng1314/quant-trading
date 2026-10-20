@@ -221,3 +221,89 @@ def test_scanner_conflict_interception_and_resonance(monkeypatch):
     res_conflict = _scan_single_stock("000001.SZ", dates[-1], [DummyBullStrategy1(), DummyTrendBreakdownSell()], min_daily_amount=0.0)
     assert all(s.direction == "SELL" for s in res_conflict)
 
+
+def test_p0_limit_up_and_limit_down_untradable():
+    """测试 P0-1: A股涨停封板不可买入、跌停封板不可卖出及次日顺延机制"""
+    p = Portfolio(initial_capital=100000.0)
+    # 1. 前收盘 10.0，主板涨停价 11.00：以 11.00 或 11.50 委托买入应被涨停封死拦截 (返回 None)
+    trade_limit_up = p.buy("000001.SZ", price=11.0, volume=1000, trade_date="20260105", prev_close=10.0)
+    assert trade_limit_up is None
+
+    # 2. 正常价格 10.50 (< 11.00) 买入成功
+    trade_ok = p.buy("000001.SZ", price=10.5, volume=1000, trade_date="20260105", prev_close=10.0, slippage=False)
+    assert trade_ok is not None
+    assert trade_ok.volume == 1000
+
+    # 3. 次日 (20260106) 前收盘 10.5，跌停价 9.45：以 9.45 一字跌停价卖出应无法成交 (返回 None)
+    p.on_new_day("20260106")
+    trade_limit_down = p.sell("000001.SZ", price=9.45, volume=1000, trade_date="20260106", prev_close=10.5)
+    assert trade_limit_down is None
+    assert p.get_position("000001.SZ").shares == 1000  # 仍持有
+
+    # 4. 第3日 (20260107) 打开跌停 (9.60 > 8.51)，正常卖出成交
+    p.on_new_day("20260107")
+    trade_sold = p.sell("000001.SZ", price=9.60, volume=1000, trade_date="20260107", prev_close=9.45, slippage=False)
+    assert trade_sold is not None
+    assert p.get_position("000001.SZ").is_empty
+
+
+def test_p1_atr_dynamic_stops_and_risk_parity_sizing():
+    """测试 P1-1: ATR 动态止损止盈与 Backtester ATR 风险平价仓位计算"""
+    from notifier.push import calc_atr_stops_and_sizing
+    from strategies.base import BaseStrategy
+
+    plan = calc_atr_stops_and_sizing("515180.SH", price=1.35, score=0.8, base_capital=100000.0)
+    assert 3.0 <= plan["sl_pct"] <= 8.0
+    assert 6.0 <= plan["tp_pct"] <= 16.0
+    assert plan["stop_loss"] < 1.35 < plan["take_profit"]
+    assert plan["shares"] >= 100
+
+    # 验证 Backtester position_sizing="atr_risk"：低波动股分配预算显著高于高波动妖股
+    portfolio = Portfolio(initial_capital=100000.0)
+    bt = Backtester(
+        strategy_cls=BaseStrategy, params={}, universe=["000001.SZ"],
+        start_date="20260101", end_date="20260110",
+        initial_capital=100000.0, position_sizing="atr_risk", risk_per_trade=0.015,
+    )
+    sig = Signal(ts_code="000001.SZ", trade_date="20260105", strategy="ma_cross", direction="BUY", score=0.8, price_ref=10.0)
+    df_low_vol = pd.DataFrame([{"close": 10.0, "atr14": 0.12}])   # 日均波幅 1.2%
+    df_high_vol = pd.DataFrame([{"close": 10.0, "atr14": 0.45}])  # 日均波幅 4.5%
+    budget_low_vol = bt._calc_buy_budget(portfolio, sig, df_stock=df_low_vol, curr_idx=0)
+    budget_high_vol = bt._calc_buy_budget(portfolio, sig, df_stock=df_high_vol, curr_idx=0)
+    assert budget_low_vol > budget_high_vol
+
+
+def test_p1_position_action_diagnosis_radar(monkeypatch):
+    """测试 P1-2: 持仓管理页实时止损/移动止盈/卖出信号预警雷达"""
+    from app.portfolio import diagnose_position_action
+
+    # 模拟当前跌破止损线 (买入价 10.0，现价 9.0，跌幅 -10%)
+    df_crash = pd.DataFrame([
+        {"trade_date": "20260105", "open": 10.0, "high": 10.1, "low": 9.8, "close": 9.9},
+        {"trade_date": "20260106", "open": 9.5, "high": 9.6, "low": 8.9, "close": 9.0},
+    ])
+    monkeypatch.setattr("app.portfolio.get_daily", lambda code, limit=30: df_crash)
+    monkeypatch.setattr("app.portfolio.get_signals", lambda **kw: pd.DataFrame())
+    diag_loss = diagnose_position_action("000001.SZ", buy_price=10.0, buy_date="20260105")
+    assert diag_loss["level"] == "danger"
+    assert "止损" in diag_loss["action"]
+
+
+def test_p2_batch_summary_and_online_backup(tmp_path):
+    """测试 P2-1: SQLite 批量聚合查询与 WAL 在线热备 API"""
+    from data.storage import batch_get_daily_summary, backup_database
+    from app.st_utils import format_strategy_cn
+
+    # 1. 新策略中文名映射存在
+    assert format_strategy_cn("high_dividend_value") == "高股息价值红利"
+
+    # 2. 批量聚合查询
+    summary = batch_get_daily_summary(["515180.SH", "601939.SH"])
+    assert isinstance(summary, dict)
+
+    # 3. 在线热备生成有效 SQLite 文件
+    bk_file = tmp_path / "test_hot_backup.db"
+    assert backup_database(bk_file) is True
+    assert bk_file.exists() and bk_file.stat().st_size > 0
+
+

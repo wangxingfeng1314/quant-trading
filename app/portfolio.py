@@ -8,7 +8,8 @@ from datetime import date, datetime, timedelta
 from data.storage import (get_watchlist, add_to_watchlist, remove_from_watchlist,
                           get_stock_list, get_daily, get_signals, get_latest_date,
                           save_daily, get_positions, add_position, remove_position,
-                          clear_positions, get_instrument_list)
+                          clear_positions, get_instrument_list, batch_get_latest)
+from notifier.push import calc_atr_stops_and_sizing
 from data.fetcher import fetch_daily, fetch_instrument_daily
 from data.cleaner import clean_daily
 from core.config import DATA_START_DATE
@@ -119,13 +120,19 @@ def _show_watchlist():
 
     name_map = dict(zip(stock_df["ts_code"], stock_df["name"])) if not stock_df.empty else {}
 
-    # 获取每只自选股的最新价格
+    # 批量获取所有自选股的最新1条日线，消除逐只全量拉取的 N+1 性能瓶颈
+    wl_codes = watchlist["ts_code"].tolist()
+    latest_batch_df = batch_get_latest(wl_codes, limit=1)
+    latest_by_code = {}
+    if not latest_batch_df.empty:
+        for _, l_row in latest_batch_df.iterrows():
+            latest_by_code[l_row["ts_code"]] = l_row
+
     rows = []
     for _, wl_row in watchlist.iterrows():
         ts_code = wl_row["ts_code"]
-        name = name_map.get(ts_code, ts_code)
-        df = get_daily(ts_code)
-        if df.empty:
+        latest = latest_by_code.get(ts_code)
+        if latest is None:
             rows.append({
                 "股票": format_stock_cn(ts_code, name_map),
                 "最新价": "-",
@@ -134,8 +141,6 @@ def _show_watchlist():
                 "备注": wl_row.get("note", ""),
             })
             continue
-
-        latest = df.iloc[-1]
 
         rows.append({
             "股票": format_stock_cn(ts_code, name_map),
@@ -242,10 +247,82 @@ def _show_watchlist():
 
 
 
+def diagnose_position_action(ts_code: str, buy_price: float, buy_date: str = "") -> dict:
+    """诊断单只持仓标的的实时风控状态与卖出/止盈指令
+
+    结合：
+      1. 标的 ATR14 自适应止损线与目标止盈线
+      2. 建仓以来的最高价回撤（移动止盈保护）
+      3. 最近3个交易日内是否触发策略 SELL 卖出信号
+    """
+    buy_price = max(float(buy_price or 0.0), 0.01)
+    plan = calc_atr_stops_and_sizing(ts_code, buy_price, score=0.7)
+    sl_pct = plan["sl_pct"]
+    tp_pct = plan["tp_pct"]
+    stop_loss_price = plan["stop_loss"]
+    take_profit_price = plan["take_profit"]
+
+    df = get_daily(ts_code, limit=30)
+    current_price = float(df.iloc[-1]["close"]) if not df.empty else buy_price
+    latest_trade_date = str(df.iloc[-1]["trade_date"]) if not df.empty else ""
+    pnl_pct = (current_price / buy_price - 1.0) * 100.0
+
+    # 计算建仓后的最高价与高点回撤
+    peak_price = max(buy_price, current_price)
+    if not df.empty:
+        clean_buy_date = str(buy_date or "").replace("-", "").replace("/", "")
+        sub_df = df[df["trade_date"] >= clean_buy_date] if clean_buy_date else df.tail(10)
+        if not sub_df.empty and "high" in sub_df.columns:
+            peak_price = max(peak_price, float(sub_df["high"].max()))
+    max_gain_pct = (peak_price / buy_price - 1.0) * 100.0
+    drawdown_from_peak = ((peak_price - current_price) / peak_price * 100.0) if peak_price > 0 else 0.0
+
+    # 查询近期是否有策略发出 SELL 信号
+    recent_sell_str = ""
+    try:
+        sig_df = get_signals(ts_code=ts_code, direction="SELL", limit=3)
+        if not sig_df.empty:
+            top_sell = sig_df.iloc[0]
+            sig_date = str(top_sell.get("trade_date", ""))
+            # 若信号日期在近5天内（或等于最新交易日）且评分 >= 0.55
+            if float(top_sell.get("score", 0.0)) >= 0.55 and (not latest_trade_date or sig_date >= latest_trade_date[:6]):
+                recent_sell_str = format_strategy_cn(str(top_sell.get("strategy", "")))
+    except Exception:
+        pass
+
+    # 按风控优先级生成操作指令
+    if pnl_pct <= -sl_pct:
+        action = f"🚨 跌破ATR止损(-{sl_pct:.1f}%)·建议止损清仓"
+        level = "danger"
+    elif max_gain_pct >= 8.0 and drawdown_from_peak >= 3.5 and pnl_pct > 1.0:
+        action = f"⚠️ 冲高回落({drawdown_from_peak:.1f}%)·建议移动止盈锁利"
+        level = "warning"
+    elif recent_sell_str:
+        action = f"⚠️ 触发卖出信号({recent_sell_str})·建议减仓/离场"
+        level = "warning"
+    elif pnl_pct >= tp_pct:
+        action = f"🎯 达到目标止盈(+{tp_pct:.1f}%)·可分批止盈"
+        level = "profit"
+    else:
+        action = f"✅ 趋势正常·持有(止损¥{stop_loss_price:.2f})"
+        level = "hold"
+
+    return {
+        "current_price": current_price,
+        "pnl_pct": round(pnl_pct, 2),
+        "stop_loss_price": stop_loss_price,
+        "take_profit_price": take_profit_price,
+        "sl_pct": sl_pct,
+        "tp_pct": tp_pct,
+        "action": action,
+        "level": level,
+    }
+
+
 def _show_portfolio():
     """模拟持仓管理（持久化到 SQLite）"""
     st.subheader("模拟持仓")
-    st.caption("记录你的实际持仓，跟踪盈亏（数据持久化到数据库）")
+    st.caption("记录你的实际持仓，实时监控 ATR 动态止损/移动止盈与策略卖出预警（数据持久化到数据库）")
 
     stock_df = cached_instrument_list()  # 股票 + ETF 合并列表（用于持仓名称显示）
     name_map = dict(zip(stock_df["ts_code"], stock_df["name"])) if not stock_df.empty else {}
@@ -274,36 +351,44 @@ def _show_portfolio():
         st.info("暂无持仓记录，请添加")
         return
 
-    # 显示持仓盈亏
+    # 显示持仓盈亏与风控预警雷达
     rows = []
     total_cost = 0
     total_value = 0
+    alert_msgs = []
 
     for pos in positions:
         ts_code = pos["ts_code"]
-        df = get_daily(ts_code, limit=1)
-        current_price = df.iloc[-1]["close"] if not df.empty else pos["buy_price"]
+        diag = diagnose_position_action(ts_code, pos["buy_price"], pos.get("buy_date", ""))
+        current_price = diag["current_price"]
 
         cost = pos["buy_price"] * pos["shares"]
         value = current_price * pos["shares"]
         pnl = value - cost
-        pnl_pct = (current_price / pos["buy_price"] - 1) * 100
-
-        name = name_map.get(ts_code, ts_code)
+        pnl_pct = diag["pnl_pct"]
 
         total_cost += cost
         total_value += value
 
+        stock_label = format_stock_cn(ts_code, name_map)
+        if diag["level"] in ("danger", "warning"):
+            alert_msgs.append(f"**{stock_label}**：{diag['action']}")
+
         rows.append({
-            "股票": format_stock_cn(ts_code, name_map),
+            "股票": stock_label,
             "买入价": f"¥{pos['buy_price']:.2f}",
             "现价": f"¥{current_price:.2f}",
             "数量": pos["shares"],
-            "成本": f"¥{cost:.0f}",
             "市值": f"¥{value:.0f}",
-            "盈亏": f"¥{pnl:.0f}",
-            "盈亏%": f"{pnl_pct:.2f}%",
+            "盈亏": f"¥{pnl:+.0f}",
+            "盈亏%": f"{pnl_pct:+.2f}%",
+            "ATR止损价": f"¥{diag['stop_loss_price']:.2f} (-{diag['sl_pct']:.1f}%)",
+            "目标止盈价": f"¥{diag['take_profit_price']:.2f} (+{diag['tp_pct']:.1f}%)",
+            "风控处置建议": diag["action"],
         })
+
+    if alert_msgs:
+        st.warning("🔔 **持仓风控预警雷达**：\n" + "\n".join(f"- {m}" for m in alert_msgs))
 
     df = pd.DataFrame(rows)
     chinese_dataframe(df)

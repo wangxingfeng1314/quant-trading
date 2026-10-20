@@ -30,7 +30,9 @@ class Backtester:
                  execution_mode: str = "current_close",
                  risk_manager = None,
                  preloaded_data: dict = None,
-                 max_active_positions: int = 0):
+                 max_active_positions: int = 0,
+                 position_sizing: str = "score",
+                 risk_per_trade: float = 0.015):
         """
         Args:
             strategy_cls: 策略类（不是实例）
@@ -43,6 +45,8 @@ class Backtester:
             risk_manager: 可选的 RiskManager 风控拦截器实例
             preloaded_data: 预先加载并计算好指标的数据字典 {ts_code: DataFrame}，用于网格搜索加速
             max_active_positions: 最大并发持仓股票只数，0 表示不限制
+            position_sizing: 仓位分配模式，"score"（按信号评分阶梯分配）或 "atr_risk"（按ATR波动率风险平价定仓）
+            risk_per_trade: ATR风险平价模式下单笔交易最大风险占总净值比例（默认 1.5%）
         """
         self.strategy_cls = strategy_cls
         self.params = params
@@ -54,6 +58,8 @@ class Backtester:
         self.risk_manager = risk_manager
         self.preloaded_data = preloaded_data
         self.max_active_positions = max_active_positions
+        self.position_sizing = position_sizing
+        self.risk_per_trade = risk_per_trade
 
     def run(self, save: bool = True) -> BacktestResult:
         """执行回测
@@ -163,12 +169,15 @@ class Backtester:
                 continue
 
             # next_open 模式：次日开盘时撮合前一交易日生成的 pending_signals
+            deferred_sells = []
             if self.execution_mode == "next_open" and pending_signals:
                 # 横截面排序：卖出优先，买入按 score 降序
                 pending_signals.sort(key=lambda s: (0 if s.direction == "SELL" else 1, -s.score))
                 for sig in pending_signals:
                     ts_code = sig.ts_code
                     if ts_code not in stock_data or date not in date_index[ts_code]:
+                        if sig.direction == "SELL":
+                            deferred_sells.append(sig)
                         continue
                     curr_idx = date_index[ts_code][date]
                     df_stock = stock_data[ts_code]
@@ -188,7 +197,7 @@ class Backtester:
 
                         if open_price <= 0:
                             continue
-                        budget = self._calc_buy_budget(portfolio, sig)
+                        budget = self._calc_buy_budget(portfolio, sig, df_stock=df_stock, curr_idx=curr_idx)
                         volume = int(budget / open_price) // 100 * 100
                         if volume > 0:
                             portfolio.buy(
@@ -206,7 +215,7 @@ class Backtester:
                         pos = portfolio.get_position(ts_code)
                         if pos and not pos.is_empty:
                             sell_vol = pos.available_shares
-                            portfolio.sell(
+                            sold_trade = portfolio.sell(
                                 ts_code=ts_code,
                                 price=open_price,
                                 volume=sell_vol,
@@ -217,6 +226,9 @@ class Backtester:
                                 is_bj=is_bj,
                                 context_snapshot=snapshot,
                             )
+                            # 若因一字跌停封死导致未能卖出，顺延至下一交易日继续挂单卖出
+                            if sold_trade is None and sell_vol > 0:
+                                deferred_sells.append(sig)
                 pending_signals = []
 
             # 策略产生信号
@@ -229,6 +241,14 @@ class Backtester:
                     risk_sell_codes = {s.ts_code for s in risk_signals}
                     filtered_signals = [s for s in signals if s.ts_code not in risk_sell_codes]
                     signals = risk_signals + filtered_signals
+
+            # 合并前日跌停未成交顺延的卖出单
+            if deferred_sells:
+                existing_sell_codes = {s.ts_code for s in signals if s.direction == "SELL"}
+                for ds in deferred_sells:
+                    if ds.ts_code not in existing_sell_codes:
+                        signals = [ds] + [s for s in signals if s.ts_code != ds.ts_code]
+                        existing_sell_codes.add(ds.ts_code)
 
             # 横截面优先级排序：卖出优先（释放资金），买入按 score 降序排列
             signals.sort(key=lambda s: (0 if s.direction == "SELL" else 1, -s.score))
@@ -256,7 +276,7 @@ class Backtester:
 
                         if sig.price_ref <= 0:
                             continue
-                        budget = self._calc_buy_budget(portfolio, sig)
+                        budget = self._calc_buy_budget(portfolio, sig, df_stock=df_stock, curr_idx=curr_idx)
                         volume = int(budget / sig.price_ref) // 100 * 100
                         if volume > 0:
                             portfolio.buy(
@@ -344,14 +364,32 @@ class Backtester:
                     snap[col] = round(float(row[col]), 2)
         return snap
 
-    def _calc_buy_budget(self, portfolio, sig) -> float:
-        """根据组合总资产与持仓限制计算单笔买入预算，消除现金连续衰减偏差"""
+    def _calc_buy_budget(self, portfolio, sig, df_stock=None, curr_idx=None) -> float:
+        """根据组合总资产与持仓限制计算单笔买入预算（支持评分阶梯定仓与 ATR 波动率风险平价定仓）"""
+        nav = portfolio.total_value
+        max_pct = (1.0 / self.max_active_positions) if self.max_active_positions > 0 else 1.0
+
+        if self.position_sizing == "atr_risk" and df_stock is not None and curr_idx is not None and curr_idx < len(df_stock):
+            row = df_stock.iloc[curr_idx]
+            atr_val = row.get("atr14")
+            ref_price = float(row.get("close", sig.price_ref or 0.0))
+            if pd.notna(atr_val) and float(atr_val) > 0 and ref_price > 0:
+                # 单股止损距离设为 2 * ATR14（保底 2% 价格波动，防止极低波动股仓位无限膨胀）
+                stop_dist_pct = max(2.0 * float(atr_val) / ref_price, 0.02)
+                # 风险平价仓位比例 = 单笔最大风险比例 / 止损距离比例，同时结合信号置信度微调
+                score_factor = 0.8 + 0.4 * max(0.0, min(float(getattr(sig, "score", 0.7)), 1.0))
+                atr_pct = (self.risk_per_trade / stop_dist_pct) * score_factor
+                cap_pct = min(max_pct, 0.40) if self.max_active_positions != 1 else 1.0
+                target_pct = max(0.05, min(atr_pct, cap_pct))
+                ideal_budget = nav * target_pct
+                return max(0.0, min(portfolio.cash, ideal_budget))
+
         if self.max_active_positions > 0:
-            target_pct = min(1.0 / self.max_active_positions, 1.0)
+            target_pct = min(max_pct, 1.0)
         else:
             target_pct = min(BACKTEST_MIN_POSITION_PCT + sig.score * BACKTEST_POSITION_STEP, 1.0)
         # 以组合当前总净值 (NAV) 定额，并受限于可用现金
-        ideal_budget = portfolio.total_value * target_pct
+        ideal_budget = nav * target_pct
         return max(0.0, min(portfolio.cash, ideal_budget))
 
 
@@ -381,7 +419,11 @@ def preload_backtest_data(universe: list, start_date: str, end_date: str) -> dic
 
 def _execute_single_grid_combo(args):
     """顶层并行网格搜索执行函数（支持 Windows 跨进程序列化）"""
-    strategy_cls, params, universe, start_date, end_date, initial_capital, preloaded_data = args
+    if len(args) == 7:
+        strategy_cls, params, universe, start_date, end_date, initial_capital, preloaded_data = args
+        execution_mode, risk_manager = "next_open", None
+    else:
+        strategy_cls, params, universe, start_date, end_date, initial_capital, preloaded_data, execution_mode, risk_manager = args
     bt = Backtester(
         strategy_cls=strategy_cls,
         params=params,
@@ -389,6 +431,8 @@ def _execute_single_grid_combo(args):
         start_date=start_date,
         end_date=end_date,
         initial_capital=initial_capital,
+        execution_mode=execution_mode,
+        risk_manager=risk_manager,
         preloaded_data=preloaded_data,
     )
     return bt.run(save=False)
@@ -396,8 +440,9 @@ def _execute_single_grid_combo(args):
 
 def grid_search(strategy_cls, universe: list, start_date: str, end_date: str,
                 initial_capital: float = 100000, param_grid: dict = None,
-                metric: str = "total_return", progress_callback: Callable = None) -> list:
-    """参数网格搜索（带数据预热加速）
+                metric: str = "total_return", progress_callback: Callable = None,
+                execution_mode: str = "next_open", risk_manager = None) -> list:
+    """参数网格搜索（带数据预热加速，默认对齐 next_open 实盘撮合防过拟合）
 
     遍历所有参数组合，运行回测并返回按指定指标排序的结果。
     """
@@ -419,6 +464,17 @@ def grid_search(strategy_cls, universe: list, start_date: str, end_date: str,
     for i, combo in enumerate(combinations):
         params = dict(zip(param_names, combo))
 
+        # 若传入了 risk_manager，为每轮回测克隆独立状态实例，防止 highest_prices 跨轮次污染
+        rm_copy = None
+        if risk_manager is not None:
+            from engine.risk_manager import RiskManager
+            rm_copy = RiskManager(
+                stop_loss_pct=risk_manager.stop_loss_pct,
+                trailing_stop_activation=risk_manager.trailing_stop_activation,
+                trailing_stop_callback=risk_manager.trailing_stop_callback,
+                max_holding_days=risk_manager.max_holding_days,
+            )
+
         bt = Backtester(
             strategy_cls=strategy_cls,
             params=params,
@@ -426,6 +482,8 @@ def grid_search(strategy_cls, universe: list, start_date: str, end_date: str,
             start_date=start_date,
             end_date=end_date,
             initial_capital=initial_capital,
+            execution_mode=execution_mode,
+            risk_manager=rm_copy,
             preloaded_data=preloaded,
         )
         result = bt.run(save=False)
@@ -450,7 +508,8 @@ def grid_search(strategy_cls, universe: list, start_date: str, end_date: str,
 def grid_search_parallel(strategy_cls, universe: list, start_date: str, end_date: str,
                           initial_capital: float = 100000, param_grid: dict = None,
                           metric: str = "total_return", max_workers: int = None,
-                          progress_callback: Callable = None) -> list:
+                          progress_callback: Callable = None,
+                          execution_mode: str = "next_open", risk_manager = None) -> list:
     """并行参数网格搜索（基于 ProcessPoolExecutor + 数据预热加速）
 
     适用于参数组合较多（>10）的场景。利用多核 CPU 并行执行，并共享预加载数据。
@@ -472,7 +531,7 @@ def grid_search_parallel(strategy_cls, universe: list, start_date: str, end_date
     tasks = []
     for combo in combinations:
         params = dict(zip(param_names, combo))
-        args = (strategy_cls, params, universe, start_date, end_date, initial_capital, preloaded)
+        args = (strategy_cls, params, universe, start_date, end_date, initial_capital, preloaded, execution_mode, risk_manager)
         tasks.append((combo, args))
 
     results = []

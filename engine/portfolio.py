@@ -1,7 +1,10 @@
 """投资组合管理 - 资金、持仓、权益曲线"""
 from typing import Dict, List, Optional
 from engine.position import Position
-from engine.commission import calc_cost, adjust_price, round_lot, apply_slippage
+from engine.commission import (
+    calc_cost, adjust_price, round_lot, apply_slippage,
+    is_limit_up_locked, is_limit_down_locked,
+)
 from core.models import Trade
 from core.config import SLIPPAGE_RATE
 
@@ -52,8 +55,12 @@ class Portfolio:
         """买入股票
 
         Returns:
-            Trade对象，如果失败返回None
+            Trade对象，如果失败（如涨停封板无法买入、资金不足）返回None
         """
+        # A股涨停封板不可买入检查（检验原始委托/市场价是否已封死涨停）
+        if prev_close > 0 and is_limit_up_locked(price, prev_close, is_st=is_st, is_cy=is_cy, is_bj=is_bj):
+            return None
+
         # 滑点调整
         if slippage:
             price = apply_slippage(price, "BUY")
@@ -124,6 +131,10 @@ class Portfolio:
 
         # T+1检查
         if not pos.can_sell(trade_date, volume=1):
+            return None
+
+        # A股跌停封板不可卖出检查（检验原始委托/市场价是否已封死跌停）
+        if prev_close > 0 and is_limit_down_locked(price, prev_close, is_st=is_st, is_cy=is_cy, is_bj=is_bj):
             return None
 
         # 滑点调整

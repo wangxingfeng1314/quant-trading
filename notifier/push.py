@@ -273,6 +273,65 @@ def _send_feishu(title: str, content: str) -> bool:
         return False
 
 
+def calc_atr_stops_and_sizing(ts_code: str, price: float, score: float = 0.7,
+                              base_capital: float = 100000.0) -> dict:
+    """基于标的最近14日真实波幅(ATR14)计算动态止损止盈位与风险平价建议股数
+
+    返回:
+        {
+            "sl_pct": 动态止损百分比 (如 3.5 表示 -3.5%),
+            "tp_pct": 动态止盈百分比 (如 7.0 表示 +7.0%),
+            "stop_loss": 止损价,
+            "take_profit": 止盈价,
+            "shares": 建议买入整百股数,
+            "est_cost": 预估金额,
+            "atr_pct": 日均真实波幅百分比,
+        }
+    """
+    price = max(float(price or 0.0), 0.01)
+    atr_pct = 2.5  # 默认日均振幅 2.5% -> 2*ATR = 5% 止损
+    try:
+        from data.storage import get_daily
+        from data.indicators import add_atr
+        df = get_daily(ts_code, limit=25)
+        if not df.empty and len(df) >= 14:
+            df = add_atr(df, period=14)
+            if "atr14" in df.columns and df["atr14"].notna().any():
+                atr_val = float(df["atr14"].dropna().iloc[-1])
+                latest_close = float(df["close"].iloc[-1]) if "close" in df.columns else price
+                ref_p = latest_close if latest_close > 0 else price
+                if atr_val > 0 and ref_p > 0:
+                    atr_pct = (atr_val / ref_p) * 100.0
+    except Exception:
+        pass
+
+    # 2.0 倍 ATR 止损，限制在 [3.0%, 8.0%] 区间（低波ETF/银行3%止损，高弹性科技股最高8%防洗盘）
+    sl_pct = round(max(3.0, min(8.0, atr_pct * 2.0)), 1)
+    # 2:1 盈亏比目标止盈，限制在 [6.0%, 16.0%]
+    tp_pct = round(max(6.0, min(16.0, sl_pct * 2.0)), 1)
+
+    stop_loss = round(price * (1.0 - sl_pct / 100.0), 2)
+    take_profit = round(price * (1.0 + tp_pct / 100.0), 2)
+
+    # 风险平价定仓：单笔最大承受总资金 1.2% ~ 1.8% 的止损风险（随信号评分上浮）
+    risk_budget_pct = 0.010 + 0.008 * max(0.0, min(float(score or 0.7), 1.0))
+    pos_pct = min(0.25, max(0.05, risk_budget_pct / (sl_pct / 100.0)))
+    budget = base_capital * pos_pct
+    calc_shares = int(budget / price) // 100 * 100
+    shares = calc_shares if calc_shares > 0 else (100 if base_capital >= price * 100 else 0)
+    est_cost = round(shares * price, 2)
+
+    return {
+        "sl_pct": sl_pct,
+        "tp_pct": tp_pct,
+        "stop_loss": stop_loss,
+        "take_profit": take_profit,
+        "shares": shares,
+        "est_cost": est_cost,
+        "atr_pct": round(atr_pct, 2),
+    }
+
+
 def notify_signals(signals, strategy_names: list = None):
     """推送信号摘要
 
@@ -361,17 +420,20 @@ def notify_signals(signals, strategy_names: list = None):
     buy_signals = sorted(dedup_buys, key=lambda s: s.score, reverse=True)[:5]
     for sig in buy_signals:
         price = max(sig.price_ref, 0.01)
-        pos_pct = BACKTEST_MIN_POSITION_PCT + sig.score * BACKTEST_POSITION_STEP
-        budget = base_capital * pos_pct
-        calc_shares = int(budget / price) // 100 * 100
-        shares = calc_shares if calc_shares > 0 else (100 if base_capital >= price * 100 else 0)
-        est_cost = shares * price
-        stop_loss = round(price * 0.95, 2)
-        take_profit = round(price * 1.10, 2)
+        plan = calc_atr_stops_and_sizing(sig.ts_code, price, sig.score, base_capital)
+        shares = plan["shares"]
+        est_cost = plan["est_cost"]
+        stop_loss = plan["stop_loss"]
+        take_profit = plan["take_profit"]
+        sl_pct = plan["sl_pct"]
+        tp_pct = plan["tp_pct"]
         shares_text = f"{shares}股" if shares > 0 else "资金不足1手"
         cost_text = f"¥{est_cost:,.0f}" if shares > 0 else "-"
         safe_reason = (sig.reason or "").replace("|", "/")
-        content += f"| {_label(sig)} | {sig.score:.2f} | ¥{price:.2f} | {shares_text} | {cost_text} | ¥{stop_loss:.2f} (-5%) | ¥{take_profit:.2f} (+10%) | {safe_reason} |\n"
+        content += (
+            f"| {_label(sig)} | {sig.score:.2f} | ¥{price:.2f} | {shares_text} | {cost_text} "
+            f"| ¥{stop_loss:.2f} (-{sl_pct:g}%) | ¥{take_profit:.2f} (+{tp_pct:g}%) | {safe_reason} |\n"
+        )
 
     content += """
 ### 🔴 卖出信号 TOP5

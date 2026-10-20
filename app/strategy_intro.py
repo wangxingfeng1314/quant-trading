@@ -170,6 +170,7 @@ def show():
                     "boll_squeeze": "捕捉震荡末期变盘方向，带宽压缩越久突破越有力，需放量确认。",
                     "ma60_breakout": "中长线趋势转折信号，放量突破+均线走平向上同时满足时更可靠。",
                     "signal_combo": "综合过滤信号，多维度共振时胜率更高，建议作为买入前最后一道确认。",
+                    "high_dividend_value": "适合红利ETF、银行、公用事业等高股息蓝筹标的，在年线之上缩量回踩支撑位时低吸。",
                 }
                 usage = usage_map.get(s["name"], "")
                 if usage:

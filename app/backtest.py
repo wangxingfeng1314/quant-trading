@@ -233,6 +233,15 @@ def _show_run_backtest():
             default_max_pos = 1 if (mode == "单只标的" or len(universe) <= 1) else 4
             max_pos_val = st.number_input("最大并发持仓股票数 (0=不限)", value=default_max_pos, min_value=0, max_value=50, step=1, key="bt_max_pos", help="单只标的回测请保持1以全额使用资金，多只股票组合建议设为3~5只")
 
+            pos_sizing_opt = st.radio(
+                "仓位分配模型",
+                ["按信号评分阶梯定仓 (score)", "ATR波动率风险平价定仓 (atr_risk，高波动少买/低波动多买)"],
+                index=0,
+                horizontal=True,
+                key="bt_pos_sizing",
+            )
+            pos_sizing = "atr_risk" if "atr_risk" in pos_sizing_opt else "score"
+
     if st.button("🚀 运行回测", type="primary", width='stretch'):
         if not universe:
             st.error("请选择至少一只股票")
@@ -263,6 +272,7 @@ def _show_run_backtest():
                     execution_mode=exec_mode,
                     risk_manager=rm_instance,
                     max_active_positions=int(max_pos_val),
+                    position_sizing=pos_sizing,
                 )
                 result = bt.run(save=False)
                 if result.equity_curve:
@@ -328,6 +338,7 @@ def _show_run_backtest():
                 execution_mode=exec_mode,
                 risk_manager=rm_instance,
                 max_active_positions=int(max_pos_val),
+                position_sizing=pos_sizing,
             )
             result = bt.run(save=True)
 
@@ -463,6 +474,18 @@ def _show_grid_search():
     total_combos = 1
     for v in param_grid.values():
         total_combos *= len(v)
+    gs_opt_c1, gs_opt_c2 = st.columns(2)
+    with gs_opt_c1:
+        gs_exec_mode_label = st.radio(
+            "优化撮合口径",
+            ["次日开盘价 (next_open，与实盘一致防过拟合)", "当日收盘价 (current_close)"],
+            index=0,
+            horizontal=True,
+            key="gs_exec_mode",
+        )
+        gs_exec_mode = "next_open" if "next_open" in gs_exec_mode_label else "current_close"
+    with gs_opt_c2:
+        gs_enable_rm = st.checkbox("同步开启出场风控 (RiskManager: -6%止损 / +12%回撤4%止盈)", value=True, key="gs_enable_rm")
     st.caption(f"参数组合数: {total_combos}")
 
     if st.button("🚀 开始参数优化", type="primary", width='stretch'):
@@ -477,6 +500,11 @@ def _show_grid_search():
             progress_bar.progress(completed / total)
             status_text.text(f"已完成 {completed}/{total}")
 
+        gs_rm = None
+        if gs_enable_rm:
+            from engine.risk_manager import RiskManager
+            gs_rm = RiskManager(stop_loss_pct=-6.0, trailing_stop_activation=12.0, trailing_stop_callback=4.0)
+
         results = grid_search(
             strategy_cls=strategy_cls,
             universe=universe,
@@ -485,6 +513,8 @@ def _show_grid_search():
             param_grid=param_grid,
             metric=metric.replace("-", ""),
             progress_callback=on_progress,
+            execution_mode=gs_exec_mode,
+            risk_manager=gs_rm,
         )
 
         progress_bar.empty()

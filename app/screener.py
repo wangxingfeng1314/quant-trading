@@ -5,7 +5,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 
-from data.storage import get_instrument_list, get_daily, get_stocks_with_data
+from data.storage import get_instrument_list, get_daily, get_stocks_with_data, batch_get_latest
 from app.st_utils import chinese_dataframe, cached_get_stocks_with_data, cached_instrument_list
 from data.indicators import apply_indicators
 
@@ -76,8 +76,17 @@ def show():
         name_map = dict(zip(stock_df["ts_code"], stock_df["name"]))
         results = []
 
+        # 批量一次拉取所有扫描标的最近120条K线，消除 N+1 逐只 SQL 查询瓶颈
+        batch_df = batch_get_latest(codes, limit=120)
+        grouped_daily = {}
+        if not batch_df.empty and "ts_code" in batch_df.columns:
+            for code_key, grp in batch_df.groupby("ts_code", sort=False):
+                grouped_daily[code_key] = grp.sort_values("trade_date").reset_index(drop=True)
+
         for ts_code in codes:
-            df = get_daily(ts_code, limit=120)
+            df = grouped_daily.get(ts_code)
+            if df is None or df.empty:
+                df = get_daily(ts_code, limit=120)
             if df.empty or len(df) < 60:
                 continue
 

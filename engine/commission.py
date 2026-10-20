@@ -75,6 +75,58 @@ def apply_slippage(price: float, direction: str, slippage_rate: float = None) ->
         return round(price * (1 - slippage_rate), 2)
 
 
+def get_price_limits(prev_close: float, is_st: bool = False,
+                     is_cy: bool = False, is_bj: bool = False) -> tuple:
+    """获取A股当日跌停价与涨停价 (lower, upper)"""
+    if prev_close <= 0:
+        return (0.0, float("inf"))
+
+    if is_st:
+        upper = round(prev_close * 1.05, 2)
+        lower = round(prev_close * 0.95, 2)
+    elif is_bj:
+        upper = round(prev_close * 1.30, 2)
+        lower = round(prev_close * 0.70, 2)
+    elif is_cy:
+        upper = round(prev_close * 1.20, 2)
+        lower = round(prev_close * 0.80, 2)
+    else:
+        upper = round(prev_close * 1.10, 2)
+        lower = round(prev_close * 0.90, 2)
+
+    return (lower, upper)
+
+
+def is_limit_up_locked(price: float, prev_close: float, is_st: bool = False,
+                       is_cy: bool = False, is_bj: bool = False,
+                       low_price: float = None) -> bool:
+    """判定是否涨停封死（无法买入）
+
+    当拟成交价格已达到或超过涨停价（如一字涨停开盘、或收盘涨停封死），买单无法排队成交。
+    """
+    if prev_close <= 0:
+        return False
+    _, upper = get_price_limits(prev_close, is_st=is_st, is_cy=is_cy, is_bj=is_bj)
+    if low_price is not None and low_price > 0:
+        return price >= upper - 1e-4 and low_price >= upper - 1e-4
+    return price >= upper - 1e-4
+
+
+def is_limit_down_locked(price: float, prev_close: float, is_st: bool = False,
+                         is_cy: bool = False, is_bj: bool = False,
+                         high_price: float = None) -> bool:
+    """判定是否跌停封死（无法卖出）
+
+    当拟成交价格已达到或低于跌停价（如一字跌停开盘、或收盘跌停封死），卖单无法成交。
+    """
+    if prev_close <= 0:
+        return False
+    lower, _ = get_price_limits(prev_close, is_st=is_st, is_cy=is_cy, is_bj=is_bj)
+    if high_price is not None and high_price > 0:
+        return price <= lower + 1e-4 and high_price <= lower + 1e-4
+    return price <= lower + 1e-4
+
+
 def adjust_price(price: float, prev_close: float, is_st: bool = False,
                  is_cy: bool = False, is_bj: bool = False) -> float:
     """价格涨跌停限制
@@ -92,19 +144,7 @@ def adjust_price(price: float, prev_close: float, is_st: bool = False,
     if prev_close <= 0:
         return price
 
-    if is_st:
-        upper = round(prev_close * 1.05, 2)
-        lower = round(prev_close * 0.95, 2)
-    elif is_bj:
-        upper = round(prev_close * 1.30, 2)
-        lower = round(prev_close * 0.70, 2)
-    elif is_cy:
-        upper = round(prev_close * 1.20, 2)
-        lower = round(prev_close * 0.80, 2)
-    else:
-        upper = round(prev_close * 1.10, 2)
-        lower = round(prev_close * 0.90, 2)
-
+    lower, upper = get_price_limits(prev_close, is_st=is_st, is_cy=is_cy, is_bj=is_bj)
     return round(max(lower, min(upper, price)), 2)
 
 

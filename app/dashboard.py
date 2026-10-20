@@ -261,11 +261,19 @@ def _show_system_status():
         health_stock_df = cached_instrument_list()
         health_name_map = dict(zip(health_stock_df["ts_code"], health_stock_df["name"])) if not health_stock_df.empty else {}
         health_rows = []
+        from data.storage import batch_get_daily_summary
+        wl_codes = watchlist["ts_code"].tolist()
+        summary_map = batch_get_daily_summary(wl_codes)
         for _, wl_row in watchlist.iterrows():
             ts_code = wl_row["ts_code"]
             name = health_name_map.get(ts_code, "") or wl_row.get("note", "") or ts_code
-            row_count = len(get_daily(ts_code))
-            latest = get_latest_date(ts_code)
+            info = summary_map.get(ts_code)
+            if info is not None:
+                row_count = info["count"]
+                latest = info["latest_date"]
+            else:
+                row_count = len(get_daily(ts_code))
+                latest = get_latest_date(ts_code)
 
             if latest:
                 try:

@@ -250,6 +250,33 @@ def check_db_integrity() -> dict:
         return {"ok": False, "message": f"无法访问数据库: {e}"}
 
 
+def backup_database(backup_path: Path) -> bool:
+    """使用 SQLite 原生在线热备 API (conn.backup) 安全备份 WAL 模式下的数据库"""
+    backup_path = Path(backup_path)
+    backup_path.parent.mkdir(parents=True, exist_ok=True)
+    with get_conn() as src_conn:
+        dst_conn = sqlite3.connect(str(backup_path))
+        try:
+            src_conn.backup(dst_conn)
+        finally:
+            dst_conn.close()
+    return True
+
+
+def restore_database(backup_path: Path) -> bool:
+    """使用 SQLite 原生 backup API 在线将备份恢复到主库（避免 Windows 文件句柄锁冲突与 WAL 损坏）"""
+    backup_path = Path(backup_path)
+    if not backup_path.exists():
+        raise FileNotFoundError(f"备份文件不存在: {backup_path}")
+    src_conn = sqlite3.connect(str(backup_path))
+    try:
+        with get_conn() as dst_conn:
+            src_conn.backup(dst_conn)
+    finally:
+        src_conn.close()
+    return True
+
+
 # ============================================================
 # 数据库表初始化
 # ============================================================
@@ -777,6 +804,34 @@ def batch_get_latest(codes: list, limit: int = 2, chunk_size: int = 500) -> pd.D
         if "rn" in df.columns:
             df = df.drop(columns=["rn"])                  # 移除窗口函数辅助列
     return df
+
+
+def batch_get_daily_summary(codes: list, chunk_size: int = 500) -> dict:
+    """批量聚合查询多只标的的日线总条数与最新交易日（单次 GROUP BY 消除 N+1 全表扫描）
+
+    返回:
+        {ts_code: {"count": int, "latest_date": str}}
+    """
+    if not codes:
+        return {}
+    summary = {}
+    with get_conn() as conn:
+        for i in range(0, len(codes), chunk_size):
+            chunk = codes[i:i + chunk_size]
+            placeholders = ",".join("?" * len(chunk))
+            rows = conn.execute(
+                f"""SELECT ts_code, COUNT(*) as cnt, MAX(trade_date) as max_date
+                    FROM daily_price
+                    WHERE ts_code IN ({placeholders})
+                    GROUP BY ts_code""",
+                chunk,
+            ).fetchall()
+            for code, cnt, max_dt in rows:
+                summary[str(code)] = {
+                    "count": int(cnt or 0),
+                    "latest_date": str(max_dt or ""),
+                }
+    return summary
 
 
 def get_latest_date(ts_code: str) -> str:
