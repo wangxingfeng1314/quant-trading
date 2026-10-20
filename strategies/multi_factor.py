@@ -140,6 +140,18 @@ class MultiFactorStrategy(BaseStrategy):
         else:
             return round((mid - price) / (mid - lower + 0.01), 2)
 
+    def _calc_total_score(self, df) -> tuple:
+        s_ma = self._score_ma_trend(df)
+        s_macd = self._score_macd(df)
+        s_rsi = self._score_rsi(df)
+        s_vol = self._score_volume(df)
+        s_boll = self._score_bollinger(df)
+        total = round(s_ma + s_macd + s_rsi + s_vol + s_boll, 2)
+        detail = (f"均线={s_ma:+.1f} MACD={s_macd:+.1f} "
+                  f"RSI={s_rsi:+.1f} 量能={s_vol:+.1f} 布林={s_boll:+.1f} "
+                  f"总分={total:+.1f}")
+        return total, detail
+
     def on_bar(self, trade_date: str, data: dict, portfolio=None) -> List[Signal]:
         signals = []
         for ts_code, df in data.items():
@@ -150,25 +162,14 @@ class MultiFactorStrategy(BaseStrategy):
 
             price = df["close"].iloc[-1]
 
-            # 计算各因子评分
-            s_ma = self._score_ma_trend(df)
-            s_macd = self._score_macd(df)
-            s_rsi = self._score_rsi(df)
-            s_vol = self._score_volume(df)
-            s_boll = self._score_bollinger(df)
-
-            total = round(s_ma + s_macd + s_rsi + s_vol + s_boll, 2)
-
-            # 生成评分明细
-            detail = (f"均线={s_ma:+.1f} MACD={s_macd:+.1f} "
-                      f"RSI={s_rsi:+.1f} 量能={s_vol:+.1f} 布林={s_boll:+.1f} "
-                      f"总分={total:+.1f}")
+            total, detail = self._calc_total_score(df)
+            prev_total, _ = self._calc_total_score(df.iloc[:-1]) if len(df) >= 6 else (0.0, "")
 
             has_position = portfolio is not None and portfolio.get_position(ts_code) is not None and not portfolio.get_position(ts_code).is_empty
 
-            # 买入信号
-            if not has_position and total >= self.buy_threshold:
-                score = round(min(total / 5.0, 1.0), 2)
+            # 买入信号（要求首次跨过阈值，防止高位钝化连续发信号）
+            if not has_position and total >= self.buy_threshold and prev_total < self.buy_threshold:
+                score = round(min(max(total / 5.0, 0.55), 0.90), 2)
                 signals.append(Signal(
                     ts_code=ts_code, trade_date=trade_date,
                     strategy=self.name, direction="BUY",
@@ -176,9 +177,9 @@ class MultiFactorStrategy(BaseStrategy):
                     price_ref=price,
                 ))
 
-            # 卖出信号（持仓中或总分极低）
-            elif (portfolio is None or has_position) and total <= self.sell_threshold:
-                score = round(min(abs(total) / 5.0, 1.0), 2)
+            # 卖出信号（持仓中或首次跌破卖出阈值）
+            elif (portfolio is None or has_position) and total <= self.sell_threshold and (has_position or prev_total > self.sell_threshold):
+                score = round(min(max(abs(total) / 5.0, 0.55), 0.90), 2)
                 signals.append(Signal(
                     ts_code=ts_code, trade_date=trade_date,
                     strategy=self.name, direction="SELL",

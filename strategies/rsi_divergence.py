@@ -50,20 +50,37 @@ class RSIDivergenceStrategy(BaseStrategy):
             price_min_idx = prev_window["close"].idxmin()
             price_min = prev_window.loc[price_min_idx, "close"]
             rsi_at_price_min = prev_window.loc[price_min_idx, self.rsi_col]
+            min_pos = prev_window.index.get_loc(price_min_idx)
+            bars_since_min = (len(window) - 1) - min_pos
+            between_high = window["close"].iloc[min_pos + 1:-1].max() if bars_since_min > 1 else price
+            has_bounce = (between_high >= price_min * 1.02) if bars_since_min >= 4 else True
 
-            # 当前价格处于低位（接近或创新低），但RSI明显高于前低
+            right_confirm_buy = True
+            if "open" in df.columns and len(df) >= 3:
+                curr_open = df["open"].iloc[-1]
+                prev_rsi = df[self.rsi_col].iloc[-2]
+                prev_close = df["close"].iloc[-2]
+                right_confirm_buy = (
+                    (price >= curr_open and curr_rsi > prev_rsi)
+                    and prev_close > price_min * 1.012
+                )
+
+            # 当前价格创新低或二次探底紧贴前低（<=1.5%），但RSI显著高于前低且拐头向上
             if (not has_position
+                    and bars_since_min >= 4
+                    and has_bounce
+                    and right_confirm_buy
                     and curr_rsi > rsi_at_price_min + 5
-                    and price <= price_min * 1.05
-                    and curr_rsi < 50):  # RSI在弱势区更有效
-                raw_score = 0.5 + 0.5 * min((curr_rsi - rsi_at_price_min) / 30, 1.0)
-                score = round(min(max(raw_score, 0.5), 1.0), 2)
+                    and price <= price_min * 1.015
+                    and curr_rsi < 45):  # RSI在弱势区更有效
+                raw_score = 0.52 + 0.22 * min((curr_rsi - rsi_at_price_min) / 30, 1.0)
+                score = round(min(max(raw_score, 0.52), 0.74), 2)
                 signals.append(Signal(
                     ts_code=ts_code, trade_date=trade_date,
                     strategy=self.name, direction="BUY",
                     score=score,
-                    reason=f"RSI底背离: 价格近低点{price_min:.2f}, "
-                           f"RSI从{rsi_at_price_min:.1f}回升至{curr_rsi:.1f}",
+                    reason=f"RSI底背离确认: 二次探底{price:.2f}(前低{price_min:.2f}), "
+                           f"RSI从{rsi_at_price_min:.1f}抬升至{curr_rsi:.1f}",
                     price_ref=price,
                 ))
 
@@ -71,18 +88,32 @@ class RSIDivergenceStrategy(BaseStrategy):
             price_max_idx = prev_window["close"].idxmax()
             price_max = prev_window.loc[price_max_idx, "close"]
             rsi_at_price_max = prev_window.loc[price_max_idx, self.rsi_col]
+            max_pos = prev_window.index.get_loc(price_max_idx)
+            bars_since_max = (len(window) - 1) - max_pos
+
+            right_confirm_sell = True
+            if "open" in df.columns and len(df) >= 3:
+                curr_open = df["open"].iloc[-1]
+                prev_rsi = df[self.rsi_col].iloc[-2]
+                prev_close = df["close"].iloc[-2]
+                right_confirm_sell = (
+                    (price <= curr_open and curr_rsi < prev_rsi)
+                    and prev_close < price_max * 0.988
+                )
 
             if (portfolio is None or has_position) and (
-                    curr_rsi < rsi_at_price_max - 5
-                    and price >= price_max * 0.95
-                    and curr_rsi > 50):  # RSI在强势区更有效
-                raw_score = 0.5 + 0.5 * min((rsi_at_price_max - curr_rsi) / 30, 1.0)
-                score = round(min(max(raw_score, 0.5), 1.0), 2)
+                    bars_since_max >= 4
+                    and right_confirm_sell
+                    and curr_rsi < rsi_at_price_max - 5
+                    and price >= price_max * 0.985
+                    and curr_rsi > 55):  # RSI在强势区更有效
+                raw_score = 0.55 + 0.22 * min((rsi_at_price_max - curr_rsi) / 30, 1.0)
+                score = round(min(max(raw_score, 0.55), 0.76), 2)
                 signals.append(Signal(
                     ts_code=ts_code, trade_date=trade_date,
                     strategy=self.name, direction="SELL",
                     score=score,
-                    reason=f"RSI顶背离: 价格近高点{price_max:.2f}, "
+                    reason=f"RSI顶背离确认: 二次冲高{price:.2f}(前高{price_max:.2f}), "
                            f"RSI从{rsi_at_price_max:.1f}回落至{curr_rsi:.1f}",
                     price_ref=price,
                 ))

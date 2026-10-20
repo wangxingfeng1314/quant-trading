@@ -47,9 +47,14 @@ class MAPullbackStrategy(BaseStrategy):
 
             # 短期多头: MA5 > MA10 且 MA10 走平或向上
             is_bullish = ma5 > ma and ma >= prev_ma
-            # 回踩: 前日收盘在昨日MA10附近或跌破（不超过容差），今日站回均线上方
-            pulled_back = (prev_close <= prev_ma * (1 + self.tolerance))
-            rebounded = price > ma
+            # 中长期趋势保护（若存在MA60，要求股价处于MA60上方或MA20>=MA60，不在主跌浪中接回踩）
+            if is_bullish and "ma60" in df.columns:
+                ma60_val = df["ma60"].iloc[-1]
+                if ma60_val == ma60_val and ma60_val > 0 and price < ma60_val * 0.98:
+                    is_bullish = False
+            # 回踩: 前日收盘在昨日MA10附近或跌破（不超过容差），今日站回均线上方且收阳
+            pulled_back = (prev_close <= prev_ma * (1 + self.tolerance)) and (prev_close >= prev_ma * (1 - self.tolerance * 3))
+            rebounded = price > ma and (price >= df["open"].iloc[-1] if "open" in df.columns else True)
 
             has_position = portfolio is not None and portfolio.get_position(ts_code) is not None and not portfolio.get_position(ts_code).is_empty
 

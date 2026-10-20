@@ -43,16 +43,22 @@ class SignalComboStrategy(BaseStrategy):
         score = 0.0
         details = []
 
-        # 1. 趋势: 价格 vs MA
+        # 1. 趋势: 价格 vs MA（兼顾中长期均线方向，避免空头排列下假站上）
         if self.ma_col in df.columns:
             ma = df[self.ma_col].iloc[-1]
+            prev_ma = df[self.ma_col].iloc[-2] if len(df) >= 2 else ma
             price = df["close"].iloc[-1]
-            if price > ma:
-                score += 1
-                details.append("站上均线+1")
-            elif price < ma:
-                score -= 1
-                details.append("跌破均线-1")
+            if pd.notna(ma) and ma > 0:
+                if price > ma:
+                    if pd.notna(prev_ma) and ma >= prev_ma * 0.999:
+                        score += 1
+                        details.append("站上走平均线+1")
+                    else:
+                        score += 0.5
+                        details.append("站上下行均线+0.5")
+                elif price < ma:
+                    score -= 1
+                    details.append("跌破均线-1")
 
         # 2. 动量: MACD柱放大 + DIF>DEA
         if "dif" in df.columns and "dea" in df.columns and "macd_hist" in df.columns:
@@ -60,12 +66,13 @@ class SignalComboStrategy(BaseStrategy):
             dea = df["dea"].iloc[-1]
             hist = df["macd_hist"].iloc[-1]
             prev_hist = df["macd_hist"].iloc[-2] if len(df) >= 2 else 0
-            if dif > dea and hist > prev_hist:
-                score += 1
-                details.append("MACD多+1")
-            elif dif < dea and hist < prev_hist:
-                score -= 1
-                details.append("MACD空-1")
+            if pd.notna(dif) and pd.notna(dea) and pd.notna(hist):
+                if dif > dea and hist > prev_hist:
+                    score += 1
+                    details.append("MACD多+1")
+                elif dif < dea and hist < prev_hist:
+                    score -= 1
+                    details.append("MACD空-1")
 
         # 3. 量能: 放量配合方向
         if "vol_ma5" in df.columns:
@@ -74,7 +81,7 @@ class SignalComboStrategy(BaseStrategy):
             pct_chg = df["pct_chg"].iloc[-1] if ("pct_chg" in df.columns and pd.notna(df["pct_chg"].iloc[-1])) else (
                 (df["close"].iloc[-1] / df["close"].iloc[-2] - 1) * 100 if len(df) >= 2 else 0
             )
-            if vol_ma > 0 and vol > vol_ma * self.vol_ratio:
+            if pd.notna(vol_ma) and vol_ma > 0 and vol > vol_ma * self.vol_ratio:
                 if pct_chg > 0:
                     score += 1
                     details.append("放量上涨+1")
@@ -82,15 +89,19 @@ class SignalComboStrategy(BaseStrategy):
                     score -= 1
                     details.append("放量下跌-1")
 
-        # 4. 强度: RSI 强弱
+        # 4. 强度: RSI 强弱（防止 RSI>68 超买高位追涨接盘）
         if "rsi14" in df.columns:
             rsi = df["rsi14"].iloc[-1]
-            if rsi >= 50:
-                score += 1
-                details.append(f"RSI偏多+1({rsi:.0f})")
-            else:
-                score -= 1
-                details.append(f"RSI偏空-1({rsi:.0f})")
+            if pd.notna(rsi):
+                if 50 <= rsi <= 68:
+                    score += 1
+                    details.append(f"RSI强势适中+1({rsi:.0f})")
+                elif rsi > 68:
+                    score -= 2
+                    details.append(f"RSI超买过热-2({rsi:.0f})")
+                else:
+                    score -= 1
+                    details.append(f"RSI偏空-1({rsi:.0f})")
 
         return score, "; ".join(details) if details else ""
 
@@ -104,28 +115,29 @@ class SignalComboStrategy(BaseStrategy):
 
             price = df["close"].iloc[-1]
             total, detail = self._score(df)
+            prev_total, _ = self._score(df.iloc[:-1]) if len(df) >= 3 else (0.0, "")
 
             has_position = portfolio is not None and portfolio.get_position(ts_code) is not None and not portfolio.get_position(ts_code).is_empty
 
-            # 买入: 总分达到买入阈值（多维度共振看多）
-            if not has_position and total >= self.buy_threshold:
-                score = round(min(total / 4.0, 1.0), 2)
+            # 买入: 边沿触发（昨日未达阈值、今日首次共振达标，避免高位连涨每日重复刷屏）
+            if not has_position and total >= self.buy_threshold and prev_total < self.buy_threshold:
+                score = round(min(0.55 + (total - self.buy_threshold) * 0.15, 0.88), 2)
                 signals.append(Signal(
                     ts_code=ts_code, trade_date=trade_date,
                     strategy=self.name, direction="BUY",
                     score=score,
-                    reason=f"信号共振看多({total:+.0f}分): {detail}",
+                    reason=f"信号首次共振看多({total:+.1f}分): {detail}",
                     price_ref=price,
                 ))
 
-            # 卖出: 总分达到卖出阈值（多维度共振看空）
-            elif (portfolio is None or has_position) and total <= self.sell_threshold:
-                score = round(min(abs(total) / 4.0, 1.0), 2)
+            # 卖出: 边沿触发看空（或持仓中达到卖出阈值）
+            elif (portfolio is None or has_position) and total <= self.sell_threshold and (has_position or prev_total > self.sell_threshold):
+                score = round(min(0.55 + (abs(total) - abs(self.sell_threshold)) * 0.15, 0.88), 2)
                 signals.append(Signal(
                     ts_code=ts_code, trade_date=trade_date,
                     strategy=self.name, direction="SELL",
                     score=score,
-                    reason=f"信号共振看空({total:+.0f}分): {detail}",
+                    reason=f"信号共振看空({total:+.1f}分): {detail}",
                     price_ref=price,
                 ))
 

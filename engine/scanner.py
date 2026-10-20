@@ -117,15 +117,62 @@ def _scan_single_stock(
 
     # 使用行情K线实际交易日触发策略，避免周末或假日扫描导致信号日期失真
     bar_date = str(df["trade_date"].iloc[-1])
-    signals = []
+    raw_signals = []
     for strategy in strategy_instances:
         try:
             sigs = strategy.on_bar(bar_date, data_dict)
-            signals.extend(sigs)
+            raw_signals.extend(sigs)
         except Exception as e:
             logger.warning(f"{ts_code} {strategy.name} 扫描异常: {e}")
 
-    return signals
+    if not raw_signals:
+        return []
+
+    # ---------- 策略可信度权重校准与同股多空冲突消解 ----------
+    from services.signal_service import STRATEGY_CREDIBILITY_WEIGHTS
+    for sig in raw_signals:
+        weight = STRATEGY_CREDIBILITY_WEIGHTS.get(sig.strategy, 1.0)
+        sig.score = round(min(max(sig.score * weight, 0.10), 1.0), 2)
+
+    if len(strategy_instances) <= 1:
+        return raw_signals
+
+    buys = [s for s in raw_signals if s.direction == "BUY"]
+    sells = [s for s in raw_signals if s.direction == "SELL"]
+
+    # 趋势破位类策略集合：一旦触发卖出，说明短期/中期趋势已坏，同日严禁推荐买入
+    trend_breakdown_strategies = {
+        "ma_bullish", "ma_cross", "ma60_breakout", "ma_pullback",
+        "volume_price_breakout", "turtle", "donchian_breakout",
+    }
+
+    if buys and sells:
+        has_trend_breakdown = any(s.strategy in trend_breakdown_strategies for s in sells)
+        max_buy = max(s.score for s in buys)
+        max_sell = max(s.score for s in sells)
+        # 若存在趋势破位卖出，或看空信号数 >= 看多信号数，或最高看空分接近/超过看多分 → 拦截买入信号，杜绝左右互搏
+        if has_trend_breakdown or len(sells) >= len(buys) or max_sell >= max_buy - 0.05:
+            sell_str = ",".join(s.strategy for s in sells)
+            logger.debug(f"{ts_code} ({bar_date}) 存在看空冲突 [{sell_str}]，已自动拦截同日买入信号")
+            return sells
+        else:
+            # 买方显著占优，但仍提示存在局部看空分歧并适度扣分
+            sell_str = ",".join(s.strategy for s in sells)
+            for b in buys:
+                b.score = round(max(b.score - 0.12, 0.10), 2)
+                b.reason = f"{b.reason} [⚠️含分歧:{sell_str}]"
+            return buys + sells
+
+    # 纯多头多策略同日共振加分（>=2个独立策略同时看多且0看空）
+    if len(buys) >= 2 and not sells:
+        resonance_bonus = min(0.06 * (len(buys) - 1), 0.18)
+        strat_list_str = "+".join(s.strategy for s in buys)
+        for b in buys:
+            b.score = round(min(b.score + resonance_bonus, 0.98), 2)
+            if "策略共振" not in b.reason:
+                b.reason = f"[🔥{len(buys)}策略共振:{strat_list_str}] {b.reason}"
+
+    return raw_signals
 
 
 def scan_signals(universe: list = None, strategy_names: list = None,
@@ -249,11 +296,41 @@ def scan_signals(universe: list = None, strategy_names: list = None,
             if progress_callback:
                 progress_callback(i + 1, len(universe))
 
+    # 大盘环境感知调权（空头环境自动压降激进追涨信号，多头环境小幅鼓励顺势突破）
+    if all_signals:
+        try:
+            from services.signal_service import get_market_regime
+            regime_info = get_market_regime(end_date)
+            regime = regime_info.get("regime", "RANGE")
+            aggressive_strats = {"turtle", "donchian_breakout", "volume_price_breakout", "signal_combo", "kdj_cross"}
+            trend_strats = {"ma_bullish", "ma60_breakout", "ma_cross", "volume_price_breakout", "macd_cross"}
+            for sig in all_signals:
+                if sig.direction == "BUY":
+                    if regime == "BEAR" and sig.strategy in aggressive_strats:
+                        sig.score = round(max(sig.score - 0.08, 0.10), 2)
+                    elif regime == "BULL" and sig.strategy in trend_strats:
+                        sig.score = round(min(sig.score + 0.03, 0.99), 2)
+        except Exception as e:
+            logger.debug(f"大盘环境调权跳过: {e}")
+
     # 按 score 降序排列
     all_signals.sort(key=lambda s: s.score, reverse=True)
 
-    # 批量保存（一次 executemany 替代逐条 INSERT）
+    # 批量保存（先清理本次扫描标集合在对应交易日的旧信号，防止过期的伪信号残留）
     if save and all_signals:
+        try:
+            bar_dates = sorted({s.trade_date for s in all_signals if s.trade_date})
+            if bar_dates and universe and strategy_names:
+                with get_conn() as conn:
+                    for b_dt in bar_dates:
+                        u_ph = ",".join("?" * len(universe))
+                        s_ph = ",".join("?" * len(strategy_names))
+                        conn.execute(
+                            f"DELETE FROM signal WHERE trade_date = ? AND ts_code IN ({u_ph}) AND strategy IN ({s_ph})",
+                            [b_dt] + list(universe) + list(strategy_names),
+                        )
+        except Exception as e:
+            logger.debug(f"清理同日旧信号跳过: {e}")
         save_signals_batch(all_signals)
         logger.info(f"已批量保存 {len(all_signals)} 条信号")
 

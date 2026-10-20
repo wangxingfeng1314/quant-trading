@@ -375,8 +375,22 @@ def _show_auto_trade():
     if not stock_df.empty:
         name_map = dict(zip(stock_df["ts_code"], stock_df["name"]))
 
-    buy_signals = signals_df[signals_df["direction"] == "BUY"]
-    sell_signals = signals_df[signals_df["direction"] == "SELL"]
+    buy_signals = signals_df[signals_df["direction"] == "BUY"].copy()
+    sell_signals = signals_df[signals_df["direction"] == "SELL"].copy()
+
+    # 冲突保护：若同一标的在同一天或近期同时存在更强/同级的卖出信号，自动从跟单买入建议中剔除
+    if not buy_signals.empty and not sell_signals.empty:
+        sell_max_by_code = sell_signals.groupby("ts_code")["score"].max().to_dict()
+        buy_signals = buy_signals[
+            buy_signals.apply(
+                lambda r: r["ts_code"] not in sell_max_by_code or r["score"] > sell_max_by_code[r["ts_code"]] + 0.10,
+                axis=1,
+            )
+        ]
+
+    # 按标的去重合并（同一只股票多个策略触发买入时取最高分并合并策略名）
+    if not buy_signals.empty:
+        buy_signals = buy_signals.sort_values("score", ascending=False).drop_duplicates(subset=["ts_code"], keep="first")
 
     existing_positions = get_positions()
     existing_codes = [p["ts_code"] for p in existing_positions]

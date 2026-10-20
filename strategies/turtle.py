@@ -40,15 +40,38 @@ class TurtleStrategy(BaseStrategy):
             high_n = df["high"].iloc[-(self.entry_period + 1):-1].max()
             prev_high_n = df["high"].iloc[-(self.entry_period + 2):-2].max() if len(df) >= self.entry_period + 2 else df["high"].iloc[:-2].max()
             has_position = portfolio is not None and portfolio.get_position(ts_code) is not None and not portfolio.get_position(ts_code).is_empty
-            if not has_position and prev_close <= prev_high_n and price > high_n:
-                score = round(min(0.6 + (price / high_n - 1) * 10, 1.0), 2)
+
+            # A股防假突破过滤（当具备完整指标列时：拒绝长上影线冲高回落、缩量假突破、RSI极端超买）
+            breakout_valid = True
+            vol_bonus = 0.0
+            curr_high = df["high"].iloc[-1]
+            curr_low = df["low"].iloc[-1]
+            if curr_high > curr_low:
+                body_pos = (price - curr_low) / (curr_high - curr_low)
+                if body_pos < 0.5:
+                    breakout_valid = False
+            if breakout_valid and "vol_ma5" in df.columns:
+                vol_ma5 = df["vol_ma5"].iloc[-1]
+                if vol_ma5 and vol_ma5 > 0:
+                    vol_ratio = df["volume"].iloc[-1] / vol_ma5
+                    if vol_ratio < 1.15:
+                        breakout_valid = False
+                    else:
+                        vol_bonus = min((vol_ratio - 1.0) * 0.12, 0.18)
+            if breakout_valid and "rsi14" in df.columns:
+                rsi_val = df["rsi14"].iloc[-1]
+                if rsi_val == rsi_val and rsi_val > 76:
+                    breakout_valid = False
+
+            if not has_position and breakout_valid and prev_close <= prev_high_n and price > high_n:
+                score = round(min(0.62 + (price / high_n - 1) * 8 + vol_bonus, 0.92), 2)
                 signals.append(Signal(
                     ts_code=ts_code,
                     trade_date=trade_date,
                     strategy=self.name,
                     direction="BUY",
                     score=score,
-                    reason=f"突破{self.entry_period}日高点{high_n:.2f}",
+                    reason=f"放量突破{self.entry_period}日高点{high_n:.2f}",
                     price_ref=price,
                 ))
 

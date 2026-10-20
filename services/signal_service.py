@@ -1,13 +1,108 @@
-"""信号服务 - 封装信号扫描、查询、推送逻辑"""
+"""信号服务 - 封装信号扫描、查询、推送逻辑与大盘风控仲裁"""
 import logging
-from typing import Optional, List
+from typing import Optional, List, Dict
 
 from engine.scanner import scan_signals
-from data.storage import get_signals, save_signals_batch
+from data.storage import get_signals, save_signals_batch, get_index_daily, get_daily
+from data.indicators import apply_indicators
 from notifier.push import notify_signals, send_notification
 from core.exceptions import ValidationError
 
 logger = logging.getLogger(__name__)
+
+# 基于A股实盘回测胜率校准的策略可信度先验权重
+STRATEGY_CREDIBILITY_WEIGHTS: Dict[str, float] = {
+    "ma_bullish": 1.12,
+    "volume_price_breakout": 1.10,
+    "ma60_breakout": 1.10,
+    "macd_cross": 1.08,
+    "ma_cross": 1.06,
+    "double_bottom": 1.05,
+    "high_dividend_value": 1.05,
+    "bollinger_reversal": 1.00,
+    "ma_pullback": 0.98,
+    "boll_squeeze": 0.98,
+    "turtle": 0.96,
+    "donchian_breakout": 0.96,
+    "rsi_oversold": 0.95,
+    "kdj_cross": 0.94,
+    "signal_combo": 0.88,
+    "multi_factor": 0.88,
+    "macd_divergence": 0.85,
+    "rsi_divergence": 0.85,
+}
+
+
+def get_market_regime(end_date: str = "") -> dict:
+    """识别当前大盘所处环境（多头进攻 / 震荡均衡 / 空头防守）并给出仓位与风格建议"""
+    default_regime = {
+        "regime": "RANGE",
+        "label": "🟡 震荡均衡",
+        "max_position_pct": 50,
+        "index_code": "000300.SH",
+        "close": 0.0,
+        "ma20": 0.0,
+        "rsi14": 50.0,
+        "chg_5d_pct": 0.0,
+        "advice": "大盘处于震荡区间，建议总仓位控制在 50% 以内，优选多策略共振与回踩企稳标的，严禁追高。",
+    }
+    try:
+        df = get_index_daily("000300.SH", limit=80)
+        idx_code = "000300.SH"
+        if df is None or len(df) < 25:
+            df = get_index_daily("000001.SH", limit=80)
+            idx_code = "000001.SH"
+        if df is None or len(df) < 25:
+            df = get_daily("510310.SH", end_date=end_date, limit=80)
+            idx_code = "510310.SH"
+        if df is None or df.empty or len(df) < 20:
+            return default_regime
+
+        if end_date:
+            df = df[df["trade_date"] <= end_date]
+        if len(df) < 20:
+            return default_regime
+
+        df = apply_indicators(df.copy(), ["ma", "rsi"])
+        latest = df.iloc[-1]
+        close = float(latest["close"])
+        ma20 = float(latest.get("ma20", close) or close)
+        prev_ma20 = float(df["ma20"].iloc[-3]) if ("ma20" in df.columns and len(df) >= 3 and df["ma20"].iloc[-3] == df["ma20"].iloc[-3]) else ma20
+        ma60 = float(latest.get("ma60", ma20) or ma20)
+        rsi14 = float(latest.get("rsi14", 50.0) or 50.0)
+        close_5d_ago = float(df["close"].iloc[-6]) if len(df) >= 6 else float(df["close"].iloc[0])
+        chg_5d = ((close / close_5d_ago) - 1.0) * 100.0 if close_5d_ago > 0 else 0.0
+
+        if close > ma20 and ma20 >= prev_ma20 and rsi14 >= 50:
+            regime = "BULL"
+            label = "🟢 多头进攻"
+            max_pos = 80
+            advice = "指数站稳20日均线且趋势向上，适合顺势参与均线多头、放量突破及动量金叉信号（建议仓位 ≤ 80%）。"
+        elif close < ma20 and (ma20 < prev_ma20 or close < ma60) and rsi14 < 48:
+            regime = "BEAR"
+            label = "🔴 空头防守"
+            max_pos = 25
+            advice = "指数跌破20日均线处于弱势调整期，假突破极多！已自动压降激进追高信号评分，建议总仓位 ≤ 25%，优先高股息防守或空仓观望。"
+        else:
+            regime = "RANGE"
+            label = "🟡 震荡均衡"
+            max_pos = 50
+            advice = "大盘处于多空拉锯震荡期，突破易冲高回落，建议总仓位 ≤ 50%，逢低关注均线回踩、红利价值与多策略共振信号。"
+
+        return {
+            "regime": regime,
+            "label": label,
+            "max_position_pct": max_pos,
+            "index_code": idx_code,
+            "close": round(close, 2),
+            "ma20": round(ma20, 2),
+            "rsi14": round(rsi14, 1),
+            "chg_5d_pct": round(chg_5d, 2),
+            "advice": advice,
+        }
+    except Exception as e:
+        logger.warning(f"大盘环境识别异常: {e}")
+        return default_regime
 
 
 class SignalService:

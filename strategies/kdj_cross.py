@@ -45,9 +45,20 @@ class KDJCrossStrategy(BaseStrategy):
 
             has_position = portfolio is not None and portfolio.get_position(ts_code) is not None and not portfolio.get_position(ts_code).is_empty
 
-            # 金叉买入: K上穿D 且 K在低位(<40)
-            if not has_position and prev_k <= prev_d and curr_k > curr_d and curr_k < 40:
-                score = round(min(0.5 + (40 - curr_k) / 40 * 0.4 + (curr_k - curr_d) / 100, 1.0), 2)
+            # 中期趋势过滤（防止在空头主跌浪中因K=35普通金叉盲目抄底）
+            downtrend_penalty = False
+            if "ma20" in df.columns and "ma60" in df.columns:
+                ma20_val = df["ma20"].iloc[-1]
+                ma60_val = df["ma60"].iloc[-1]
+                if ma20_val == ma20_val and ma60_val == ma60_val and price < ma20_val < ma60_val:
+                    downtrend_penalty = True
+
+            k_buy_limit = 22 if downtrend_penalty else 35
+            candle_ok = (price >= df["open"].iloc[-1]) if "open" in df.columns else True
+
+            # 金叉买入: K上穿D 且 K在超卖低位 + 当日收阳企稳
+            if not has_position and candle_ok and prev_k <= prev_d and curr_k > curr_d and curr_k < k_buy_limit:
+                score = round(min(0.55 + (k_buy_limit - curr_k) / 40 * 0.3 + (curr_k - curr_d) / 100, 0.85), 2)
                 signals.append(Signal(
                     ts_code=ts_code, trade_date=trade_date,
                     strategy=self.name, direction="BUY",

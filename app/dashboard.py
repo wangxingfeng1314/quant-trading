@@ -126,6 +126,16 @@ def _show_market_overview():
                     delta=f"{c['chg']:.2f} ({c['chg_pct']:.2f}%)",
                     delta_color="inverse",
                 )
+        try:
+            from services.signal_service import get_market_regime
+            regime_info = get_market_regime()
+            st.caption(
+                f"🧭 **量化市场环境：{regime_info['label']}** ｜ "
+                f"**建议总仓位：≤ {regime_info['max_position_pct']}%** ｜ "
+                f"{regime_info['advice']}"
+            )
+        except Exception:
+            pass
     else:
         st.info("暂无指数数据，请先运行数据初始化脚本")
 

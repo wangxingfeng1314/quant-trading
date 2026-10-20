@@ -144,3 +144,80 @@ def test_scanner_liquidity_guard():
         {"trade_date": "20240105", "vol": 1000, "amount": 500000.0},
     ])
     assert check_stock_liquidity(illiquid_df, end_date="20240105", min_daily_amount=30000000.0, filter_suspended=True) is False
+
+
+def test_signal_combo_edge_trigger_and_overbought_guard():
+    """测试 signal_combo 边沿触发（首日共振触发，连涨不重复刷屏）与 RSI>68 超买防追高"""
+    from strategies.signal_combo import SignalComboStrategy
+
+    strat = SignalComboStrategy(ma_period=5, buy_threshold=2)
+    # 构造 32 天数据：前 31 天震荡弱势(total < 2)，第 32 天首次放量站上均线且 RSI=60 (适中偏强)
+    df = pd.DataFrame({
+        "trade_date": [f"202601{i+1:02d}" for i in range(32)],
+        "open": [10.0] * 32,
+        "high": [10.2] * 32,
+        "low": [9.8] * 32,
+        "close": [9.8] * 31 + [10.5],
+        "volume": [1000.0] * 31 + [2000.0],
+        "vol_ma5": [1000.0] * 32,
+        "ma5": [10.0] * 32,
+        "dif": [-0.1] * 31 + [0.2],
+        "dea": [0.0] * 31 + [0.1],
+        "macd_hist": [-0.1] * 31 + [0.1],
+        "rsi14": [45.0] * 31 + [60.0],
+        "pct_chg": [0.0] * 31 + [3.5],
+    })
+    sigs_first = strat.on_bar("20260132", {"000001.SZ": df})
+    assert len(sigs_first) == 1
+    assert sigs_first[0].direction == "BUY"
+
+    # 若第 31 天和第 32 天都处于高位且 RSI=75 (超买)，绝不发出追高买入信号
+    df_overbought = df.copy()
+    df_overbought["close"] = [10.5] * 32
+    df_overbought["rsi14"] = [75.0] * 32
+    sigs_ob = strat.on_bar("20260132", {"000001.SZ": df_overbought})
+    assert not any(s.direction == "BUY" for s in sigs_ob)
+
+
+def test_scanner_conflict_interception_and_resonance(monkeypatch):
+    """测试扫描器同股多空冲突拦截（趋势破位时拦截同日买入信号）与多策略同向共振加成"""
+    from engine.scanner import _scan_single_stock
+    from strategies.base import BaseStrategy
+
+    class DummyBullStrategy1(BaseStrategy):
+        name = "ma_bullish"
+        def on_bar(self, trade_date, data, portfolio=None):
+            return [Signal(ts_code="000001.SZ", trade_date=trade_date, strategy=self.name, direction="BUY", score=0.75, price_ref=10.0, reason="多头1")]
+
+    class DummyBullStrategy2(BaseStrategy):
+        name = "macd_cross"
+        def on_bar(self, trade_date, data, portfolio=None):
+            return [Signal(ts_code="000001.SZ", trade_date=trade_date, strategy=self.name, direction="BUY", score=0.72, price_ref=10.0, reason="多头2")]
+
+    class DummyTrendBreakdownSell(BaseStrategy):
+        name = "ma_cross"
+        def on_bar(self, trade_date, data, portfolio=None):
+            return [Signal(ts_code="000001.SZ", trade_date=trade_date, strategy=self.name, direction="SELL", score=0.70, price_ref=10.0, reason="均线死叉")]
+
+    dates = pd.date_range("2025-01-01", periods=70, freq="B").strftime("%Y%m%d").tolist()
+    df = pd.DataFrame({
+        "ts_code": ["000001.SZ"] * 70,
+        "trade_date": dates,
+        "open": [10.0] * 70,
+        "high": [10.5] * 70,
+        "low": [9.5] * 70,
+        "close": [10.2] * 70,
+        "volume": [100000.0] * 70,
+        "amount": [50000000.0] * 70,
+    })
+    monkeypatch.setattr("engine.scanner.get_daily", lambda ts, end_date=None: df.copy())
+
+    # 1. 同向双策略看多共振：保留2条BUY且带共振标记
+    res_bull = _scan_single_stock("000001.SZ", dates[-1], [DummyBullStrategy1(), DummyBullStrategy2()], min_daily_amount=0.0)
+    assert len(res_bull) == 2
+    assert all(s.direction == "BUY" and "策略共振" in s.reason for s in res_bull)
+
+    # 2. 存在均线死叉看空冲突：自动拦截买入推荐，只保留卖出信号
+    res_conflict = _scan_single_stock("000001.SZ", dates[-1], [DummyBullStrategy1(), DummyTrendBreakdownSell()], min_daily_amount=0.0)
+    assert all(s.direction == "SELL" for s in res_conflict)
+

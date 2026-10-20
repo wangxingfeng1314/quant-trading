@@ -57,11 +57,32 @@ class DonchianBreakoutStrategy(BaseStrategy):
 
             has_position = portfolio is not None and portfolio.get_position(ts_code) is not None and not portfolio.get_position(ts_code).is_empty
 
+            # A股防假突破过滤（拒绝长上影线、缩量假突破、极端超买）
+            breakout_valid = True
+            vol_bonus = 0.0
+            curr_high = df["high"].iloc[-1]
+            curr_low = df["low"].iloc[-1]
+            if curr_high > curr_low:
+                if (price - curr_low) / (curr_high - curr_low) < 0.5:
+                    breakout_valid = False
+            if breakout_valid and "vol_ma5" in df.columns:
+                vol_ma5 = df["vol_ma5"].iloc[-1]
+                if vol_ma5 and vol_ma5 > 0:
+                    vol_ratio = df["volume"].iloc[-1] / vol_ma5
+                    if vol_ratio < 1.15:
+                        breakout_valid = False
+                    else:
+                        vol_bonus = min((vol_ratio - 1.0) * 0.12, 0.15)
+            if breakout_valid and "rsi14" in df.columns:
+                rsi_val = df["rsi14"].iloc[-1]
+                if rsi_val == rsi_val and rsi_val > 76:
+                    breakout_valid = False
+
             # 入场信号: 价格突破上轨，且从下方接近（确认突破有效）
-            if not has_position and prev_close <= prev_upper and price > upper:
-                # 突破强度：超出的比例 / ATR，越大越强
+            if not has_position and breakout_valid and prev_close <= prev_upper and price > upper:
+                # 突破强度：基础分0.60 + 超出ATR比例 + 量能加成（避免过去评分仅0.20偏低）
                 strength = (price - upper) / max(atr, 0.01)
-                score = round(min(strength * 0.5, 1.0), 2)
+                score = round(min(0.60 + strength * 0.25 + vol_bonus, 0.92), 2)
                 signals.append(Signal(
                     ts_code=ts_code, trade_date=trade_date,
                     strategy=self.name, direction="BUY",

@@ -35,6 +35,18 @@ def _show_scan():
     """实时信号扫描"""
     st.subheader("今日信号扫描")
 
+    # 大盘环境风控横幅
+    try:
+        from services.signal_service import get_market_regime
+        regime_info = get_market_regime()
+        st.info(
+            f"**大盘风控温度计：{regime_info['label']}** ｜ "
+            f"**建议总仓位上限：≤ {regime_info['max_position_pct']}%** ｜ "
+            f"{regime_info['advice']}"
+        )
+    except Exception:
+        pass
+
     col1, col2 = st.columns(2)
     with col1:
         strategy_names = list(STRATEGY_REGISTRY.keys())
@@ -108,6 +120,7 @@ def _show_scan():
             progress_callback=on_progress,
             min_daily_amount=min_daily_amt,
             filter_suspended=filter_suspended,
+            force_refresh=True,
         )
 
         progress_bar.empty()
@@ -323,9 +336,9 @@ def _show_history():
 def _show_signal_validation():
     """信号回测验证 - 信号发布后N日涨跌幅统计"""
     st.subheader("📊 信号回测验证")
-    st.caption("统计历史信号发出后N个交易日的涨跌幅，评估信号有效性")
+    st.caption("按实盘「次日开盘买入」或「当日收盘」统计历史信号发出后N个交易日的真实胜率与期望收益，自动识别高胜率策略")
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
         strategy_filter = st.selectbox(
             "策略筛选", ["全部"] + list(STRATEGY_REGISTRY.keys()),
@@ -334,11 +347,19 @@ def _show_signal_validation():
         )
     with col2:
         direction_filter = st.selectbox(
-            "方向筛选", ["全部", "BUY", "SELL"], key="sv_dir",
+            "方向筛选", ["全部", "BUY", "SELL"], index=1, key="sv_dir",
             format_func=lambda x: "全部" if x == "全部" else ("买入" if x == "BUY" else "卖出"),
         )
     with col3:
         hold_days = st.selectbox("持有天数", [1, 3, 5, 10, 20], index=2, key="sv_days")
+    with col4:
+        exec_price_mode = st.selectbox(
+            "买入基准价",
+            ["次日开盘价 (实盘推荐)", "信号当日收盘价"],
+            index=0,
+            key="sv_exec_mode",
+        )
+    skip_high_open = st.checkbox("实盘风控过滤：次日跳空高开 > 3% 不追高", value=True, key="sv_skip_gap")
 
     strategy = "" if strategy_filter == "全部" else strategy_filter
     signals_df = get_signals(strategy=strategy, limit=500)
@@ -359,13 +380,13 @@ def _show_signal_validation():
     if not stock_df.empty:
         name_map = dict(zip(stock_df["ts_code"], stock_df["name"]))
 
+    use_next_open = "次日开盘" in exec_price_mode
     results = []
     stock_cache = {}
     with st.spinner("正在验证信号..."):
         for _, sig in signals_df.iterrows():
             ts_code = sig["ts_code"]
             trade_date = sig["trade_date"]
-            price_ref = sig["price_ref"]
             direction = sig["direction"]
 
             # 获取信号发布后的行情（内存字典缓存，避免500次重复DB查询）
@@ -381,12 +402,27 @@ def _show_signal_validation():
                 continue
 
             pos = int(matches[0])
+            signal_close = float(df.iloc[pos]["close"])
+
+            if use_next_open:
+                if pos + 1 >= len(df):
+                    continue
+                entry_price = float(df.iloc[pos + 1]["open"])
+                if entry_price <= 0:
+                    entry_price = signal_close
+                # 跳空高开超 3% 不追高过滤
+                if skip_high_open and direction == "BUY" and signal_close > 0:
+                    gap_pct = (entry_price / signal_close - 1) * 100
+                    if gap_pct > 3.0:
+                        continue
+            else:
+                entry_price = signal_close
+
             # N日后的价格
             future_idx = pos + hold_days
             if future_idx >= len(df):
                 continue
 
-            entry_price = float(df.iloc[pos]["close"])
             future_price = float(df.iloc[future_idx]["close"])
 
             # 计算涨跌幅
@@ -401,15 +437,17 @@ def _show_signal_validation():
                 "日期": trade_date,
                 "股票": f"{ts_code} {name_map.get(ts_code, '')}",
                 "方向": format_direction_cn(direction),
+                "策略代码": sig["strategy"],
                 "策略": format_strategy_cn(sig["strategy"]),
-                "信号价": entry_price,
-                f"{hold_days}日后价": future_price,
+                "评分": round(float(sig.get("score", 0)), 2),
+                "基准买入价": round(entry_price, 2),
+                f"{hold_days}日后价": round(future_price, 2),
                 f"{hold_days}日收益%": round(ret, 2),
                 "有效": "✅" if is_good else "❌",
             })
 
     if not results:
-        st.warning("数据不足以验证信号")
+        st.warning("数据不足以验证信号（最新交易日的信号需等待后续K线走出后方可验证）")
         return
 
     df_results = pd.DataFrame(results)
@@ -423,14 +461,33 @@ def _show_signal_validation():
     min_return = df_results[f"{hold_days}日收益%"].min()
 
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("信号总数", total)
-    col2.metric("胜率", f"{win_rate:.1f}%")
+    col1.metric("已验证信号数", total)
+    col2.metric("真实胜率", f"{win_rate:.1f}%")
     col3.metric("平均收益", f"{avg_return:+.2f}%")
     col4.metric("最佳/最差", f"{max_return:+.1f}% / {min_return:+.1f}%")
 
+    # 新增：按策略维度的真实胜率排行榜
+    st.subheader(f"🏆 策略真实表现排行榜（持有 {hold_days} 日 · {'次日开盘成交' if use_next_open else '当日收盘成交'}）")
+    strat_grp = df_results.groupby("策略").agg(
+        信号数=("有效", "count"),
+        胜率=("有效", lambda s: round((s == "✅").mean() * 100, 1)),
+        平均收益=(f"{hold_days}日收益%", lambda s: round(s.mean(), 2)),
+        中位收益=(f"{hold_days}日收益%", lambda s: round(s.median(), 2)),
+        最佳收益=(f"{hold_days}日收益%", lambda s: round(s.max(), 2)),
+        最差收益=(f"{hold_days}日收益%", lambda s: round(s.min(), 2)),
+    ).reset_index()
+    strat_grp["评级建议"] = strat_grp.apply(
+        lambda r: "🟢 主力推荐" if (r["胜率"] >= 55 and r["平均收益"] > 0)
+        else ("🔴 建议规避" if (r["胜率"] < 40 and r["平均收益"] < 0) else "🟡 谨慎参考"),
+        axis=1,
+    )
+    strat_grp = strat_grp.sort_values(["胜率", "平均收益"], ascending=False).reset_index(drop=True)
+    chinese_dataframe(strat_grp)
+
     # 显示详情
     st.subheader("📋 信号验证明细")
-    chinese_dataframe(df_results)
+    display_details = df_results.drop(columns=["策略代码"], errors="ignore")
+    chinese_dataframe(display_details)
 
     # 导出
     csv = df_results.to_csv(index=False).encode("utf-8-sig")
@@ -490,9 +547,15 @@ def _show_composite():
         composite["avg_score"] * 0.6 + (composite["signal_count"] / max_count) * 0.4
     ).round(2)
 
-    # 买入共识
-    st.subheader("🟢 买入共识")
-    buy_consensus = composite[composite["direction"] == "BUY"].sort_values("合成评分", ascending=False)
+    # 识别存在多空冲突的股票（防止一边看空一边进入买入共识）
+    dir_by_code = signals_df.groupby("ts_code")["direction"].apply(set).to_dict()
+    conflicted_codes = {c for c, dirs in dir_by_code.items() if "BUY" in dirs and "SELL" in dirs}
+
+    # 买入共识（自动剔除存在同日/同期看空冲突的标的）
+    st.subheader("🟢 买入共识（已剔除多空分歧标的）")
+    buy_consensus = composite[
+        (composite["direction"] == "BUY") & (~composite["ts_code"].isin(conflicted_codes))
+    ].sort_values("合成评分", ascending=False)
     if not buy_consensus.empty:
         buy_rows = []
         for _, row in buy_consensus.iterrows():

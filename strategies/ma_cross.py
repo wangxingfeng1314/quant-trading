@@ -52,7 +52,10 @@ class MACrossStrategy(BaseStrategy):
 
             # 金叉: 快线从下方穿越慢线
             if not has_position and prev_fast <= prev_slow and curr_fast > curr_slow:
-                score = round(min(0.5 + (curr_fast / curr_slow - 1) * 10, 1.0), 2)
+                # 慢线方向与量能配合加分（历史胜率63.6%，校准合理高分位 0.65~0.90）
+                slope_bonus = 0.12 if curr_slow >= prev_slow else -0.05
+                vol_bonus = 0.08 if ("vol_ma5" in df.columns and df["vol_ma5"].iloc[-1] > 0 and df["volume"].iloc[-1] > df["vol_ma5"].iloc[-1] * 1.1) else 0.0
+                score = round(min(max(0.62 + (curr_fast / curr_slow - 1) * 12 + slope_bonus + vol_bonus, 0.55), 0.92), 2)
                 signals.append(Signal(
                     ts_code=ts_code,
                     trade_date=trade_date,
@@ -60,7 +63,8 @@ class MACrossStrategy(BaseStrategy):
                     direction="BUY",
                     score=score,
                     reason=f"MA{self.fast_period}({curr_fast:.2f}) 上穿 "
-                           f"MA{self.slow_period}({curr_slow:.2f})，金叉",
+                           f"MA{self.slow_period}({curr_slow:.2f})，金叉"
+                           f"{'（均线向上）' if curr_slow >= prev_slow else ''}",
                     price_ref=price,
                 ))
 

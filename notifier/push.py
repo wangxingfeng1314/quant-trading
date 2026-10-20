@@ -307,10 +307,19 @@ def notify_signals(signals, strategy_names: list = None):
         BACKTEST_MIN_POSITION_PCT = 0.05
         BACKTEST_POSITION_STEP = 0.15
 
+    # 获取大盘风控环境
+    regime_line = ""
+    try:
+        from services.signal_service import get_market_regime
+        regime_info = get_market_regime()
+        regime_line = f"**大盘风控**: {regime_info['label']}（建议总仓位 ≤ {regime_info['max_position_pct']}%）\n"
+    except Exception:
+        pass
+
     content = f"""## 📊 量化交易信号日报
 **日期**: {today}
 **策略**: {strategy_str}
-**信号总数**: {len(signals)} 条（买入 {buy_count} | 卖出 {sell_count}）
+{regime_line}**信号总数**: {len(signals)} 条（买入 {buy_count} | 卖出 {sell_count}）
 
 ---
 
@@ -319,8 +328,37 @@ def notify_signals(signals, strategy_names: list = None):
 |------|------|--------|----------|----------|----------|----------|----------|
 """
 
-    buy_signals = sorted([s for s in signals if s.direction == "BUY"],
-                         key=lambda s: s.score, reverse=True)[:5]
+    # 冲突拦截与同股去重聚合：若同日某股有 SELL 信号且非买方压倒性占优，不进买入推荐；多策略同时买入同一标的时合并展示
+    sell_by_code = {}
+    for s in signals:
+        if s.direction == "SELL":
+            sell_by_code.setdefault(s.ts_code, []).append(s)
+
+    buy_grouped = {}
+    for s in signals:
+        if s.direction == "BUY":
+            sells_for_code = sell_by_code.get(s.ts_code, [])
+            if sells_for_code and max(x.score for x in sells_for_code) >= s.score - 0.05:
+                continue
+            buy_grouped.setdefault(s.ts_code, []).append(s)
+
+    dedup_buys = []
+    for code, b_list in buy_grouped.items():
+        b_list.sort(key=lambda x: x.score, reverse=True)
+        best = b_list[0]
+        if len(b_list) > 1 and "策略共振" not in (best.reason or ""):
+            strat_names = "+".join(dict.fromkeys(x.strategy for x in b_list))
+            merged_reason = f"[{len(b_list)}策略共振:{strat_names}] {best.reason}"
+            from core.models import Signal as _Sig
+            best = _Sig(
+                ts_code=best.ts_code, trade_date=best.trade_date,
+                strategy=best.strategy, direction="BUY",
+                score=round(min(best.score + 0.05 * (len(b_list) - 1), 0.99), 2),
+                reason=merged_reason, price_ref=best.price_ref,
+            )
+        dedup_buys.append(best)
+
+    buy_signals = sorted(dedup_buys, key=lambda s: s.score, reverse=True)[:5]
     for sig in buy_signals:
         price = max(sig.price_ref, 0.01)
         pos_pct = BACKTEST_MIN_POSITION_PCT + sig.score * BACKTEST_POSITION_STEP
