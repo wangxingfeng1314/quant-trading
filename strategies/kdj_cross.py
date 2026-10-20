@@ -25,19 +25,29 @@ class KDJCrossStrategy(BaseStrategy):
         self.d_period = d_period
 
     def on_bar(self, trade_date: str, data: dict, portfolio=None) -> List[Signal]:
+        from data.indicators import add_kdj
         signals = []
+        is_default_kdj = (self.k_period == 3 and self.d_period == 3)
         for ts_code, df in data.items():
             if len(df) < 3:
                 continue
-            if "kdj_k" not in df.columns or "kdj_d" not in df.columns:
-                continue
-            if df["volume"].iloc[-1] == 0:
+            if "volume" not in df.columns or df["volume"].iloc[-1] == 0:
                 continue
 
-            curr_k = df["kdj_k"].iloc[-1]
-            curr_d = df["kdj_d"].iloc[-1]
-            prev_k = df["kdj_k"].iloc[-2]
-            prev_d = df["kdj_d"].iloc[-2]
+            if is_default_kdj and "kdj_k" in df.columns and "kdj_d" in df.columns:
+                k_series = df["kdj_k"]
+                d_series = df["kdj_d"]
+            elif all(c in df.columns for c in ["high", "low", "close"]):
+                kdj_df = add_kdj(df, n=9, m1=max(1, int(self.k_period)), m2=max(1, int(self.d_period)))
+                k_series = kdj_df["kdj_k"]
+                d_series = kdj_df["kdj_d"]
+            else:
+                continue
+
+            curr_k = k_series.iloc[-1]
+            curr_d = d_series.iloc[-1]
+            prev_k = k_series.iloc[-2]
+            prev_d = d_series.iloc[-2]
             price = df["close"].iloc[-1]
 
             if any(v != v for v in [curr_k, curr_d, prev_k, prev_d]):

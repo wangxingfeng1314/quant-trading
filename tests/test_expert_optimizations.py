@@ -307,3 +307,68 @@ def test_p2_batch_summary_and_online_backup(tmp_path):
     assert bk_file.exists() and bk_file.stat().st_size > 0
 
 
+def test_round3_custom_non_default_strategy_params():
+    """测试第3轮 P0-1: 非默认自定义周期参数在各策略中动态计算生效（不再静默返回空或忽略参数）"""
+    from strategies.ma_cross import MACrossStrategy
+    from strategies.bollinger_reversal import BollingerReversalStrategy
+    from strategies.rsi_oversold import RSIOversoldStrategy
+    from strategies.kdj_cross import KDJCrossStrategy
+
+    # 构造只含基础 OHLCV（不含 ma7/ma15/rsi6 等非默认列）的行情数据
+    closes = [10.0] * 15 + [9.2, 8.8, 8.5, 9.1, 11.8]
+    df = pd.DataFrame({
+        "ts_code": ["000001.SZ"] * 20,
+        "trade_date": [f"202601{i+1:02d}" for i in range(20)],
+        "open": [c * 0.99 for c in closes],
+        "high": [c * 1.02 for c in closes],
+        "low": [c * 0.96 for c in closes],
+        "close": closes,
+        "volume": [100000.0] * 20,
+    })
+
+    # 1. 非默认均线周期 fast=3, slow=10 在无预计算 ma3/ma10 列时仍能动态计算并触发金叉
+    ma_strat = MACrossStrategy(fast_period=3, slow_period=10)
+    ma_sigs = ma_strat.on_bar("20260120", {"000001.SZ": df})
+    assert len(ma_sigs) == 1 and ma_sigs[0].direction == "BUY"
+
+    # 2. 自定义布林带参数 boll_period=10, boll_std=1.2 动态生效
+    boll_strat = BollingerReversalStrategy(boll_period=10, boll_std=1.2)
+    boll_sigs = boll_strat.on_bar("20260119", {"000001.SZ": df.iloc[:19]})
+    assert isinstance(boll_sigs, list)
+
+    # 3. 自定义 RSI 周期 rsi_period=6 动态生效
+    rsi_strat = RSIOversoldStrategy(rsi_period=6, oversold=35)
+    rsi_sigs = rsi_strat.on_bar("20260119", {"000001.SZ": df.iloc[:19]})
+    assert len(rsi_sigs) == 1 and rsi_sigs[0].direction == "BUY"
+
+    # 4. 自定义 KDJ 平滑周期 k_period=5, d_period=5 动态生效
+    kdj_strat = KDJCrossStrategy(k_period=5, d_period=5)
+    kdj_sigs = kdj_strat.on_bar("20260120", {"000001.SZ": df})
+    assert isinstance(kdj_sigs, list)
+
+
+def test_round3_broker_order_sheet_deduplication_and_conflict_guard():
+    """测试第3轮 P0-2: 实盘券商批量委托单同股去重防3倍超买与多空冲突剔除"""
+    from app.signal import build_deduplicated_broker_orders
+
+    raw_signals = [
+        # 601939.SH 同日被 3 个策略同时触发 BUY -> 必须合并为 1 笔委托单！
+        Signal(ts_code="601939.SH", trade_date="20260120", strategy="ma_cross", direction="BUY", score=0.75, price_ref=9.0),
+        Signal(ts_code="601939.SH", trade_date="20260120", strategy="ma_bullish", direction="BUY", score=0.82, price_ref=9.0),
+        Signal(ts_code="601939.SH", trade_date="20260120", strategy="macd_cross", direction="BUY", score=0.68, price_ref=9.0),
+        # 000001.SZ 同时存在 BUY(0.65) 与更强 SELL(0.75) -> 买单必须被冲突保护拦截！
+        Signal(ts_code="000001.SZ", trade_date="20260120", strategy="rsi_oversold", direction="BUY", score=0.65, price_ref=10.0),
+        Signal(ts_code="000001.SZ", trade_date="20260120", strategy="ma_cross", direction="SELL", score=0.75, price_ref=10.0),
+    ]
+    rows, txt_lines = build_deduplicated_broker_orders(
+        signals=raw_signals, capital=100000.0, max_pos_pct=20.0, stop_loss_pct=5.0,
+        stock_map={"601939.SH": "建设银行", "000001.SZ": "平安银行"},
+    )
+    buy_rows = [r for r in rows if r["操作"] == "买入"]
+    # 断言：601939.SH 只生成 1 笔买单（绝不重复生成3笔），且 000001.SZ 买单被冲突剔除
+    assert len(buy_rows) == 1
+    assert buy_rows[0]["标的代码"] == "601939.SH"
+    assert "均线多头排列" in buy_rows[0]["来源策略"] and "双均线交叉" in buy_rows[0]["来源策略"]
+
+
+

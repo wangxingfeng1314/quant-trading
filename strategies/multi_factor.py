@@ -34,11 +34,12 @@ class MultiFactorStrategy(BaseStrategy):
 
     def _score_ma_trend(self, df) -> float:
         """均线趋势评分: -1 ~ +1"""
-        if self.ma_col not in df.columns:
+        if "close" not in df.columns:
             return 0
+        ma_series = df[self.ma_col] if self.ma_col in df.columns else df["close"].rolling(window=max(2, int(self.ma_period)), min_periods=1).mean()
         price = df["close"].iloc[-1]
-        ma = df[self.ma_col].iloc[-1]
-        ma_slope = (df[self.ma_col].iloc[-1] - df[self.ma_col].iloc[-5]) / max(ma, 0.01) * 100 \
+        ma = ma_series.iloc[-1]
+        ma_slope = (ma_series.iloc[-1] - ma_series.iloc[-5]) / max(ma, 0.01) * 100 \
             if len(df) >= 5 else 0
 
         score = 0

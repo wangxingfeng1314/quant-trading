@@ -67,6 +67,12 @@ class BacktestResult:
     equity_curve: list = field(default_factory=list)  # [{date, equity}, ...]
     trades: list = field(default_factory=list)  # Trade列表
 
+    def __post_init__(self):
+        if not hasattr(self, "alpha"):
+            self.alpha = 0.0
+        if not hasattr(self, "beta"):
+            self.beta = 0.0
+
 
 @dataclass
 class StockInfo:

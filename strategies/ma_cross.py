@@ -31,17 +31,20 @@ class MACrossStrategy(BaseStrategy):
         for ts_code, df in data.items():
             if len(df) < self.slow_period + 1:
                 continue
-            if self.fast_col not in df.columns or self.slow_col not in df.columns:
+            if "close" not in df.columns or "volume" not in df.columns:
                 continue
-
             if df["volume"].iloc[-1] == 0:
                 continue
 
+            # 支持自定义均线周期（网格搜索非默认周期时按需计算，避免因列缺失静默返回0信号）
+            fast_series = df[self.fast_col] if self.fast_col in df.columns else df["close"].rolling(window=self.fast_period, min_periods=1).mean()
+            slow_series = df[self.slow_col] if self.slow_col in df.columns else df["close"].rolling(window=self.slow_period, min_periods=1).mean()
+
             # 最近两天的均线值
-            curr_fast = df[self.fast_col].iloc[-1]
-            curr_slow = df[self.slow_col].iloc[-1]
-            prev_fast = df[self.fast_col].iloc[-2]
-            prev_slow = df[self.slow_col].iloc[-2]
+            curr_fast = fast_series.iloc[-1]
+            curr_slow = slow_series.iloc[-1]
+            prev_fast = fast_series.iloc[-2]
+            prev_slow = slow_series.iloc[-2]
 
             # 跳过NaN
             if any(v != v for v in [curr_fast, curr_slow, prev_fast, prev_slow]):

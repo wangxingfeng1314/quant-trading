@@ -43,10 +43,11 @@ class SignalComboStrategy(BaseStrategy):
         score = 0.0
         details = []
 
-        # 1. 趋势: 价格 vs MA（兼顾中长期均线方向，避免空头排列下假站上）
-        if self.ma_col in df.columns:
-            ma = df[self.ma_col].iloc[-1]
-            prev_ma = df[self.ma_col].iloc[-2] if len(df) >= 2 else ma
+        # 1. 趋势: 价格 vs MA（支持非默认自定义 ma_period 动态计算）
+        if "close" in df.columns:
+            ma_series = df[self.ma_col] if self.ma_col in df.columns else df["close"].rolling(window=max(2, int(self.ma_period)), min_periods=1).mean()
+            ma = ma_series.iloc[-1]
+            prev_ma = ma_series.iloc[-2] if len(df) >= 2 else ma
             price = df["close"].iloc[-1]
             if pd.notna(ma) and ma > 0:
                 if price > ma:

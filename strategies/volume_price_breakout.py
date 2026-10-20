@@ -45,15 +45,16 @@ class VolumePriceBreakoutStrategy(BaseStrategy):
         for ts_code, df in data.items():
             if len(df) < max(self.ma_period, self.lookback) + 2:
                 continue
-            if self.ma_col not in df.columns or "vol_ma5" not in df.columns:
+            if "vol_ma5" not in df.columns or "close" not in df.columns or "volume" not in df.columns:
                 continue
             if df["volume"].iloc[-1] == 0:
                 continue
 
             price = df["close"].iloc[-1]
             prev_close = df["close"].iloc[-2]
-            ma_val = df[self.ma_col].iloc[-1]
-            prev_ma = df[self.ma_col].iloc[-2]
+            ma_series = df[self.ma_col] if self.ma_col in df.columns else df["close"].rolling(window=self.ma_period, min_periods=1).mean()
+            ma_val = ma_series.iloc[-1]
+            prev_ma = ma_series.iloc[-2]
             vol_surge = self._is_volume_surge(df)
             recent_high = self._recent_high(df)
 

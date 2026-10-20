@@ -175,10 +175,100 @@ def _show_scan():
             _show_signal_table(sell_signals[:50])
 
 
+def build_deduplicated_broker_orders(signals: list, capital: float = 100000.0,
+                                     max_pos_pct: float = 20.0, price_offset_pct: float = 0.0,
+                                     stop_loss_pct: float = 0.0, stock_map: dict = None,
+                                     held_map: dict = None) -> tuple:
+    """将原始信号列表去重聚合为安全的单股单笔券商委托单（剔除同股多空冲突与同向重复下单）
+
+    Args:
+        stop_loss_pct: 若 <= 0 则自动启用 ATR14 动态止损，否则使用固定百分比
+    Returns:
+        (order_rows, txt_lines)
+    """
+    from notifier.push import calc_atr_stops_and_sizing
+    stock_map = stock_map or {}
+    held_map = held_map or {}
+    single_budget = capital * (max_pos_pct / 100.0)
+
+    # 1. 按股票分组识别多空冲突与同向聚合
+    sell_by_code = {}
+    buy_by_code = {}
+    for sig in signals:
+        if sig.direction == "SELL":
+            sell_by_code.setdefault(sig.ts_code, []).append(sig)
+        elif sig.direction == "BUY":
+            buy_by_code.setdefault(sig.ts_code, []).append(sig)
+
+    merged_signals = []
+    # 处理买入：剔除同日存在同级或更强卖出信号的冲突标的，同股多策略合并为1笔委托
+    for code, b_list in buy_by_code.items():
+        s_list = sell_by_code.get(code, [])
+        best_buy = max(b_list, key=lambda x: x.score)
+        if s_list and max(x.score for x in s_list) >= best_buy.score - 0.05:
+            continue
+        strat_str = "+".join(dict.fromkeys(format_strategy_cn(x.strategy) for x in b_list))
+        merged_signals.append((best_buy, strat_str))
+
+    # 处理卖出：同股多策略卖出合并为1笔委托
+    for code, s_list in sell_by_code.items():
+        best_sell = max(s_list, key=lambda x: x.score)
+        strat_str = "+".join(dict.fromkeys(format_strategy_cn(x.strategy) for x in s_list))
+        merged_signals.append((best_sell, strat_str))
+
+    # 排序：卖出在前，买入按评分降序
+    merged_signals.sort(key=lambda item: (0 if item[0].direction == "SELL" else 1, -item[0].score))
+
+    order_rows = []
+    txt_lines = []
+    for sig, strat_str in merged_signals:
+        name = stock_map.get(sig.ts_code, "")
+        symbol = sig.ts_code.split(".")[0]
+        ref_price = sig.price_ref if sig.price_ref > 0 else 10.0
+
+        if sig.direction == "BUY":
+            order_price = round(ref_price * (1 + price_offset_pct / 100.0), 2)
+            shares = int(single_budget / (order_price * 1.0003)) // 100 * 100
+            est_amount = round(shares * order_price, 2)
+            if stop_loss_pct <= 0:
+                atr_plan = calc_atr_stops_and_sizing(sig.ts_code, order_price, sig.score, capital)
+                stop_price = atr_plan["stop_loss"]
+                sl_tag = f"¥{stop_price:.2f} (-{atr_plan['sl_pct']:g}% ATR)"
+            else:
+                stop_price = round(order_price * (1 - stop_loss_pct / 100.0), 2)
+                sl_tag = f"¥{stop_price:.2f} (-{stop_loss_pct:g}%)"
+            action_text = "买入"
+        else:
+            order_price = round(ref_price * (1 - price_offset_pct / 100.0), 2)
+            shares = held_map.get(sig.ts_code, 100)
+            est_amount = round(shares * order_price, 2)
+            sl_tag = "-"
+            action_text = "卖出"
+
+        order_rows.append({
+            "证券代码": symbol,
+            "标的代码": sig.ts_code,
+            "名称": name,
+            "操作": action_text,
+            "评分": round(sig.score, 2),
+            "委托价格": order_price,
+            "委托数量(股)": shares,
+            "预估金额(元)": est_amount,
+            "建议止损价": sl_tag,
+            "来源策略": strat_str,
+            "状态": "待委托" if shares > 0 else "资金不足1手",
+        })
+
+        if shares > 0:
+            txt_lines.append(f"{symbol}\t{shares}\t{order_price:.2f}\t{action_text}")
+
+    return order_rows, txt_lines
+
+
 def _render_broker_order_sheet(signals: list, scan_date_str: str, stock_map: dict):
     """渲染券商实盘批量委托单（Broker-Ready Order Sheet）"""
-    with st.expander("💼 实盘批量委托单生成器 (可直接导入券商客户端)", expanded=True):
-        st.caption("按照实盘风控与资金管理规则，自动将信号折算为整百股委托数量，并生成券商导入格式")
+    with st.expander("💼 实盘批量委托单生成器 (已开启同股去重防超买保护)", expanded=True):
+        st.caption("自动剔除多空分歧股、将同一标的的多策略信号合并为单笔委托，防止导入券商时同股重复下单超买")
 
         col1, col2, col3, col4 = st.columns(4)
         with col1:
@@ -188,50 +278,18 @@ def _render_broker_order_sheet(signals: list, scan_date_str: str, stock_map: dic
         with col3:
             price_offset_pct = st.number_input("委托加价/折价 (%)", value=0.0, step=0.1, help="买入加价提高成交率，卖出折价确保离场")
         with col4:
-            stop_loss_pct = st.number_input("建议硬止损 (%)", value=5.0, step=0.5, min_value=1.0)
+            stop_loss_pct = st.number_input("硬止损% (0=ATR动态止损)", value=0.0, step=0.5, min_value=0.0)
 
-        order_rows = []
-        txt_lines = []
-
-        single_budget = capital * (max_pos_pct / 100.0)
         held_map = {p["ts_code"]: p["shares"] for p in get_positions() if p.get("shares", 0) > 0}
-
-        for sig in signals:
-            name = stock_map.get(sig.ts_code, "")
-            symbol = sig.ts_code.split(".")[0]  # 券商识别纯数字代码如 600519
-            ref_price = sig.price_ref if sig.price_ref > 0 else 10.0
-
-            if sig.direction == "BUY":
-                order_price = round(ref_price * (1 + price_offset_pct / 100.0), 2)
-                # 计算整百股
-                shares = int(single_budget / (order_price * 1.0003)) // 100 * 100
-                est_amount = round(shares * order_price, 2)
-                stop_price = round(order_price * (1 - stop_loss_pct / 100.0), 2)
-                action_text = "买入"
-            else:
-                order_price = round(ref_price * (1 - price_offset_pct / 100.0), 2)
-                # 优先匹配已有模拟持仓股数，无持仓默认建议100股示例
-                shares = held_map.get(sig.ts_code, 100)
-                est_amount = round(shares * order_price, 2)
-                stop_price = 0.0
-                action_text = "卖出"
-
-            order_rows.append({
-                "证券代码": symbol,
-                "标的代码": sig.ts_code,
-                "名称": name,
-                "操作": action_text,
-                "委托价格": order_price,
-                "委托数量(股)": shares,
-                "预估金额(元)": est_amount,
-                "建议止损价": f"¥{stop_price:.2f}" if stop_price > 0 else "-",
-                "来源策略": format_strategy_cn(sig.strategy),
-                "状态": "待委托" if shares > 0 else "资金不足1手",
-            })
-
-            if shares > 0:
-                # 兼容通达信/同花顺格式: 代码 数量 价格 方向
-                txt_lines.append(f"{symbol}\t{shares}\t{order_price:.2f}\t{action_text}")
+        order_rows, txt_lines = build_deduplicated_broker_orders(
+            signals=signals,
+            capital=float(capital),
+            max_pos_pct=float(max_pos_pct),
+            price_offset_pct=float(price_offset_pct),
+            stop_loss_pct=float(stop_loss_pct),
+            stock_map=stock_map,
+            held_map=held_map,
+        )
 
         order_df = pd.DataFrame(order_rows)
         chinese_dataframe(order_df)

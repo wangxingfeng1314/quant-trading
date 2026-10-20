@@ -26,23 +26,41 @@ class BollingerReversalStrategy(BaseStrategy):
 
     def on_bar(self, trade_date: str, data: dict, portfolio=None) -> List[Signal]:
         signals = []
+        is_default_boll = (self.boll_period == 20 and abs(float(self.boll_std) - 2.0) < 1e-6)
         for ts_code, df in data.items():
             if len(df) < self.boll_period + 2:
                 continue
-            if "boll_upper" not in df.columns or "boll_lower" not in df.columns:
+            if any(c not in df.columns for c in ["close", "low", "high", "volume"]):
                 continue
             if df["volume"].iloc[-1] == 0:
+                continue
+
+            if is_default_boll and "boll_upper" in df.columns and "boll_lower" in df.columns and "boll_mid" in df.columns:
+                boll_lower = df["boll_lower"].iloc[-1]
+                boll_upper = df["boll_upper"].iloc[-1]
+                boll_mid = df["boll_mid"].iloc[-1]
+                prev_boll_lower = df["boll_lower"].iloc[-2]
+                prev_boll_upper = df["boll_upper"].iloc[-2]
+            else:
+                # 动态按自定义 boll_period 与 boll_std 计算布林带，确保网格搜索调参真实生效
+                tail_s = df["close"].iloc[-(self.boll_period + 2):]
+                mid_s = tail_s.rolling(window=self.boll_period, min_periods=self.boll_period).mean()
+                std_s = tail_s.rolling(window=self.boll_period, min_periods=self.boll_period).std()
+                upper_s = mid_s + float(self.boll_std) * std_s
+                lower_s = mid_s - float(self.boll_std) * std_s
+                boll_mid = mid_s.iloc[-1]
+                boll_upper = upper_s.iloc[-1]
+                boll_lower = lower_s.iloc[-1]
+                prev_boll_upper = upper_s.iloc[-2]
+                prev_boll_lower = lower_s.iloc[-2]
+
+            if any(v != v for v in [boll_lower, boll_upper, boll_mid, prev_boll_lower, prev_boll_upper]):
                 continue
 
             curr_low = df["low"].iloc[-1]
             curr_high = df["high"].iloc[-1]
             curr_close = df["close"].iloc[-1]
             prev_close = df["close"].iloc[-2]
-            boll_lower = df["boll_lower"].iloc[-1]
-            boll_upper = df["boll_upper"].iloc[-1]
-            boll_mid = df["boll_mid"].iloc[-1]
-            prev_boll_lower = df["boll_lower"].iloc[-2]
-            prev_boll_upper = df["boll_upper"].iloc[-2]
 
             has_position = portfolio is not None and portfolio.get_position(ts_code) is not None and not portfolio.get_position(ts_code).is_empty
 

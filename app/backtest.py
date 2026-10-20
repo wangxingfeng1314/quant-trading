@@ -15,7 +15,7 @@ from app.st_utils import (
     format_strategy_cn, format_direction_cn, format_stock_cn,
 )
 from strategies import STRATEGY_REGISTRY, list_strategies
-from engine.backtester import Backtester, grid_search
+from engine.backtester import Backtester, grid_search, preload_backtest_data
 from data.storage import (
     get_instrument_list, get_daily, get_backtest_results, get_backtest_trades,
     get_stocks_with_data, get_watchlist, get_backtest_result_by_id,
@@ -653,10 +653,12 @@ def _show_multi_strategy():
             stock_df = get_instrument_list()
             name_map = dict(zip(stock_df["ts_code"], stock_df["name"]))
 
-            # 构建矩阵数据
+            # 构建矩阵数据（先一次性预加载全部自选股数据与指标，消除 N×M 重复 I/O 与计算）
             matrix_data = []
             progress_bar = st.progress(0)
             status_text = st.empty()
+            status_text.text("正在预热加载行情与技术指标...")
+            preloaded_matrix = preload_backtest_data(watchlist_codes, ms_start, ms_end)
             total_runs = len(selected_strategies) * len(watchlist_codes)
             run_count = 0
 
@@ -675,6 +677,8 @@ def _show_multi_strategy():
                         universe=[ts_code],
                         start_date=ms_start, end_date=ms_end,
                         initial_capital=DEFAULT_CAPITAL,
+                        execution_mode="next_open",
+                        preloaded_data=preloaded_matrix,
                     )
                     result = bt.run(save=False)
                     ret = result.total_return if result.equity_curve else None
@@ -724,7 +728,7 @@ def _show_multi_strategy():
             st.caption(f"总收益 {best['return']:+.2f}%")
             return
 
-        # 原有单只股票对比模式
+        # 原有单只股票对比模式（单次预热加载行情，消除18个策略重复读取SQLite和重算指标）
         if not codes_input:
             st.error("请输入股票代码")
             return
@@ -735,8 +739,10 @@ def _show_multi_strategy():
 
         curves = []
         names = []
+        strat_results = []
 
         with st.spinner("正在运行多策略回测..."):
+            preloaded_single = preload_backtest_data(universe, start_str, end_str)
             for sname in selected_strategies:
                 scls = STRATEGY_REGISTRY[sname]
                 params = {}
@@ -751,11 +757,15 @@ def _show_multi_strategy():
                     start_date=start_str,
                     end_date=end_str,
                     initial_capital=DEFAULT_CAPITAL,
+                    execution_mode="next_open",
+                    preloaded_data=preloaded_single,
                 )
                 result = bt.run(save=False)
                 if result.equity_curve:
+                    display_name = f"{format_strategy_cn(sname)} ({sname})"
                     curves.append(result.equity_curve)
-                    names.append(f"{format_strategy_cn(sname)} ({sname})")
+                    names.append(display_name)
+                    strat_results.append((display_name, result))
 
         if not curves:
             st.warning("所有策略均无交易产生")
@@ -798,27 +808,19 @@ def _show_multi_strategy():
         )
         st.plotly_chart(fig, width='stretch')
 
-        # 指标对比表
+        # 指标对比表（修正原本交易次数写死为 len(curves) 的 Bug，补充真实夏普与胜率并按总收益降序排列）
         st.subheader("📋 指标对比")
+        strat_results.sort(key=lambda item: item[1].total_return, reverse=True)
         rows = []
-        for curve, name in zip(curves, names):
-            df_eq = pd.DataFrame(curve)
-            initial = df_eq["equity"].iloc[0]
-            final = df_eq["equity"].iloc[-1]
-            total_ret = (final / initial - 1) * 100
-            days = len(df_eq)
-            annual_ret = ((final / initial) ** (252 / max(days, 1)) - 1) * 100
-
-            # 最大回撤
-            peak = df_eq["equity"].cummax()
-            dd = ((peak - df_eq["equity"]) / peak * 100).max()
-
+        for name, res in strat_results:
             rows.append({
                 "策略": name,
-                "总收益%": f"{total_ret:.2f}",
-                "年化收益%": f"{annual_ret:.2f}",
-                "最大回撤%": f"{dd:.2f}",
-                "交易次数": len([c for c in curves if c is not None]),
+                "总收益%": f"{res.total_return:+.2f}",
+                "年化收益%": f"{res.annual_return:+.2f}",
+                "夏普比率": f"{res.sharpe_ratio:.2f}",
+                "最大回撤%": f"{res.max_drawdown:.2f}",
+                "胜率%": f"{res.win_rate:.1f}",
+                "交易次数": int(res.trade_count),
             })
 
         chinese_dataframe(pd.DataFrame(rows))
@@ -971,11 +973,36 @@ def _display_result(result, benchmark_curve=None):
     if result.equity_curve and len(result.equity_curve) > 20:
         _show_performance_attribution(result)
 
-    # 交易记录
+    # 回测买卖点 K 线复盘图 + 交易记录
     if result.trades:
-        st.subheader("📋 交易记录")
         stock_df = cached_instrument_list()
         name_map = dict(zip(stock_df["ts_code"], stock_df["name"])) if not stock_df.empty else {}
+
+        # 提取所有发生交易的股票，在K线图上直接标注红买/绿卖箭头
+        traded_codes = list(dict.fromkeys(t.ts_code for t in result.trades))
+        with st.expander("🕯️ 回测买卖点 K 线复盘图（红「买」绿「卖」精确标注）", expanded=True):
+            sel_code = st.selectbox(
+                "选择标的查看买卖点K线",
+                traded_codes,
+                format_func=lambda c: f"{c} {name_map.get(c, '')}".strip(),
+                key="bt_kline_review_code",
+            ) if len(traded_codes) > 1 else traded_codes[0]
+
+            k_df = get_daily(sel_code, result.start_date, result.end_date)
+            if not k_df.empty:
+                from app.data_viewer import create_candlestick_chart
+                k_df = apply_indicators(k_df, ["ma", "vol_ma", "macd"])
+                buy_dates = [t.trade_date for t in result.trades if t.ts_code == sel_code and t.direction == "BUY"]
+                sell_dates = [t.trade_date for t in result.trades if t.ts_code == sel_code and t.direction == "SELL"]
+                k_fig = create_candlestick_chart(
+                    k_df, sel_code, name_map.get(sel_code, sel_code),
+                    show_volume=True, show_macd=True, show_boll=False,
+                    buy_dates=buy_dates, sell_dates=sell_dates,
+                    height=460,
+                )
+                st.plotly_chart(k_fig, width="stretch")
+
+        st.subheader("📋 交易记录")
         trade_data = []
         for t in result.trades:
             trade_data.append({

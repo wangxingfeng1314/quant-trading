@@ -43,10 +43,24 @@ class MACDCrossStrategy(BaseStrategy):
 
             has_position = portfolio is not None and portfolio.get_position(ts_code) is not None and not portfolio.get_position(ts_code).is_empty
 
+            # 计算当前 DIF 在 lookback 窗口内的相对位置，使 lookback 参数真正参与低位/高位判定与评分
+            lb = max(5, int(self.lookback))
+            dif_window = df["dif"].iloc[-lb:].dropna()
+            dif_low_bonus = 0.0
+            dif_high_bonus = 0.0
+            if len(dif_window) >= 3:
+                w_min, w_max = float(dif_window.min()), float(dif_window.max())
+                if w_max > w_min:
+                    rel_pos = (curr_dif - w_min) / (w_max - w_min)  # 0=窗口最低, 1=窗口最高
+                    if rel_pos <= 0.35:
+                        dif_low_bonus = round((0.35 - rel_pos) * 0.3, 2)
+                    elif rel_pos >= 0.65:
+                        dif_high_bonus = round((rel_pos - 0.65) * 0.3, 2)
+
             # 金叉: DIF从下方上穿DEA（未持仓）
             if not has_position and prev_dif <= prev_dea and curr_dif > curr_dea:
-                # 低位金叉（DIF<0）更可靠，加分
-                score = 0.5 + (0.4 if curr_dif < 0 else 0.0)
+                # 低位金叉（DIF<0 或处于 lookback 窗口底部区域）更可靠，加分
+                score = 0.5 + (0.35 if curr_dif < 0 else 0.0) + dif_low_bonus
                 score += min(abs(curr_dif - curr_dea) / 0.2, 0.1)
                 signals.append(Signal(
                     ts_code=ts_code, trade_date=trade_date,
@@ -59,7 +73,7 @@ class MACDCrossStrategy(BaseStrategy):
 
             # 死叉: DIF从上方下穿DEA（持有中或无组合扫描模式）
             elif (portfolio is None or has_position) and prev_dif >= prev_dea and curr_dif < curr_dea:
-                score = 0.5 + (0.4 if curr_dif > 0 else 0.0)
+                score = 0.5 + (0.35 if curr_dif > 0 else 0.0) + dif_high_bonus
                 score += min(abs(curr_dif - curr_dea) / 0.2, 0.1)
                 signals.append(Signal(
                     ts_code=ts_code, trade_date=trade_date,

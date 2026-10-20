@@ -309,8 +309,20 @@ class Backtester:
             # 记录权益
             portfolio.record_equity(date, prices)
 
-        # 5. 计算指标
-        metrics = portfolio.calc_metrics()
+        # 5. 计算指标（自动关联沪深300/上证指数基准计算 Alpha 与 Beta）
+        benchmark_returns = None
+        try:
+            from data.storage import get_index_daily_range
+            for bm_code in ("000300.SH", "000001.SH"):
+                bm_df = get_index_daily_range(bm_code, self.start_date, self.end_date)
+                if not bm_df.empty and len(bm_df) >= 2 and "close" in bm_df.columns:
+                    bm_ret = bm_df["close"].pct_change().dropna().tolist()
+                    if bm_ret:
+                        benchmark_returns = bm_ret
+                        break
+        except Exception:
+            pass
+        metrics = portfolio.calc_metrics(benchmark_returns=benchmark_returns)
 
         result = BacktestResult(
             strategy=strategy.name,
@@ -330,6 +342,8 @@ class Backtester:
             equity_curve=portfolio.equity_curve,
             trades=portfolio.trades,
         )
+        result.alpha = metrics.get("alpha", 0.0)
+        result.beta = metrics.get("beta", 0.0)
 
         # 6. 保存到数据库
         if save and portfolio.trades:

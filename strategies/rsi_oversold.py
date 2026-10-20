@@ -28,15 +28,22 @@ class RSIOversoldStrategy(BaseStrategy):
         self.rsi_col = f"rsi{rsi_period}"
 
     def on_bar(self, trade_date: str, data: dict, portfolio=None) -> List[Signal]:
+        from data.indicators import add_rsi
         signals = []
         for ts_code, df in data.items():
-            if len(df) < 3 or self.rsi_col not in df.columns:
+            if len(df) < max(3, self.rsi_period + 1) or "close" not in df.columns or "volume" not in df.columns:
                 continue
             if df["volume"].iloc[-1] == 0:
                 continue
 
-            curr_rsi = df[self.rsi_col].iloc[-1]
-            prev_rsi = df[self.rsi_col].iloc[-2]
+            if self.rsi_col in df.columns:
+                rsi_series = df[self.rsi_col]
+            else:
+                rsi_df = add_rsi(df, period=max(2, int(self.rsi_period)))
+                rsi_series = rsi_df[f"rsi{max(2, int(self.rsi_period))}"]
+
+            curr_rsi = rsi_series.iloc[-1]
+            prev_rsi = rsi_series.iloc[-2]
             price = df["close"].iloc[-1]
 
             if any(v != v for v in [curr_rsi, prev_rsi]):

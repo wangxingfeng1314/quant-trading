@@ -33,16 +33,17 @@ class MA60BreakoutStrategy(BaseStrategy):
         for ts_code, df in data.items():
             if len(df) < self.ma_period + self.slope_days + 2:
                 continue
-            if self.ma_col not in df.columns:
+            if "close" not in df.columns or "volume" not in df.columns:
                 continue
             if df["volume"].iloc[-1] == 0:
                 continue
 
             price = df["close"].iloc[-1]
             prev_close = df["close"].iloc[-2]
-            ma = df[self.ma_col].iloc[-1]
-            prev_ma = df[self.ma_col].iloc[-2]
-            ma_slope = ma - df[self.ma_col].iloc[-self.slope_days - 1] if len(df) >= self.slope_days + 1 else 0
+            ma_series = df[self.ma_col] if self.ma_col in df.columns else df["close"].rolling(window=self.ma_period, min_periods=1).mean()
+            ma = ma_series.iloc[-1]
+            prev_ma = ma_series.iloc[-2]
+            ma_slope = ma - ma_series.iloc[-self.slope_days - 1] if len(df) >= self.slope_days + 1 else 0
 
             if ma != ma or prev_ma != prev_ma:
                 continue
