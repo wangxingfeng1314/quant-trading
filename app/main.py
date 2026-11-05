@@ -77,27 +77,110 @@ def _cached_schtasks_caption():
     except Exception:
         return "⏰ 定时任务: 17:00 每日执行"
 
-# 页面路由表
-PAGES = {
-    "🏠 首页看板": "app.dashboard",
-    "📈 数据浏览": "app.data_viewer",
-    "🔬 回测中心": "app.backtest",
-    "📚 策略百科": "app.strategy_intro",
-    "🔍 选股筛选": "app.screener",
-    "📡 信号中心": "app.signal",
-    "💼 持仓管理": "app.portfolio",
-}
+# ============================================================
+# 页面路由表与 URL 映射定义
+# ============================================================
+PAGE_DEFINITIONS = [
+    {
+        "slug": "dashboard",
+        "label": "🏠 首页看板",
+        "module": "app.dashboard",
+        "aliases": ["dashboard", "home", "kanban", "看板", "首页", "0", "🏠 首页看板", "首页看板"],
+    },
+    {
+        "slug": "data",
+        "label": "📈 数据浏览",
+        "module": "app.data_viewer",
+        "aliases": ["data", "data_viewer", "kline", "数据", "行情", "1", "📈 数据浏览", "数据浏览"],
+    },
+    {
+        "slug": "backtest",
+        "label": "🔬 回测中心",
+        "module": "app.backtest",
+        "aliases": ["backtest", "bt", "回测", "2", "🔬 回测中心", "回测中心"],
+    },
+    {
+        "slug": "strategy",
+        "label": "📚 策略百科",
+        "module": "app.strategy_intro",
+        "aliases": ["strategy", "strategy_intro", "strategies", "百科", "策略", "3", "📚 策略百科", "策略百科"],
+    },
+    {
+        "slug": "screener",
+        "label": "🔍 选股筛选",
+        "module": "app.screener",
+        "aliases": ["screener", "filter", "选股", "筛选", "4", "🔍 选股筛选", "选股筛选"],
+    },
+    {
+        "slug": "signal",
+        "label": "📡 信号中心",
+        "module": "app.signal",
+        "aliases": ["signal", "signals", "信号", "5", "📡 信号中心", "信号中心"],
+    },
+    {
+        "slug": "portfolio",
+        "label": "💼 持仓管理",
+        "module": "app.portfolio",
+        "aliases": ["portfolio", "positions", "holdings", "持仓", "账户", "6", "💼 持仓管理", "持仓管理"],
+    },
+]
+
+NAV_ITEMS = [item["label"] for item in PAGE_DEFINITIONS]
+LABEL_TO_SLUG = {item["label"]: item["slug"] for item in PAGE_DEFINITIONS}
+SLUG_TO_LABEL = {item["slug"]: item["label"] for item in PAGE_DEFINITIONS}
+PAGES = {item["label"]: item["module"] for item in PAGE_DEFINITIONS}
+
+ALIAS_TO_LABEL = {}
+for item in PAGE_DEFINITIONS:
+    lbl = item["label"]
+    for alias in item["aliases"]:
+        ALIAS_TO_LABEL[alias.lower().strip()] = lbl
+
+# ------------------------------------------------------------
+# URL 参数与侧边栏导航双向同步 (支持 F5 刷新、浏览器前进/后退、直接链接访问)
+# ------------------------------------------------------------
+raw_param = ""
+if "page" in st.query_params:
+    raw_val = st.query_params.get("page")
+    if isinstance(raw_val, (list, tuple)):
+        raw_param = str(raw_val[0]).strip().lower() if raw_val else ""
+    else:
+        raw_param = str(raw_val).strip().lower()
+
+target_from_url = ALIAS_TO_LABEL.get(raw_param)
+
+# 若首次访问或 URL 参数外部变化（例如 F5 刷新或浏览器前进/后退），同步至 session_state
+if "main_nav_radio" not in st.session_state:
+    st.session_state["main_nav_radio"] = target_from_url or NAV_ITEMS[0]
+elif target_from_url and st.session_state.get("_last_synced_url_param") != raw_param:
+    st.session_state["main_nav_radio"] = target_from_url
+
+def _on_nav_change():
+    selected = st.session_state.get("main_nav_radio")
+    if selected in LABEL_TO_SLUG:
+        slug = LABEL_TO_SLUG[selected]
+        st.query_params["page"] = slug
+        st.session_state["_last_synced_url_param"] = slug
 
 st.sidebar.title("📊 A股量化交易系统")
 st.sidebar.markdown("---")
 
-# 导航
+# 侧边栏单选导航（使用 index=None 配合 key="main_nav_radio" 实现平滑双向绑定）
 page = st.sidebar.radio(
     "导航",
-    ["🏠 首页看板", "📈 数据浏览", "🔬 回测中心", "📚 策略百科", "🔍 选股筛选", "📡 信号中心", "💼 持仓管理"],
-    index=0,
+    NAV_ITEMS,
+    index=None,
     key="main_nav_radio",
+    on_change=_on_nav_change,
 )
+if not page or page not in PAGES:
+    page = NAV_ITEMS[0]
+
+# 兜底确保 URL query_params 始终与当前激活页面一致
+active_slug = LABEL_TO_SLUG.get(page, "dashboard")
+st.session_state["_last_synced_url_param"] = active_slug
+if st.query_params.get("page") != active_slug:
+    st.query_params["page"] = active_slug
 
 # ============================================================
 # 主区域：由前端 JS 在 0ms 瞬间抹除上一个页面并拉起过渡遮罩，
