@@ -82,9 +82,45 @@ def _show_scan():
 
     scope = st.radio(
         "扫描范围",
-        [f"有数据的股票 ({len(stocks_with_data)}只)", "自选股(快)"],
+        [f"有数据的股票 ({len(stocks_with_data)}只)", "自选股(快)", "多选股票"],
         horizontal=True,
     )
+
+    selected_scan_stocks = []
+    if scope == "多选股票":
+        inst_df = cached_instrument_list()
+        name_map = dict(zip(inst_df["ts_code"], inst_df["name"])) if not inst_df.empty else {}
+        type_map = dict(zip(inst_df["ts_code"], inst_df["type"])) if not inst_df.empty else {}
+        watchlist_df = get_watchlist()
+        wl_codes = [c for c in watchlist_df["ts_code"].tolist() if c in stocks_with_data] if not watchlist_df.empty else []
+        core_10 = [c for c in ['600900.SH', '600036.SH', '601318.SH', '600660.SH', '600690.SH', '600887.SH', '600089.SH', '000725.SZ', '002241.SZ', '600941.SH'] if c in stocks_with_data]
+
+        sc1, sc2, sc3 = st.columns([1.1, 1.2, 0.9])
+        with sc1:
+            if st.button("➕ 选入自选股", key="sig_quick_wl"):
+                st.session_state["sig_multiselect"] = sorted(list(set(st.session_state.get("sig_multiselect", []) + wl_codes)))
+                st.rerun()
+        with sc2:
+            if st.button("⚡ 选入核心白马", key="sig_quick_core"):
+                st.session_state["sig_multiselect"] = sorted(list(set(st.session_state.get("sig_multiselect", []) + core_10)))
+                st.rerun()
+        with sc3:
+            if st.button("🗑️ 清空标的", key="sig_quick_clear"):
+                st.session_state["sig_multiselect"] = []
+                st.rerun()
+
+        selected_scan_stocks = st.multiselect(
+            "选择要扫描的多只股票（多选框·支持输入代码/中文名称搜索）",
+            options=stocks_with_data,
+            default=st.session_state.get("sig_multiselect", core_10 if core_10 else stocks_with_data[:5]),
+            format_func=lambda c: f"[{type_map.get(c, '标的')}] {c} {name_map.get(c, '')}",
+            key="sig_multiselect",
+            placeholder="🔍 输入股票代码或名称搜索并多选..."
+        )
+        if selected_scan_stocks:
+            st.caption(f"📊 已选扫描标的 ({len(selected_scan_stocks)} 只): **{', '.join([name_map.get(c, c) for c in selected_scan_stocks[:4]])}**")
+        else:
+            st.warning("⚠️ 请在多选框中至少选择一只股票/ETF标的")
 
     if st.button("🔍 开始扫描", type="primary", width='stretch'):
         if not selected_strategies:
@@ -99,6 +135,11 @@ def _show_scan():
                 st.warning("自选股列表为空，请先添加自选股")
                 return
             universe = scan_codes
+        elif scope == "多选股票":
+            if not selected_scan_stocks:
+                st.error("请至少在多选框中选择一只股票")
+                return
+            universe = selected_scan_stocks
         else:
             universe = stocks_with_data  # 所有有数据的股票
 

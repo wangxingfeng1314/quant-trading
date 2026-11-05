@@ -149,7 +149,7 @@ def _show_run_backtest():
     with col2:
         st.subheader("回测参数")
 
-        mode = st.radio("股票范围", ["单只股票", "多只股票(手动)", "全部自选股"], horizontal=True, key="bt_mode")
+        mode = st.radio("股票范围", ["单只股票", "多选股票", "全部自选股"], horizontal=True, key="bt_mode")
 
         if mode == "单只股票":
             search = st.text_input("搜索标的", placeholder="代码或名称", key="bt_search")
@@ -180,12 +180,64 @@ def _show_run_backtest():
             else:
                 st.caption(f"📊 将对 {len(universe)} 只自选股逐只回测并对比结果")
         else:
-            codes_input = st.text_area(
-                "输入股票代码（每行一个）",
-                placeholder="000001.SZ\n600519.SH\n000858.SZ",
-                height=100, key="bt_codes"
+            all_codes = stock_df_data["ts_code"].tolist()
+            name_map = dict(zip(stock_df_data["ts_code"], stock_df_data["name"]))
+            type_map = dict(zip(stock_df_data["ts_code"], stock_df_data["type"]))
+
+            def format_bt_label(c):
+                return f"[{type_map.get(c, '标的')}] {c} {name_map.get(c, '')}"
+
+            watchlist = get_watchlist()
+            wl_codes = [c for c in watchlist["ts_code"].tolist() if c in all_codes] if not watchlist.empty else []
+            core_10 = [c for c in ['600900.SH', '600036.SH', '601318.SH', '600660.SH', '600690.SH', '600887.SH', '600089.SH', '000725.SZ', '002241.SZ', '600941.SH'] if c in all_codes]
+
+            # 快捷操作栏
+            btn_col1, btn_col2, btn_col3 = st.columns([1.1, 1.2, 0.9])
+            with btn_col1:
+                if st.button("➕ 选入自选股", key="bt_quick_wl", help=f"一键将 {len(wl_codes)} 只自选股加入多选框"):
+                    st.session_state["bt_multiselect"] = sorted(list(set(st.session_state.get("bt_multiselect", []) + wl_codes)))
+                    st.rerun()
+            with btn_col2:
+                if st.button("⚡ 选入核心白马", key="bt_quick_core", help=f"一键选入 {len(core_10)} 只核心龙头股池"):
+                    st.session_state["bt_multiselect"] = sorted(list(set(st.session_state.get("bt_multiselect", []) + core_10)))
+                    st.rerun()
+            with btn_col3:
+                if st.button("🗑️ 清空已选", key="bt_quick_clear"):
+                    st.session_state["bt_multiselect"] = []
+                    st.rerun()
+
+            # 多选框主体（支持输入代码或名称模糊搜索、多项勾选）
+            selected_codes = st.multiselect(
+                "选择多只股票（多选框·支持输入代码/中文名称快速搜索）",
+                options=all_codes,
+                default=st.session_state.get("bt_multiselect", core_10 if core_10 else all_codes[:5]),
+                format_func=format_bt_label,
+                key="bt_multiselect",
+                placeholder="🔍 点击此处或直接输入股票代码/名称搜索多选..."
             )
-            universe = [c.strip() for c in codes_input.strip().split("\n") if c.strip()]
+            universe = selected_codes
+
+            with st.expander("📝 文本批量粘贴导入 (可选)", expanded=False):
+                manual_text = st.text_area("粘贴股票代码（支持换行/逗号/空格分隔）", height=70, key="bt_manual_paste",
+                                           placeholder="600519.SH\n000001.SZ\n601318.SH")
+                if st.button("📥 导入到上方多选框", key="bt_do_import"):
+                    import re
+                    pasted = [re.sub(r'[^0-9a-zA-Z\.]', '', c).strip() for c in re.split(r'[\r\n,\s]+', manual_text) if c.strip()]
+                    valid_pasted = [c for c in pasted if c in all_codes]
+                    if valid_pasted:
+                        st.session_state["bt_multiselect"] = sorted(list(set(selected_codes + valid_pasted)))
+                        st.success(f"成功导入 {len(valid_pasted)} 只标的")
+                        st.rerun()
+                    else:
+                        st.warning("未解析到包含有效数据的股票代码")
+
+            if universe:
+                names_summary = "、".join([name_map.get(c, c) for c in universe[:4]])
+                if len(universe) > 4:
+                    names_summary += f" 等 {len(universe)} 只标的"
+                st.caption(f"📊 已选标的组合 ({len(universe)} 只): **{names_summary}**")
+            else:
+                st.warning("⚠️ 请在多选框中至少选择一只股票/ETF")
 
         date_col1, date_col2 = st.columns(2)
         with date_col1:
@@ -438,7 +490,7 @@ def _show_grid_search():
                 param_grid[pname] = sorted(list(set([round(low_v + i * step_size, 2) for i in range(int(steps))])))
 
     # 股票选择
-    mode = st.radio("标的", ["单只标的", "多只标的(手动)"], horizontal=True, key="gs_mode")
+    mode = st.radio("标的", ["单只标的", "多选标的"], horizontal=True, key="gs_mode")
     if mode == "单只标的":
         gs_search = st.text_input("搜索标的", placeholder="输入代码或中文名称过滤", key="gs_search")
         if gs_search:
@@ -460,9 +512,59 @@ def _show_grid_search():
             st.warning("未找到匹配标的，请调整搜索词")
             return
     else:
-        codes_input = st.text_area("标的代码（每行一个）", height=80, key="gs_codes",
-                                    placeholder="000001.SZ\n600519.SH\n510300.SH")
-        universe = [c.strip() for c in codes_input.strip().split("\n") if c.strip()]
+        all_codes = stock_df_data["ts_code"].tolist()
+        name_map = dict(zip(stock_df_data["ts_code"], stock_df_data["name"]))
+        type_map = dict(zip(stock_df_data["ts_code"], stock_df_data["type"]))
+
+        def format_gs_label(c):
+            return f"[{type_map.get(c, '标的')}] {c} {name_map.get(c, '')}"
+
+        watchlist = get_watchlist()
+        wl_codes = [c for c in watchlist["ts_code"].tolist() if c in all_codes] if not watchlist.empty else []
+        core_10 = [c for c in ['600900.SH', '600036.SH', '601318.SH', '600660.SH', '600690.SH', '600887.SH', '600089.SH', '000725.SZ', '002241.SZ', '600941.SH'] if c in all_codes]
+
+        gcol1, gcol2, gcol3 = st.columns([1.1, 1.2, 0.9])
+        with gcol1:
+            if st.button("➕ 选入自选股", key="gs_quick_wl"):
+                st.session_state["gs_multiselect"] = sorted(list(set(st.session_state.get("gs_multiselect", []) + wl_codes)))
+                st.rerun()
+        with gcol2:
+            if st.button("⚡ 选入核心白马", key="gs_quick_core"):
+                st.session_state["gs_multiselect"] = sorted(list(set(st.session_state.get("gs_multiselect", []) + core_10)))
+                st.rerun()
+        with gcol3:
+            if st.button("🗑️ 清空标的", key="gs_quick_clear"):
+                st.session_state["gs_multiselect"] = []
+                st.rerun()
+
+        selected_codes = st.multiselect(
+            "选择多只标的（多选框·支持输入代码/中文名称搜索）",
+            options=all_codes,
+            default=st.session_state.get("gs_multiselect", core_10[:3] if core_10 else all_codes[:2]),
+            format_func=format_gs_label,
+            key="gs_multiselect",
+            placeholder="🔍 点击此处或直接输入代码/名称搜索多只标的..."
+        )
+        universe = selected_codes
+
+        with st.expander("📝 文本批量粘贴导入 (可选)", expanded=False):
+            gs_manual_text = st.text_area("粘贴标的代码（支持换行/逗号/空格分隔）", height=70, key="gs_manual_paste",
+                                          placeholder="600519.SH\n000001.SZ\n601318.SH")
+            if st.button("📥 导入到上方多选框", key="gs_do_import"):
+                import re
+                pasted = [re.sub(r'[^0-9a-zA-Z\.]', '', c).strip() for c in re.split(r'[\r\n,\s]+', gs_manual_text) if c.strip()]
+                valid_pasted = [c for c in pasted if c in all_codes]
+                if valid_pasted:
+                    st.session_state["gs_multiselect"] = sorted(list(set(selected_codes + valid_pasted)))
+                    st.success(f"成功导入 {len(valid_pasted)} 只标的")
+                    st.rerun()
+                else:
+                    st.warning("未解析到包含有效数据的股票代码")
+
+        if universe:
+            st.caption(f"📊 已选调优标的 ({len(universe)} 只): **{', '.join([name_map.get(c, c) for c in universe[:4]])}**")
+        else:
+            st.warning("⚠️ 请在多选框中至少选择一只股票/ETF标的")
 
     date_col1, date_col2 = st.columns(2)
     with date_col1:
@@ -625,13 +727,25 @@ def _show_multi_strategy():
 
     col1, col2, col3 = st.columns(3)
     with col1:
-        codes_input = st.text_input("股票代码", placeholder="000001.SZ", key="ms_code")
         ms_name_map = dict(zip(stock_df["ts_code"], stock_df["name"])) if not stock_df.empty else {}
-        matched_name = ms_name_map.get(codes_input.strip(), "")
-        if matched_name:
-            st.caption(f"🏷️ 当前标的: **{codes_input.strip()} {matched_name}**")
+        ms_type_map = dict(zip(stock_df["ts_code"], stock_df["type"])) if not stock_df.empty else {}
+        valid_ms_codes = [c for c in stocks_with_data if c in ms_name_map]
+        if valid_ms_codes:
+            selected_ms = st.selectbox(
+                "选择对比标的 (支持搜索)",
+                valid_ms_codes,
+                format_func=lambda c: f"[{ms_type_map.get(c, '标的')}] {c} {ms_name_map.get(c, '')}",
+                key="ms_code_select"
+            )
+            codes_input = selected_ms
+            st.caption(f"🏷️ 当前标的: **{codes_input} {ms_name_map.get(codes_input, '')}**")
         else:
-            st.caption(f"📊 数据库有数据标的: {len(stocks_with_data)} 只")
+            codes_input = st.text_input("股票代码", placeholder="000001.SZ", key="ms_code")
+            matched_name = ms_name_map.get(codes_input.strip(), "")
+            if matched_name:
+                st.caption(f"🏷️ 当前标的: **{codes_input.strip()} {matched_name}**")
+            else:
+                st.caption(f"📊 数据库有数据标的: {len(stocks_with_data)} 只")
     with col2:
         ms_start = chinese_date_picker("开始日期", default_val=date(2023,1,1), key="ms_start")
     with col3:

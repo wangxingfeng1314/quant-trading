@@ -19,6 +19,9 @@ env/
 
 # 数据库
 *.db
+*.db-shm
+*.db-wal
+*.db-journal
 *.sqlite
 *.sqlite3
 
