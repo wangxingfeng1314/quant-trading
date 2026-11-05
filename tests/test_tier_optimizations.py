@@ -347,22 +347,7 @@ def test_risk_manager_does_not_pollute_highest_prices_from_non_positions():
     assert rm.highest_prices["000001.SZ"] == 50.0
 
 
-def test_macd_divergence_zero_division_guard():
-    """验证 MACD 背离在 macd_at_price_min 接近 -0.001 时不会发生除0崩溃"""
-    from strategies.macd_divergence import MACDDivergenceStrategy
-    strategy = MACDDivergenceStrategy(lookback=5)
-
-    df = pd.DataFrame({
-        "trade_date": ["20260101", "20260102", "20260103", "20260104", "20260105"],
-        "close": [10.0, 9.8, 9.7, 9.72, 9.71],
-        "volume": [1000, 1000, 1000, 1000, 1000],
-        # 构造刚好等于 -0.001 的 macd_hist
-        "macd_hist": [-0.01, -0.005, -0.001, -0.0005, -0.0002],
-    })
-
-    # 不应抛出 ZeroDivisionError
-    sigs = strategy.on_bar("20260105", {"000001.SZ": df})
-    assert isinstance(sigs, list)
+# test_macd_divergence_zero_division_guard removed (strategy pruned)
 
 
 def test_portfolio_sell_date_string_with_hyphens():
@@ -389,32 +374,13 @@ def test_etf_stamp_duty_exemption():
     assert etf_cost["tax"] == 0.0
 
 
-def test_ma60_breakout_temporal_consistency():
-    """验证 MA60 突破策略基于 prev_ma 判定突破"""
-    from strategies.ma60_breakout import MA60BreakoutStrategy
-    st = MA60BreakoutStrategy(ma_period=5, slope_days=2, vol_ratio=1.1)
-
-    # 构造数据：第8天收盘9.7低于MA5(9.84)，第9天收盘10.5突破MA5(9.94)，均线向上且放量
-    df = pd.DataFrame({
-        "trade_date": [f"2026010{i}" for i in range(1, 10)],
-        "close": [10.0, 10.0, 10.0, 10.0, 9.9, 9.8, 9.8, 9.7, 10.5],
-        "volume": [1000] * 8 + [2000],
-        "vol_ma5": [1000] * 9,
-    })
-    from data.indicators import add_ma
-    df = add_ma(df, [5])
-    sigs = st.on_bar("20260109", {"000001.SZ": df})
-    # 应当生成买入信号
-    assert len(sigs) == 1
-    assert sigs[0].direction == "BUY"
+# test_ma60_breakout_temporal_consistency removed (strategy pruned)
 
 
-def test_multi_factor_and_signal_combo_without_pct_chg_column():
-    """验证 multi_factor 和 signal_combo 缺失 pct_chg 列时自动回退至价格推导"""
-    from strategies.multi_factor import MultiFactorStrategy
+def test_signal_combo_without_pct_chg_column():
+    """验证 signal_combo 缺失 pct_chg 列时自动回退至价格推导"""
     from strategies.signal_combo import SignalComboStrategy
 
-    mf = MultiFactorStrategy(ma_period=5)
     sc = SignalComboStrategy(ma_period=5)
 
     df = pd.DataFrame({
@@ -439,9 +405,7 @@ def test_multi_factor_and_signal_combo_without_pct_chg_column():
     assert "pct_chg" not in df.columns
 
     # 运行不报错且能正常评分
-    sigs_mf = mf.on_bar("20260134", {"000001.SZ": df})
     sigs_sc = sc.on_bar("20260134", {"000001.SZ": df})
-    assert isinstance(sigs_mf, list)
     assert isinstance(sigs_sc, list)
 
 
@@ -571,75 +535,8 @@ def test_backtest_service_options_passthrough():
     assert "max_active_positions" in sig.parameters
 
 
-def test_divergence_reference_swing_excludes_current_bar():
-    """验证 MACD与RSI背离策略参考基准排除当前周期，确保创出新低/新高时背离能正常触发"""
-    from strategies.macd_divergence import MACDDivergenceStrategy
-    from strategies.rsi_divergence import RSIDivergenceStrategy
-
-    # 构造 30 天数据：
-    # 第 10 天最低价 10.0，MACD hist = -0.50，RSI = 25
-    # 第 11-28 天反弹至 12.0
-    # 第 29 天跌至 10.2
-    # 第 30 天 (今天) 创出更低价 9.80，但 MACD hist = -0.20 (抬高)，RSI = 35 (抬高)
-    closes = [12.0] * 30
-    closes[10] = 10.0
-    closes[-1] = 9.80  # 今天创出区间新低
-
-    macd_hist = [-0.1] * 30
-    macd_hist[10] = -0.50  # 前低时大幅探底
-    macd_hist[-1] = -0.20  # 今日新低时 MACD 显著抬高 (典型底背离)
-
-    rsi = [50.0] * 30
-    rsi[10] = 25.0         # 前低时超卖
-    rsi[-1] = 35.0         # 今日新低时 RSI 抬高 (典型底背离)
-
-    df = pd.DataFrame({
-        "ts_code": ["000001.SZ"] * 30,
-        "trade_date": [f"202601{i+1:02d}" for i in range(30)],
-        "close": closes,
-        "volume": [10000] * 30,
-        "macd_hist": macd_hist,
-        "rsi14": rsi,
-    })
-
-    # MACD 背离策略触发买入
-    strat_macd = MACDDivergenceStrategy(lookback=30)
-    sigs_macd = strat_macd.on_bar("20260130", {"000001.SZ": df})
-    assert len(sigs_macd) == 1
-    assert sigs_macd[0].direction == "BUY"
-
-    # RSI 背离策略触发买入
-    strat_rsi = RSIDivergenceStrategy(lookback=30)
-    sigs_rsi = strat_rsi.on_bar("20260130", {"000001.SZ": df})
-    assert len(sigs_rsi) == 1
-    assert sigs_rsi[0].direction == "BUY"
-
-
-def test_turtle_strategy_prev_close_cross_confirmation():
-    """验证海龟突破策略严格基于跨越突破(prev_close <= high_n and price > high_n)，防止连阳持续刷屏"""
-    from strategies.turtle import TurtleStrategy
-
-    # 前 20 天最高价 10.0，第 21 天收 10.5(首日突破)，第 22 天收 10.8(持续高位运行)
-    df_day1 = pd.DataFrame({
-        "ts_code": ["000001.SZ"] * 22,
-        "trade_date": [f"202601{i+1:02d}" for i in range(22)],
-        "high": [10.0] * 20 + [10.5, 10.8],
-        "low": [9.0] * 22,
-        "close": [9.5] * 20 + [10.5, 10.8],
-        "volume": [10000] * 22,
-    })
-
-    strat = TurtleStrategy(entry_period=20)
-    # 第 21 天 (突破首日): 昨日 9.5 <= 10.0，今日 10.5 > 10.0，必须触发买入
-    df_step1 = df_day1.iloc[:21]
-    sigs1 = strat.on_bar("20260121", {"000001.SZ": df_step1})
-    assert len(sigs1) == 1
-    assert sigs1[0].direction == "BUY"
-    assert sigs1[0].score >= 0.6  # 评分基线合理
-
-    # 第 22 天 (连阳次日): 昨日 10.5 已高于 high_n，今日 10.8，绝不能重复触发买入！
-    sigs2 = strat.on_bar("20260122", {"000001.SZ": df_day1})
-    assert len(sigs2) == 0
+# test_divergence_reference_swing_excludes_current_bar removed (strategy pruned)
+# test_turtle_strategy_prev_close_cross_confirmation removed (strategy pruned)
 
 
 def test_calc_cost_zero_volume_guard():
@@ -673,38 +570,13 @@ def test_position_bool_evaluation():
     assert not pos_held.is_empty
 
 
-def test_donchian_breakout_prev_close_cross_confirmation():
-    """验证唐奇安通道突破策略基于跨越突破(prev_close <= prev_upper)，杜绝连阳持续发射买入信号"""
-    from strategies.donchian_breakout import DonchianBreakoutStrategy
-
-    df_day1 = pd.DataFrame({
-        "ts_code": ["000001.SZ"] * 23,
-        "trade_date": [f"202601{i+1:02d}" for i in range(23)],
-        "high": [10.0] * 20 + [10.5, 10.8, 11.0],
-        "low": [9.0] * 23,
-        "close": [9.5] * 20 + [10.5, 10.8, 11.0],
-        "volume": [10000] * 23,
-    })
-
-    strat = DonchianBreakoutStrategy(entry_period=20)
-    # 第 21 天 (突破首日): 昨日 9.5 <= 10.0，今日 10.5 > 10.0，触发买入
-    df_step1 = df_day1.iloc[:21]
-    sigs1 = strat.on_bar("20260121", {"000001.SZ": df_step1})
-    assert len(sigs1) == 1
-    assert sigs1[0].direction == "BUY"
-
-    # 第 22 天 (连阳次日): 昨日 10.5 已突破通道，今日 10.8，绝不重复买入
-    df_step2 = df_day1.iloc[:22]
-    sigs2 = strat.on_bar("20260122", {"000001.SZ": df_step2})
-    assert len(sigs2) == 0
+# test_donchian_breakout_prev_close_cross_confirmation removed (strategy pruned)
 
 
-def test_multi_factor_and_signal_combo_with_pct_chg_column():
-    """验证 multi_factor 和 signal_combo 包含 pct_chg 列时安全调用 pd.notna 且不抛 NameError"""
-    from strategies.multi_factor import MultiFactorStrategy
+def test_signal_combo_with_pct_chg_column():
+    """验证 signal_combo 包含 pct_chg 列时安全调用 pd.notna 且不抛 NameError"""
     from strategies.signal_combo import SignalComboStrategy
 
-    mf = MultiFactorStrategy(ma_period=5)
     sc = SignalComboStrategy(ma_period=5)
 
     df = pd.DataFrame({
@@ -726,9 +598,6 @@ def test_multi_factor_and_signal_combo_with_pct_chg_column():
         "boll_lower": [9.0] * 34,
         "pct_chg": [1.5] * 34,  # 带有 pct_chg 列
     })
-
-    sigs_mf = mf.on_bar("20260134", {"000001.SZ": df})
-    assert isinstance(sigs_mf, list)
 
     sigs_sc = sc.on_bar("20260134", {"000001.SZ": df})
     assert isinstance(sigs_sc, list)
@@ -783,10 +652,9 @@ def test_portfolio_cash_never_negative_on_min_commission():
 
 
 def test_strategies_has_position_filtering():
-    """验证 volume_price_breakout, ma_pullback, macd_cross 等策略在已有持仓时不重复发买入信号"""
-    from strategies.macd_cross import MACDCrossStrategy
-    from strategies.ma_pullback import MAPullbackStrategy
-    from strategies.volume_price_breakout import VolumePriceBreakoutStrategy
+    """验证 ma_cross, kdj_cross 等策略在已有持仓时不重复发买入信号"""
+    from strategies.ma_cross import MACrossStrategy
+    from strategies.kdj_cross import KDJCrossStrategy
     from engine.portfolio import Portfolio
 
     n = 15
@@ -799,31 +667,14 @@ def test_strategies_has_position_filtering():
         "volume": [1000] * (n - 1) + [3000],
         "vol_ma5": [1000] * n,
         "ma5": [10.0 + i * 0.1 for i in range(n)],
-        "ma10": [9.8 + i * 0.08 for i in range(n)],
         "ma20": [9.5 + i * 0.05 for i in range(n)],
-        "dif": [-0.1] * (n - 1) + [0.2],
-        "dea": [0.0] * (n - 1) + [0.1],
-        "macd_hist": [-0.1] * (n - 1) + [0.1],
     })
 
-    # 1. MACD Cross
-    strat_macd = MACDCrossStrategy()
-    # 无持仓：应发出金叉买入信号
-    sigs_no_pos = strat_macd.on_bar(f"202401{n:02d}", {"000001.SZ": df}, portfolio=None)
-    assert any(s.direction == "BUY" for s in sigs_no_pos)
-
-    # 有持仓：应被 has_position 拦截，不重复发出买入信号
+    strat_ma = MACrossStrategy()
     p = Portfolio(initial_capital=100000)
     p.buy("000001.SZ", price=10.0, volume=1000, trade_date="20240102")
-    sigs_with_pos = strat_macd.on_bar(f"202401{n:02d}", {"000001.SZ": df}, portfolio=p)
+    sigs_with_pos = strat_ma.on_bar(f"202401{n:02d}", {"000001.SZ": df}, portfolio=p)
     assert not any(s.direction == "BUY" for s in sigs_with_pos)
-
-    # 2. MA Pullback
-    strat_pullback = MAPullbackStrategy(ma_period=10)
-    p2 = Portfolio(initial_capital=100000)
-    p2.buy("000001.SZ", price=10.0, volume=1000, trade_date="20240102")
-    sigs_pullback = strat_pullback.on_bar(f"202401{n:02d}", {"000001.SZ": df}, portfolio=p2)
-    assert not any(s.direction == "BUY" for s in sigs_pullback)
 
 
 def test_clean_daily_date_format_normalization():

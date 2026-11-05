@@ -1,5 +1,6 @@
 """布林带反转策略"""
 from typing import List
+import pandas as pd
 from strategies.base import BaseStrategy
 from core.models import Signal
 
@@ -62,27 +63,32 @@ class BollingerReversalStrategy(BaseStrategy):
             curr_close = df["close"].iloc[-1]
             prev_close = df["close"].iloc[-2]
 
-            has_position = portfolio is not None and portfolio.get_position(ts_code) is not None and not portfolio.get_position(ts_code).is_empty
+            pos = portfolio.get_position(ts_code) if portfolio is not None else None
+            has_position = pos is not None and not pos.is_empty
 
-            # 买入: 前一日在轨内或触轨，今日低点触及下轨后收盘回升
-            if not has_position and prev_close >= prev_boll_lower and curr_low <= boll_lower and curr_close > boll_lower:
+            # 胜率增强过滤（RSI超卖探底配合下轨支撑，过滤阴跌无动能陷阱）
+            rsi = df["rsi14"].iloc[-1] if "rsi14" in df.columns else 50.0
+            rsi_oversold = pd.isna(rsi) or rsi < 45.0
+
+            # 买入: 前一日在轨内或触轨，今日低点触及下轨后收盘回升 + RSI超卖支撑
+            if not has_position and rsi_oversold and prev_close >= prev_boll_lower and curr_low <= boll_lower and curr_close > boll_lower:
                 score = round(min(0.5 + (curr_close - boll_lower) / (boll_mid - boll_lower + 0.01) * 0.5, 1.0), 2)
                 signals.append(Signal(
                     ts_code=ts_code, trade_date=trade_date,
                     strategy=self.name, direction="BUY",
                     score=score,
-                    reason=f"触及布林下轨{boll_lower:.2f}后反弹至{curr_close:.2f}",
+                    reason=f"触及布林下轨{boll_lower:.2f}超卖企稳反弹至{curr_close:.2f}",
                     price_ref=curr_close,
                 ))
 
-            # 卖出: 前一日在轨内或触轨，今日高点触及上轨后收盘回落
-            elif (portfolio is None or has_position) and prev_close <= prev_boll_upper and curr_high >= boll_upper and curr_close < boll_upper:
-                score = round(min(0.5 + (boll_upper - curr_close) / (boll_upper - boll_mid + 0.01) * 0.5, 1.0), 2)
+            # 卖出: 当日最高点触及或突破布林带上轨，高抛止盈锁定胜率
+            elif (portfolio is None or has_position) and curr_high >= boll_upper:
+                score = round(min(0.6 + max(0.0, (curr_high - boll_upper) / (boll_upper - boll_mid + 0.01)) * 0.4, 0.95), 2)
                 signals.append(Signal(
                     ts_code=ts_code, trade_date=trade_date,
                     strategy=self.name, direction="SELL",
                     score=score,
-                    reason=f"触及布林上轨{boll_upper:.2f}后回落至{curr_close:.2f}",
+                    reason=f"触及布林上轨{boll_upper:.2f}逢高止盈",
                     price_ref=curr_close,
                 ))
 

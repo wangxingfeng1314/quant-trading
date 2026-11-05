@@ -1,5 +1,6 @@
 """均线金叉/死叉策略"""
 from typing import List
+import pandas as pd
 from strategies.base import BaseStrategy
 from core.models import Signal
 
@@ -53,8 +54,16 @@ class MACrossStrategy(BaseStrategy):
             price = df["close"].iloc[-1]
             has_position = portfolio is not None and portfolio.get_position(ts_code) is not None and not portfolio.get_position(ts_code).is_empty
 
-            # 金叉: 快线从下方穿越慢线
-            if not has_position and prev_fast <= prev_slow and curr_fast > curr_slow:
+            # 胜率增强过滤（剔除下跌通道假金叉与大阳线追高）
+            slow_up = curr_slow >= prev_slow * 0.9985
+            ma60 = df["ma60"].iloc[-1] if "ma60" in df.columns else price
+            trend_safe = pd.isna(ma60) or price >= ma60 * 0.97
+            candle_safe = (price >= df["open"].iloc[-1]) if "open" in df.columns else True
+            rsi = df["rsi14"].iloc[-1] if "rsi14" in df.columns else 50.0
+            not_overbought = pd.isna(rsi) or rsi < 75
+
+            # 金叉: 快线从下方穿越慢线 + 顺势企稳确认
+            if not has_position and prev_fast <= prev_slow and curr_fast > curr_slow and slow_up and trend_safe and candle_safe and not_overbought:
                 # 慢线方向与量能配合加分（历史胜率63.6%，校准合理高分位 0.65~0.90）
                 slope_bonus = 0.12 if curr_slow >= prev_slow else -0.05
                 vol_bonus = 0.08 if ("vol_ma5" in df.columns and df["vol_ma5"].iloc[-1] > 0 and df["volume"].iloc[-1] > df["vol_ma5"].iloc[-1] * 1.1) else 0.0
@@ -66,8 +75,8 @@ class MACrossStrategy(BaseStrategy):
                     direction="BUY",
                     score=score,
                     reason=f"MA{self.fast_period}({curr_fast:.2f}) 上穿 "
-                           f"MA{self.slow_period}({curr_slow:.2f})，金叉"
-                           f"{'（均线向上）' if curr_slow >= prev_slow else ''}",
+                           f"MA{self.slow_period}({curr_slow:.2f})，顺势金叉"
+                           f"{'（均线走平向上）' if curr_slow >= prev_slow else ''}",
                     price_ref=price,
                 ))
 

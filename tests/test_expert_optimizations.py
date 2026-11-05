@@ -311,7 +311,7 @@ def test_round3_custom_non_default_strategy_params():
     """测试第3轮 P0-1: 非默认自定义周期参数在各策略中动态计算生效（不再静默返回空或忽略参数）"""
     from strategies.ma_cross import MACrossStrategy
     from strategies.bollinger_reversal import BollingerReversalStrategy
-    from strategies.rsi_oversold import RSIOversoldStrategy
+    from strategies.signal_combo import SignalComboStrategy
     from strategies.kdj_cross import KDJCrossStrategy
 
     # 构造只含基础 OHLCV（不含 ma7/ma15/rsi6 等非默认列）的行情数据
@@ -336,10 +336,10 @@ def test_round3_custom_non_default_strategy_params():
     boll_sigs = boll_strat.on_bar("20260119", {"000001.SZ": df.iloc[:19]})
     assert isinstance(boll_sigs, list)
 
-    # 3. 自定义 RSI 周期 rsi_period=6 动态生效
-    rsi_strat = RSIOversoldStrategy(rsi_period=6, oversold=35)
-    rsi_sigs = rsi_strat.on_bar("20260119", {"000001.SZ": df.iloc[:19]})
-    assert len(rsi_sigs) == 1 and rsi_sigs[0].direction == "BUY"
+    # 3. 自定义 均线周期 ma_period=10 动态生效
+    sc_strat = SignalComboStrategy(ma_period=10, buy_threshold=2.0)
+    sc_sigs = sc_strat.on_bar("20260119", {"000001.SZ": df.iloc[:19]})
+    assert isinstance(sc_sigs, list)
 
     # 4. 自定义 KDJ 平滑周期 k_period=5, d_period=5 动态生效
     kdj_strat = KDJCrossStrategy(k_period=5, d_period=5)

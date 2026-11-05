@@ -61,7 +61,7 @@ print(f"（注：该成绩已正式永久存入系统数据库，打开 Web 端�
 print(f"3. 正在基于该套高胜率策略体系，扫描您自选股池当下的【最新实时交易信号】...", flush=True)
 sigs = scan_signals(
     universe=codes,
-    strategy_names=['signal_combo', 'ma_cross', 'ma_pullback'],
+    strategy_names=['signal_combo', 'kdj_cross', 'ma_cross', 'bollinger_reversal'],
     save=True,
     force_refresh=True
 )

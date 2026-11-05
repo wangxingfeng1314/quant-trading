@@ -1,5 +1,6 @@
 """KDJ金叉死叉策略"""
 from typing import List
+import pandas as pd
 from strategies.base import BaseStrategy
 from core.models import Signal
 
@@ -73,19 +74,23 @@ class KDJCrossStrategy(BaseStrategy):
                     ts_code=ts_code, trade_date=trade_date,
                     strategy=self.name, direction="BUY",
                     score=score,
-                    reason=f"KDJ低位金叉: K={curr_k:.1f}上穿D={curr_d:.1f}",
+                    reason=f"KDJ低位企稳金叉: K={curr_k:.1f}上穿D={curr_d:.1f}",
                     price_ref=price,
                 ))
 
-            # 死叉卖出: K下穿D 且 K在高位(>60)
-            elif (portfolio is None or has_position) and prev_k >= prev_d and curr_k < curr_d and curr_k > 60:
-                score = round(min(0.5 + (curr_k - 60) / 40 * 0.4 + (curr_d - curr_k) / 100, 1.0), 2)
-                signals.append(Signal(
-                    ts_code=ts_code, trade_date=trade_date,
-                    strategy=self.name, direction="SELL",
-                    score=score,
-                    reason=f"KDJ高位死叉: K={curr_k:.1f}下穿D={curr_d:.1f}",
-                    price_ref=price,
-                ))
+            # 卖出: K下穿D死叉且K在高位(>60)，或K进入极度超买区(K>=82)主动落袋止盈锁定胜率
+            elif (portfolio is None or has_position):
+                dead_cross = (prev_k >= prev_d and curr_k < curr_d and curr_k > 60)
+                overbought_exit = (curr_k >= 82)
+                if dead_cross or overbought_exit:
+                    score = round(min(0.55 + (curr_k - 60) / 40 * 0.4 + max(0, curr_d - curr_k) / 100, 1.0), 2)
+                    reason_desc = f"KDJ高位死叉: K={curr_k:.1f}下穿D={curr_d:.1f}" if dead_cross else f"KDJ高位超买触顶落袋: K={curr_k:.1f}>=82"
+                    signals.append(Signal(
+                        ts_code=ts_code, trade_date=trade_date,
+                        strategy=self.name, direction="SELL",
+                        score=score,
+                        reason=reason_desc,
+                        price_ref=price,
+                    ))
 
         return signals

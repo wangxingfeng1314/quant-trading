@@ -12,8 +12,9 @@ from data.indicators import apply_indicators
 
 
 def test_registry_not_empty():
-    """确保策略注册表成功自动发现至少 15 个策略"""
-    assert len(STRATEGY_REGISTRY) >= 15
+    """确保策略注册表成功自动发现精选的 4 大核心策略"""
+    assert len(STRATEGY_REGISTRY) == 4
+    assert set(STRATEGY_REGISTRY.keys()) == {"kdj_cross", "ma_cross", "bollinger_reversal", "signal_combo"}
 
 
 @pytest.mark.parametrize("strat_name, strat_cls", list(STRATEGY_REGISTRY.items()))
