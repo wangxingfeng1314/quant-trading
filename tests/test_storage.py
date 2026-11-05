@@ -386,3 +386,57 @@ class TestBatchGetLatest:
         codes = result["ts_code"].unique()
         assert "000001.SZ" in codes
         assert "600519.SH" in codes
+
+
+class TestCleanNonWatchlistData:
+    """清理非自选股行情数据单元测试"""
+
+    def test_get_and_clean_non_watchlist(self, sample_daily_df):
+        from data.storage import (save_daily, add_to_watchlist, add_position,
+                                  save_signal, get_non_watchlist_stocks_with_data,
+                                  clean_non_watchlist_data, get_daily, get_signals)
+        from core.models import Signal
+
+        # 插入三只股票的行情
+        df1 = sample_daily_df.copy()  # 000001.SZ
+        df2 = sample_daily_df.copy()
+        df2["ts_code"] = "600519.SH"
+        df3 = sample_daily_df.copy()
+        df3["ts_code"] = "300750.SZ"
+
+        save_daily(df1)
+        save_daily(df2)
+        save_daily(df3)
+
+        # 000001.SZ 加入自选，600519.SH 加入模拟持仓，300750.SZ 无身份（孤儿数据）
+        add_to_watchlist("000001.SZ")
+        add_position("600519.SH", 100, 1500.0, "2026-07-01")
+
+        # 插入 300750.SZ 的测试信号
+        sig = Signal(ts_code="300750.SZ", direction="BUY", trade_date="20260705",
+                     strategy="dual_ma", score=80.0, reason="test")
+        save_signal(sig)
+
+        # 1. 验证识别非自选且非持仓标的
+        orphan_codes = get_non_watchlist_stocks_with_data()
+        assert orphan_codes == ["300750.SZ"]
+
+        # 2. 安全守卫测试：尝试强行清理 000001.SZ (自选) 和 600519.SH (持仓)
+        res_guard = clean_non_watchlist_data(["000001.SZ", "600519.SH"])
+        assert res_guard["deleted_codes"] == []
+        assert res_guard["daily_rows"] == 0
+        assert len(get_daily("000001.SZ")) == len(df1)
+        assert len(get_daily("600519.SH")) == len(df2)
+
+        # 3. 正常清理孤儿数据
+        res_clean = clean_non_watchlist_data()
+        assert res_clean["deleted_codes"] == ["300750.SZ"]
+        assert res_clean["daily_rows"] == len(df3)
+        assert res_clean["signal_rows"] == 1
+        assert get_daily("300750.SZ").empty
+        signals = get_signals()
+        assert "300750.SZ" not in signals["ts_code"].values
+
+        # 4. 再次获取应为空
+        assert get_non_watchlist_stocks_with_data() == []
+

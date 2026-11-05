@@ -8,7 +8,8 @@ from datetime import date, datetime, timedelta
 from data.storage import (get_watchlist, add_to_watchlist, remove_from_watchlist,
                           get_stock_list, get_daily, get_signals, get_latest_date,
                           save_daily, get_positions, add_position, remove_position,
-                          clear_positions, get_instrument_list, batch_get_latest)
+                          clear_positions, get_instrument_list, batch_get_latest,
+                          clean_non_watchlist_data)
 from notifier.push import calc_atr_stops_and_sizing
 from data.fetcher import fetch_daily, fetch_instrument_daily
 from data.cleaner import clean_daily
@@ -175,6 +176,12 @@ def _show_watchlist():
                 format_func=format_stock,
                 key="remove_multiselect",
             )
+            clean_cache_on_rm = st.checkbox(
+                "同时彻底清除这些标的的本地K线与历史信号缓存（彻底移出回测与扫描候选池）",
+                value=False,
+                key="clean_cache_on_rm",
+                help="若勾选，将从本地数据库删除这几只标的的 daily_price 和 signal 历史记录，释放存储空间并让候选池保持清爽；若标的在模拟持仓中，系统将自动受保不予删除。"
+            )
             col_rm1, col_rm2 = st.columns([1, 2])
             with col_rm1:
                 confirm_del = st.form_submit_button("🗑️ 确认批量移除", type="primary", width="stretch")
@@ -187,7 +194,13 @@ def _show_watchlist():
                 else:
                     for code in remove_codes:
                         remove_from_watchlist(code)
-                    st.toast(f"✅ 已成功移除 {len(remove_codes)} 只自选股", icon="🗑️")
+                    if clean_cache_on_rm:
+                        clean_res = clean_non_watchlist_data(remove_codes)
+                        st.cache_data.clear()
+                        toast_msg = f"✅ 已成功移除 {len(remove_codes)} 只自选股，并彻底清除了 {len(clean_res['deleted_codes'])} 只标的的本地历史行情"
+                    else:
+                        toast_msg = f"✅ 已成功移除 {len(remove_codes)} 只自选股"
+                    st.toast(toast_msg, icon="🗑️")
                     st.rerun()
 
     # 分组管理（通过表单封装，彻底消除勾选即触发刷新和跳顶问题）

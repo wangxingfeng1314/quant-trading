@@ -15,9 +15,9 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-v0.4.0-blue" alt="version" />
+  <img src="https://img.shields.io/badge/version-v0.4.1-blue" alt="version" />
   <img src="https://img.shields.io/badge/python-3.11-green" alt="python" />
-  <img src="https://img.shields.io/badge/tests-191%20passed-brightgreen" alt="tests" />
+  <img src="https://img.shields.io/badge/tests-196%20passed-brightgreen" alt="tests" />
   <img src="https://img.shields.io/badge/streamlit-1.58-red" alt="streamlit" />
 </p>
 
@@ -310,7 +310,7 @@ results = grid_search_parallel(
 
 ## 🧪 测试与CI/CD
 
-### 单元测试（191个全部通过）
+### 单元测试（196个全部通过）
 
 ```bash
 # 运行全部测试
@@ -341,7 +341,7 @@ py -m pytest tests/test_tier_optimizations.py -v
 
 ```
 ✅ 语法检查（py_compile 全量扫描 50+ 文件）
-✅ pytest 全部 191 个测试
+✅ pytest 全部 196 个测试
 ✅ 关键模块 import 一致性验证
 ```
 
@@ -413,11 +413,11 @@ quant-trading/
 │   ├── backtest_service.py   # 回测/网格搜索/对比服务
 │   ├── signal_service.py     # 信号扫描/仲裁/通知服务
 │   └── validators.py         # 输入校验（股票代码/日期/资金）
-├── strategies/               # 17 个策略（因果律时序隔离，自动发现注册）
+├── strategies/               # 4 个精选核心策略（短线/中长线/震荡/综合，自动发现注册）
 ├── scripts/                  # 运维脚本（init_data 断层保护 + ETF 列表同步）
 ├── scheduler/                # APScheduler 定时调度（更新→扫描→推送闭环）
 ├── notifier/                 # 消息推送（5通道：Server酱/PushPlus/企微/钉钉/飞书）
-├── tests/                    # 191 个单元与回归测试（12个测试模块 100% 通过）
+├── tests/                    # 196 个单元与回归测试（13个测试模块 100% 通过）
 ├── .github/workflows/        # CI/CD
 ├── CHANGELOG.md              # 更新日志
 └── requirements.txt          # 版本锁定
@@ -467,6 +467,14 @@ class MyStrategy(BaseStrategy):
 
 详见 [CHANGELOG.md](./CHANGELOG.md)
 
+### v0.4.1 关键更新（2026-11-05）
+
+- 🏆 **四大风格精选冠军策略** — 对历史策略在 A 股次日开盘 (`next_open`) 实盘撮合环境下全量回测，精简保留胜率最高、回撤最低的四大王牌策略（短线 KDJ、中长线 MA趋势、震荡 BOLL反转、综合 信号共振），全方位优化胜率与假突破过滤
+- 🌐 **页面导航与 URL 双向同步** — 侧边栏单选导航与浏览器 URL (`?page=...`) 实时双向同步，支持 F5 刷新保留当前页面、直链直接定位与常用别名智能映射（如 `?page=bt`）
+- 🎨 **布局体验与空白 div 深度修复** — 彻底消除主区域及侧边栏标题上方的空白占位 div，收缩顶部冗余内边距，实现主界面与侧边栏标题顶格贴合
+- 🔍 **多股票搜索交互升级** — 回测与信号扫描的多股票选择全面升级为带实时模糊搜索的多选框控件 (`st.multiselect`)
+- 🧪 **196 个测试用例全部通过** — 新增 URL 路由与切页自动化测试套件，全量 196 个用例 100% 通过
+
 ### v0.4.0 关键更新（2026-09-16）
 
 - 🛡️ **突破策略因果律时序隔离** — 修复海龟突破 (`turtle.py`) 与唐奇安通道 (`donchian_breakout.py`) 时序基准错位，引入隔离的昨日基准 `prev_high_n` / `prev_upper`，彻底消除突破次日连阳重复发射买入信号的重大隐患
@@ -496,5 +504,5 @@ class MyStrategy(BaseStrategy):
 ---
 
 <p align="center">
-  Made with ❤️ for A股量化 | v0.4.0
+  Made with ❤️ for A股量化 | v0.4.1
 </p>

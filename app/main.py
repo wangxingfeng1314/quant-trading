@@ -256,7 +256,9 @@ if st.sidebar.button("🔄 更新自选股数据", type="primary", width="stretc
 
 # 数据库备份/恢复（使用 SQLite 原生在线热备 API，保障 WAL 模式一致性与文件锁安全）
 from core.config import DB_PATH
-from data.storage import backup_database, restore_database
+from data.storage import (backup_database, restore_database,
+                          get_non_watchlist_stocks_with_data, clean_non_watchlist_data,
+                          get_instrument_list)
 backup_dir = DB_PATH.parent / "backups"
 backup_dir.mkdir(exist_ok=True)
 
@@ -285,6 +287,29 @@ if backups:
                 st.rerun()
             except Exception as e:
                 st.error(f"❌ 恢复失败: {e}")
+
+# 清理非自选股的历史缓存数据
+try:
+    non_wl_cached = get_non_watchlist_stocks_with_data()
+    if non_wl_cached:
+        inst_df = get_instrument_list()
+        name_map = dict(zip(inst_df["ts_code"], inst_df["name"])) if not inst_df.empty else {}
+        with st.sidebar.popover(f"🧹 清理非自选缓存 ({len(non_wl_cached)}只)"):
+            st.markdown(f"**检测到 {len(non_wl_cached)} 只已移出自选的标的存有本地历史K线：**")
+            display_items = [f"`{c}` {name_map.get(c, '')}" for c in non_wl_cached]
+            st.caption("、".join(display_items))
+            st.info("💡 清理后可减少数据库体积，回测与信号扫描多选框默认不再显示这些已删标的。持仓标的受安全保护绝不误删。")
+            confirm_clean = st.checkbox("确认彻底清理这部分历史K线与信号", key="clean_non_wl_confirm")
+            if st.button("🗑️ 立即彻底清除", type="secondary", disabled=not confirm_clean, key="btn_clean_non_wl", width="stretch"):
+                try:
+                    res = clean_non_watchlist_data()
+                    st.cache_data.clear()
+                    st.success(f"✅ 清理完成！共清除 {len(res['deleted_codes'])} 只标的，删除 {res['daily_rows']} 条日线数据")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"❌ 清理失败: {e}")
+except Exception:
+    pass
 
 # ============================================================
 # 全局主题与切页过渡注入（挂载于侧边栏最底部，绝对不占据侧边栏或主区顶部空间）

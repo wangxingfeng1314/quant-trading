@@ -1077,6 +1077,56 @@ def get_watchlist() -> pd.DataFrame:
         return pd.read_sql("SELECT * FROM watchlist ORDER BY added_date DESC", conn)
 
 
+def get_non_watchlist_stocks_with_data() -> list[str]:
+    """获取所有在 daily_price 中有行情数据，但既不在自选股中、也不在模拟持仓中的标的代码"""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT ts_code FROM daily_price
+            WHERE ts_code NOT IN (SELECT ts_code FROM watchlist)
+              AND ts_code NOT IN (SELECT ts_code FROM position)
+            ORDER BY ts_code
+            """
+        ).fetchall()
+        return [r[0] for r in rows]
+
+
+def clean_non_watchlist_data(codes: list[str] | None = None) -> dict:
+    """清理非自选股且非持仓标的的本地行情日线与历史信号
+
+    参数:
+        codes: 指定清理的代码列表，若为 None 则清理全部非自选股标的
+    返回:
+        {"deleted_codes": list[str], "daily_rows": int, "signal_rows": int}
+    """
+    if codes is None:
+        codes = get_non_watchlist_stocks_with_data()
+    else:
+        # 安全守卫：绝不清理当前自选股或模拟持仓中的标的
+        with get_conn() as conn:
+            protected_rows = conn.execute(
+                "SELECT ts_code FROM watchlist UNION SELECT ts_code FROM position"
+            ).fetchall()
+            protected = {r[0] for r in protected_rows}
+        codes = [c for c in codes if c not in protected]
+
+    if not codes:
+        return {"deleted_codes": [], "daily_rows": 0, "signal_rows": 0}
+
+    placeholders = ",".join(["?"] * len(codes))
+    with get_conn() as conn:
+        cur1 = conn.execute(f"DELETE FROM daily_price WHERE ts_code IN ({placeholders})", codes)
+        deleted_daily = cur1.rowcount
+        cur2 = conn.execute(f"DELETE FROM signal WHERE ts_code IN ({placeholders})", codes)
+        deleted_signals = cur2.rowcount
+
+    return {
+        "deleted_codes": codes,
+        "daily_rows": deleted_daily,
+        "signal_rows": deleted_signals,
+    }
+
+
 # ============================================================
 # 大盘指数 (index_daily) 表操作
 # ============================================================

@@ -93,7 +93,26 @@ def _show_scan():
         type_map = dict(zip(inst_df["ts_code"], inst_df["type"])) if not inst_df.empty else {}
         watchlist_df = get_watchlist()
         wl_codes = [c for c in watchlist_df["ts_code"].tolist() if c in stocks_with_data] if not watchlist_df.empty else []
+        extra_codes = [c for c in stocks_with_data if c not in wl_codes]
         core_10 = [c for c in ['600900.SH', '600036.SH', '601318.SH', '600660.SH', '600690.SH', '600887.SH', '600089.SH', '000725.SZ', '002241.SZ', '600941.SH'] if c in stocks_with_data]
+
+        show_sig_extra = False
+        if extra_codes:
+            show_sig_extra = st.checkbox(
+                f"🌐 包含历史已下载的其他标的 (+{len(extra_codes)}只)",
+                value=False,
+                key="sig_show_extra",
+                help="默认仅展示当前自选股列表。勾选后可搜索并选入之前下载过历史K线的其他标的。"
+            )
+
+        candidate_stocks = stocks_with_data if show_sig_extra or not wl_codes else wl_codes
+
+        def format_sig_label(c):
+            tag = type_map.get(c, '标的')
+            if show_sig_extra and extra_codes:
+                src_tag = "自选" if c in wl_codes else "历史"
+                return f"[{src_tag}|{tag}] {c} {name_map.get(c, '')}"
+            return f"[{tag}] {c} {name_map.get(c, '')}"
 
         sc1, sc2, sc3 = st.columns([1.1, 1.2, 0.9])
         with sc1:
@@ -102,18 +121,23 @@ def _show_scan():
                 st.rerun()
         with sc2:
             if st.button("⚡ 选入核心白马", key="sig_quick_core"):
-                st.session_state["sig_multiselect"] = sorted(list(set(st.session_state.get("sig_multiselect", []) + core_10)))
+                available_core = [c for c in core_10 if c in candidate_stocks]
+                st.session_state["sig_multiselect"] = sorted(list(set(st.session_state.get("sig_multiselect", []) + available_core)))
                 st.rerun()
         with sc3:
             if st.button("🗑️ 清空标的", key="sig_quick_clear"):
                 st.session_state["sig_multiselect"] = []
                 st.rerun()
 
+        current_sig_selected = [c for c in st.session_state.get("sig_multiselect", []) if c in candidate_stocks]
+        if not current_sig_selected and "sig_multiselect" not in st.session_state:
+            current_sig_selected = wl_codes[:5] if wl_codes else candidate_stocks[:5]
+
         selected_scan_stocks = st.multiselect(
             "选择要扫描的多只股票（多选框·支持输入代码/中文名称搜索）",
-            options=stocks_with_data,
-            default=st.session_state.get("sig_multiselect", core_10 if core_10 else stocks_with_data[:5]),
-            format_func=lambda c: f"[{type_map.get(c, '标的')}] {c} {name_map.get(c, '')}",
+            options=candidate_stocks,
+            default=current_sig_selected,
+            format_func=format_sig_label,
             key="sig_multiselect",
             placeholder="🔍 输入股票代码或名称搜索并多选..."
         )

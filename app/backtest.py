@@ -184,12 +184,29 @@ def _show_run_backtest():
             name_map = dict(zip(stock_df_data["ts_code"], stock_df_data["name"]))
             type_map = dict(zip(stock_df_data["ts_code"], stock_df_data["type"]))
 
-            def format_bt_label(c):
-                return f"[{type_map.get(c, '标的')}] {c} {name_map.get(c, '')}"
-
             watchlist = get_watchlist()
             wl_codes = [c for c in watchlist["ts_code"].tolist() if c in all_codes] if not watchlist.empty else []
+            extra_codes = [c for c in all_codes if c not in wl_codes]
             core_10 = [c for c in ['600900.SH', '600036.SH', '601318.SH', '600660.SH', '600690.SH', '600887.SH', '600089.SH', '000725.SZ', '002241.SZ', '600941.SH'] if c in all_codes]
+
+            # 候选池过滤：默认严格仅展示当前自选股（若自选股有数据）
+            show_extra = False
+            if extra_codes:
+                show_extra = st.checkbox(
+                    f"🌐 包含历史已下载的其他标的 (+{len(extra_codes)}只)",
+                    value=False,
+                    key="bt_show_extra",
+                    help="默认仅展示当前自选股列表。勾选后可搜索并选入之前下载过历史K线的其他标的。"
+                )
+
+            candidate_codes = all_codes if show_extra or not wl_codes else wl_codes
+
+            def format_bt_label(c):
+                tag = type_map.get(c, '标的')
+                if show_extra and extra_codes:
+                    src_tag = "自选" if c in wl_codes else "历史"
+                    return f"[{src_tag}|{tag}] {c} {name_map.get(c, '')}"
+                return f"[{tag}] {c} {name_map.get(c, '')}"
 
             # 快捷操作栏
             btn_col1, btn_col2, btn_col3 = st.columns([1.1, 1.2, 0.9])
@@ -198,19 +215,25 @@ def _show_run_backtest():
                     st.session_state["bt_multiselect"] = sorted(list(set(st.session_state.get("bt_multiselect", []) + wl_codes)))
                     st.rerun()
             with btn_col2:
-                if st.button("⚡ 选入核心白马", key="bt_quick_core", help=f"一键选入 {len(core_10)} 只核心龙头股池"):
-                    st.session_state["bt_multiselect"] = sorted(list(set(st.session_state.get("bt_multiselect", []) + core_10)))
+                if st.button("⚡ 选入核心白马", key="bt_quick_core", help="一键选入核心白马股池"):
+                    available_core = [c for c in core_10 if c in candidate_codes]
+                    st.session_state["bt_multiselect"] = sorted(list(set(st.session_state.get("bt_multiselect", []) + available_core)))
                     st.rerun()
             with btn_col3:
                 if st.button("🗑️ 清空已选", key="bt_quick_clear"):
                     st.session_state["bt_multiselect"] = []
                     st.rerun()
 
+            # 多选默认值：确保仅包含在 candidate_codes 范围内的合法代码
+            current_selected = [c for c in st.session_state.get("bt_multiselect", []) if c in candidate_codes]
+            if not current_selected and "bt_multiselect" not in st.session_state:
+                current_selected = wl_codes[:5] if wl_codes else candidate_codes[:5]
+
             # 多选框主体（支持输入代码或名称模糊搜索、多项勾选）
             selected_codes = st.multiselect(
                 "选择多只股票（多选框·支持输入代码/中文名称快速搜索）",
-                options=all_codes,
-                default=st.session_state.get("bt_multiselect", core_10 if core_10 else all_codes[:5]),
+                options=candidate_codes,
+                default=current_selected,
                 format_func=format_bt_label,
                 key="bt_multiselect",
                 placeholder="🔍 点击此处或直接输入股票代码/名称搜索多选..."
@@ -516,12 +539,28 @@ def _show_grid_search():
         name_map = dict(zip(stock_df_data["ts_code"], stock_df_data["name"]))
         type_map = dict(zip(stock_df_data["ts_code"], stock_df_data["type"]))
 
-        def format_gs_label(c):
-            return f"[{type_map.get(c, '标的')}] {c} {name_map.get(c, '')}"
-
         watchlist = get_watchlist()
         wl_codes = [c for c in watchlist["ts_code"].tolist() if c in all_codes] if not watchlist.empty else []
+        extra_codes = [c for c in all_codes if c not in wl_codes]
         core_10 = [c for c in ['600900.SH', '600036.SH', '601318.SH', '600660.SH', '600690.SH', '600887.SH', '600089.SH', '000725.SZ', '002241.SZ', '600941.SH'] if c in all_codes]
+
+        show_gs_extra = False
+        if extra_codes:
+            show_gs_extra = st.checkbox(
+                f"🌐 包含历史已下载的其他标的 (+{len(extra_codes)}只)",
+                value=False,
+                key="gs_show_extra",
+                help="默认仅展示当前自选股列表。勾选后可搜索并选入之前下载过历史K线的其他标的。"
+            )
+
+        candidate_codes = all_codes if show_gs_extra or not wl_codes else wl_codes
+
+        def format_gs_label(c):
+            tag = type_map.get(c, '标的')
+            if show_gs_extra and extra_codes:
+                src_tag = "自选" if c in wl_codes else "历史"
+                return f"[{src_tag}|{tag}] {c} {name_map.get(c, '')}"
+            return f"[{tag}] {c} {name_map.get(c, '')}"
 
         gcol1, gcol2, gcol3 = st.columns([1.1, 1.2, 0.9])
         with gcol1:
@@ -530,17 +569,22 @@ def _show_grid_search():
                 st.rerun()
         with gcol2:
             if st.button("⚡ 选入核心白马", key="gs_quick_core"):
-                st.session_state["gs_multiselect"] = sorted(list(set(st.session_state.get("gs_multiselect", []) + core_10)))
+                available_core = [c for c in core_10 if c in candidate_codes]
+                st.session_state["gs_multiselect"] = sorted(list(set(st.session_state.get("gs_multiselect", []) + available_core)))
                 st.rerun()
         with gcol3:
             if st.button("🗑️ 清空标的", key="gs_quick_clear"):
                 st.session_state["gs_multiselect"] = []
                 st.rerun()
 
+        current_gs_selected = [c for c in st.session_state.get("gs_multiselect", []) if c in candidate_codes]
+        if not current_gs_selected and "gs_multiselect" not in st.session_state:
+            current_gs_selected = wl_codes[:3] if wl_codes else candidate_codes[:2]
+
         selected_codes = st.multiselect(
             "选择多只标的（多选框·支持输入代码/中文名称搜索）",
-            options=all_codes,
-            default=st.session_state.get("gs_multiselect", core_10[:3] if core_10 else all_codes[:2]),
+            options=candidate_codes,
+            default=current_gs_selected,
             format_func=format_gs_label,
             key="gs_multiselect",
             placeholder="🔍 点击此处或直接输入代码/名称搜索多只标的..."
