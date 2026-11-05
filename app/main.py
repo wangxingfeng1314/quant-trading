@@ -11,10 +11,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# 注入全局深色金融主题与即时切页监听
 from app.theme import inject_theme_css, inject_page_transition_js
-inject_theme_css()
-inject_page_transition_js()
 
 # ============================================================
 # 登录认证（可选，通过 APP_AUTH_ENABLED 环境变量启用）
@@ -27,6 +24,7 @@ if APP_AUTH_ENABLED:
         st.session_state["authenticated"] = False
 
     if not st.session_state["authenticated"]:
+        inject_theme_css()
         st.title("🔐 A股量化交易系统 - 登录")
         st.markdown("---")
 
@@ -183,18 +181,15 @@ if st.query_params.get("page") != active_slug:
     st.query_params["page"] = active_slug
 
 # ============================================================
-# 主区域：由前端 JS 在 0ms 瞬间抹除上一个页面并拉起过渡遮罩，
-# Python 渲染完成后由观察器平滑渐入，避免旧画面残留
+# 主区域：渲染当前页面模块（顶部即为页面标题，无多余占位 div）
 # ============================================================
-page_slot = st.empty()
-with page_slot.container():
-    try:
-        module = __import__(PAGES[page], fromlist=["show"])
-        module.show()
-    except Exception as e:
-        st.error(f"🚨 页面加载失败: {e}")
-        with st.expander("查看错误详情"):
-            st.code(traceback.format_exc())
+try:
+    module = __import__(PAGES[page], fromlist=["show"])
+    module.show()
+except Exception as e:
+    st.error(f"🚨 页面加载失败: {e}")
+    with st.expander("查看错误详情"):
+        st.code(traceback.format_exc())
 
 # ============================================================
 # 侧边栏其余状态（独立于主区域，主页面渲染后再填充）
@@ -290,3 +285,10 @@ if backups:
                 st.rerun()
             except Exception as e:
                 st.error(f"❌ 恢复失败: {e}")
+
+# ============================================================
+# 全局主题与切页过渡注入（挂载于侧边栏最底部，绝对不占据侧边栏或主区顶部空间）
+# ============================================================
+with st.sidebar:
+    inject_theme_css()
+    inject_page_transition_js()

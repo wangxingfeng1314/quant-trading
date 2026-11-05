@@ -50,7 +50,67 @@ MAIN_EXTRA = """
                     radial-gradient(1000px 500px at 0% 0%, rgba(38,166,154,0.05), transparent),
                     #0a0e17;
     }
-    [data-testid="stHeader"] { background: transparent; }
+    [data-testid="stHeader"] {
+        background: transparent !important;
+        height: 2.5rem !important;
+    }
+
+    /* ===== 消除顶部空白 div 与过大间距 ===== */
+    .main .block-container,
+    div[data-testid="stMainBlockContainer"],
+    [data-testid="stAppViewBlockContainer"] {
+        padding-top: 1.8rem !important;
+        padding-bottom: 4rem !important;
+        padding-left: 2.5rem !important;
+        padding-right: 2.5rem !important;
+        max-width: 100% !important;
+    }
+
+    /* 侧边栏顶部紧凑对齐，消除上方多余空白 */
+    section[data-testid="stSidebar"] [data-testid="stSidebarHeader"] {
+        padding-top: 0.2rem !important;
+        padding-bottom: 0 !important;
+        height: auto !important;
+        min-height: auto !important;
+    }
+    section[data-testid="stSidebar"] [data-testid="stSidebarContent"] {
+        padding-top: 0.2rem !important;
+    }
+    section[data-testid="stSidebar"] h1,
+    section[data-testid="stSidebar"] h2,
+    section[data-testid="stSidebar"] h3 {
+        color: #ffd54f;
+        margin-top: 0 !important;
+        padding-top: 0 !important;
+    }
+
+    /* 彻底隐藏所有 0 高度组件容器、空 markdown 容器与无感 iframe，消除任何空白 div */
+    div[data-testid="stCustomComponentV1"]:has(iframe[height="0"]),
+    div[data-testid="stCustomComponentV1"]:has(iframe[style*="height: 0"]),
+    div[data-testid="stCustomComponentV1"]:has(iframe[style*="height:0"]),
+    .element-container:has(iframe[height="0"]),
+    .element-container:has([data-testid="stCustomComponentV1"]),
+    div[data-testid="stMarkdownContainer"]:empty,
+    .element-container:has(div[data-testid="stMarkdownContainer"]:empty),
+    iframe[height="0"],
+    iframe[title="streamlit_components.v1.components.html"] {
+        display: none !important;
+        height: 0 !important;
+        min-height: 0 !important;
+        max-height: 0 !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        border: none !important;
+        position: absolute !important;
+        pointer-events: none !important;
+        visibility: hidden !important;
+    }
+
+    /* 页面标题紧凑无多余顶部外边距 */
+    h1, [data-testid="stHeadingWithActionElements"] h1 {
+        margin-top: 0 !important;
+        padding-top: 0 !important;
+    }
 
     /* ===== 卡片容器 ===== */
     .st-key-card, div[data-testid="stVerticalBlockBorderWrapper"] {
@@ -215,8 +275,7 @@ MAIN_EXTRA = """
 
 def inject_theme_css():
     """注入全局主题 CSS（main.py 调用一次）"""
-    st.markdown(SIDEBAR_EXTRA, unsafe_allow_html=True)
-    st.markdown(MAIN_EXTRA, unsafe_allow_html=True)
+    st.markdown(SIDEBAR_EXTRA + "\n" + MAIN_EXTRA, unsafe_allow_html=True)
 
 
 def inject_page_transition_js():
