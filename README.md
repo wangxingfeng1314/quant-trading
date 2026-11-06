@@ -61,7 +61,7 @@ py run.py
 ### ⏰ 每日推荐工作流
 
 ```
-17:00 定时任务自动更新数据
+15:10 定时任务自动更新数据
   ↓
 🏠 首页看板 → 看大盘 + 数据健康度 + 自选股快照
   ↓
@@ -210,7 +210,7 @@ py scripts/init_data.py --stocks 300 --resume   # 断点续传
 
 | 任务名 | 触发时间 | 脚本 |
 |:-------|:---------|:-----|
-| `QuantTrading-DataUpdate` | 每个工作日 17:00 | `scripts/update_data.bat` |
+| `QuantTrading-DataUpdate` | 每个工作日 15:10 | `scripts/update_data.bat` |
 
 ```bash
 schtasks /query /tn QuantTrading-DataUpdate  # 查看状态
@@ -236,7 +236,8 @@ DATA_START_DATE=20210701     # 数据起始日期
 
 # 定时调度
 SCHEDULER_ENABLED=true
-SCHEDULER_HOUR=17
+SCHEDULER_HOUR=15
+SCHEDULER_MINUTE=10
 
 # 安全
 APP_AUTH_ENABLED=false       # 启用登录认证（true/false）

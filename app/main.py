@@ -61,6 +61,8 @@ def _cached_db_overview():
 @st.cache_data(ttl=600)
 def _cached_schtasks_caption():
     import subprocess
+    from core.config import SCHEDULER_HOUR, SCHEDULER_MINUTE
+    schedule_str = f"{SCHEDULER_HOUR:02d}:{SCHEDULER_MINUTE:02d}"
     try:
         result = subprocess.run(
             ["schtasks", "/query", "/tn", "QuantTrading-DataUpdate", "/fo", "LIST", "/v"],
@@ -70,10 +72,10 @@ def _cached_schtasks_caption():
             for line in result.stdout.split("\n"):
                 if "下次运行时间" in line or "状态" in line:
                     return f"⏰ {line.strip()}"
-            return "⏰ 定时任务: 17:00 每日执行"
+            return f"⏰ 定时任务: {schedule_str} 每日执行"
         return "⏰ 定时任务: 未配置"
     except Exception:
-        return "⏰ 定时任务: 17:00 每日执行"
+        return f"⏰ 定时任务: {schedule_str} 每日执行"
 
 # ============================================================
 # 页面路由表与 URL 映射定义

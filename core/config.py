@@ -93,17 +93,17 @@ DEFAULT_CAPITAL = float(os.getenv("DEFAULT_CAPITAL", "100000"))
 # ============================================================
 # 定时调度任务配置
 #   SCHEDULER_ENABLED: 是否启用定时更新（默认开启）
-#   SCHEDULER_HOUR:    每日执行的小时（默认 17:00，收盘后）
-#   SCHEDULER_MINUTE:  执行的分钟（默认 00）
+#   SCHEDULER_HOUR:    每日执行的小时（默认 15:10，收盘后）
+#   SCHEDULER_MINUTE:  执行的分钟（默认 10）
 # ============================================================
 SCHEDULER_ENABLED = os.getenv("SCHEDULER_ENABLED", "true").lower() == "true"
 # 字符串转布尔： "true"/"1"→True, 其他→False
 
-SCHEDULER_HOUR = int(os.getenv("SCHEDULER_HOUR", "17"))
-# 定时任务小时（24小时制，默认 17点）
+SCHEDULER_HOUR = int(os.getenv("SCHEDULER_HOUR", "15"))
+# 定时任务小时（24小时制，默认 15点）
 
-SCHEDULER_MINUTE = int(os.getenv("SCHEDULER_MINUTE", "0"))
-# 定时任务分钟（默认 0分）
+SCHEDULER_MINUTE = int(os.getenv("SCHEDULER_MINUTE", "10"))
+# 定时任务分钟（默认 10分）
 
 # ============================================================
 # 日志目录管理
