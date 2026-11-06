@@ -71,6 +71,7 @@ EXPECTED_TABLES = {
             "added_date": "TEXT",
             "note": "TEXT",
             "group_name": "TEXT",
+            "recommended_strategy": "TEXT",
         },
         "pk": "ts_code",
     },

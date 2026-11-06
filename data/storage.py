@@ -312,6 +312,10 @@ def _run_migrations(conn):
         (3, """
             ALTER TABLE backtest_trade ADD COLUMN context_snapshot TEXT;
         """),
+        # v4: 为 watchlist 表添加 recommended_strategy 列（AI推荐适配策略）
+        (4, """
+            ALTER TABLE watchlist ADD COLUMN recommended_strategy TEXT DEFAULT '';
+        """),
     ]
 
     for version, sql in MIGRATIONS:
@@ -443,7 +447,8 @@ def init_db():
                 ts_code    TEXT PRIMARY KEY,      -- 股票代码
                 added_date TEXT,                  -- 添加日期
                 note       TEXT,                  -- 备注
-                group_name TEXT DEFAULT ''         -- 分组（如"长线池"、"短线池"）
+                group_name TEXT DEFAULT '',       -- 分组（如"长线池"、"短线池"）
+                recommended_strategy TEXT DEFAULT '' -- 推荐策略（智能回测或行业规则匹配结果）
             );
 
             -- 大盘指数日线表（上证/深证/创业板）
@@ -1037,13 +1042,34 @@ def get_backtest_trades(backtest_id: int) -> pd.DataFrame:
 # 自选股 (watchlist) 表操作
 # ============================================================
 
-def add_to_watchlist(ts_code: str, note: str = ""):
-    """添加或更新自选股（INSERT OR REPLACE）"""
+def add_to_watchlist(ts_code: str, note: str = "", group_name: str = "", recommended_strategy: str = ""):
+    """添加或更新自选股（若已存在，未指定的值自动保留原记录）"""
     from datetime import datetime
     with get_conn() as conn:
+        existing = conn.execute(
+            "SELECT group_name, recommended_strategy FROM watchlist WHERE ts_code = ?",
+            (ts_code,)
+        ).fetchone()
+        if existing:
+            if not group_name and existing[0]:
+                group_name = existing[0]
+            if not recommended_strategy and existing[1]:
+                recommended_strategy = existing[1]
+
         conn.execute(
-            "INSERT OR REPLACE INTO watchlist (ts_code, added_date, note) VALUES (?, ?, ?)",
-            (ts_code, datetime.now().strftime("%Y-%m-%d"), note)
+            """INSERT OR REPLACE INTO watchlist 
+               (ts_code, added_date, note, group_name, recommended_strategy) 
+               VALUES (?, ?, ?, ?, ?)""",
+            (ts_code, datetime.now().strftime("%Y-%m-%d"), note, group_name, recommended_strategy)
+        )
+
+
+def update_watchlist_recommendation(ts_code: str, recommended_strategy: str):
+    """更新自选股推荐策略标签"""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE watchlist SET recommended_strategy = ? WHERE ts_code = ?",
+            (recommended_strategy, ts_code)
         )
 
 

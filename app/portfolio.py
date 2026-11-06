@@ -20,6 +20,7 @@ from data.indicators import apply_indicators
 from strategies import STRATEGY_REGISTRY
 from engine.scanner import scan_signals
 from services.validators import normalize_stock_code
+from services.strategy_recommender import evaluate_stock_strategy, batch_update_watchlist_recommendations
 
 
 def show():
@@ -61,13 +62,27 @@ def _show_watchlist():
             with col_a:
                 selected = st.selectbox("选择要添加的标的", options, key="wl_select",
                                         label_visibility="collapsed")
-                download_data = st.checkbox("同时下载历史数据", value=True, key="wl_download",
-                                            help="勾选后将自动下载近5年的历史数据并扫描信号")
+                parts = selected.split(" ")
+                sel_code = parts[1] if len(parts) >= 2 else parts[0]
+                sel_match = filtered[filtered["ts_code"] == sel_code]
+                sel_row = sel_match.iloc[0] if not sel_match.empty else None
+                sel_name = sel_row["name"] if sel_row is not None else ""
+                sel_ind = sel_row.get("industry", "") if sel_row is not None else ""
+
+                # 智能策略分析卡片（实时诊断标的性格与匹配策略）
+                eval_rec = evaluate_stock_strategy(sel_code, name=sel_name, industry=sel_ind)
+                if eval_rec.get("is_backtested"):
+                    st.info(f"💡 **AI 策略适配诊断**：历史回测验证该标的最匹配 **{eval_rec['tag']}**\n\n> 📌 {eval_rec['reason']}")
+                else:
+                    st.info(f"💡 **AI 策略适配建议**：{eval_rec['reason']} 添加并下载数据后系统将自动进行深度回测校准。")
+
+                download_data = st.checkbox("同时下载历史数据并自动回测匹配策略", value=True, key="wl_download",
+                                            help="勾选后将自动下载近5年的历史数据、全策略回测匹配最佳策略标签并扫描最新信号")
             with col_b:
                 if st.button("✅ 确认添加", key="wl_add"):
                     parts = selected.split(" ")
                     ts_code = parts[1] if len(parts) >= 2 else parts[0]
-                    add_to_watchlist(ts_code, st.session_state.wl_note)
+                    rec_tag = eval_rec["tag"]
 
                     # 自动下载该标的的历史数据（如果用户勾选）
                     if download_data:
@@ -85,6 +100,13 @@ def _show_watchlist():
                                 else:
                                     st.warning(f"{selected} 暂无可用数据，稍后可通过更新获取")
 
+                        # 数据就绪后，执行全策略回测校准最佳策略
+                        if data_ready or (latest and latest >= end):
+                            with st.spinner(f"🎯 正在深度分析 {selected} 的最佳策略..."):
+                                deep_rec = evaluate_stock_strategy(ts_code, name=sel_name, industry=sel_ind)
+                                rec_tag = deep_rec["tag"]
+                                st.toast(f"🎯 策略匹配完成：{selected} 最适合【{deep_rec['strategy_cn']}】", icon="🏆")
+
                         # 数据就绪后，自动扫描一次信号
                         if data_ready:
                             with st.spinner(f"🔍 正在扫描 {selected} 的信号..."):
@@ -99,7 +121,8 @@ def _show_watchlist():
                                 else:
                                     st.toast(f"📡 {selected} 暂无信号", icon="✅")
 
-                    st.success(f"已添加 {selected}")
+                    add_to_watchlist(ts_code, st.session_state.wl_note, recommended_strategy=rec_tag)
+                    st.success(f"已添加 {selected}，匹配策略：{rec_tag}")
                     st.rerun()
         else:
             st.info("未找到匹配的股票")
@@ -112,12 +135,21 @@ def _show_watchlist():
         st.info("暂无自选股，请添加")
         return
 
-    # 分组筛选
+    # 分组筛选与智能策略重新评估
     from data.storage import get_watchlist_groups, update_watchlist_group
     groups = get_watchlist_groups()
-    group_filter = st.selectbox("按分组筛选", ["全部", *groups], key="wl_group_filter")
-    if group_filter != "全部":
-        watchlist = watchlist[watchlist["group_name"] == group_filter]
+    col_f1, col_f2 = st.columns([3, 1])
+    with col_f1:
+        group_filter = st.selectbox("按分组筛选", ["全部", *groups], key="wl_group_filter")
+        if group_filter != "全部":
+            watchlist = watchlist[watchlist["group_name"] == group_filter]
+    with col_f2:
+        st.markdown("")
+        if st.button("🎯 重新评估策略", key="btn_refresh_rec", help="重新对当前自选股进行快速全策略回测并更新推荐标签", width="stretch"):
+            with st.spinner("正在智能评估自选股最佳策略..."):
+                updated_count = batch_update_watchlist_recommendations(force=True)
+                st.toast(f"✅ 已成功更新 {updated_count} 只自选股的推荐策略", icon="🎯")
+                st.rerun()
 
     name_map = dict(zip(stock_df["ts_code"], stock_df["name"])) if not stock_df.empty else {}
 
@@ -132,12 +164,14 @@ def _show_watchlist():
     rows = []
     for _, wl_row in watchlist.iterrows():
         ts_code = wl_row["ts_code"]
+        rec_tag = wl_row.get("recommended_strategy") or "-"
         latest = latest_by_code.get(ts_code)
         if latest is None:
             rows.append({
                 "股票": format_stock_cn(ts_code, name_map),
                 "最新价": "-",
                 "涨跌幅": "-",
+                "推荐策略": rec_tag,
                 "分组": wl_row.get("group_name", ""),
                 "备注": wl_row.get("note", ""),
             })
@@ -147,6 +181,7 @@ def _show_watchlist():
             "股票": format_stock_cn(ts_code, name_map),
             "最新价": f"¥{latest['close']:.2f}",
             "涨跌幅": f"{latest.get('pct_chg', 0):.2f}%",
+            "推荐策略": rec_tag,
             "分组": wl_row.get("group_name", ""),
             "备注": wl_row.get("note", ""),
         })

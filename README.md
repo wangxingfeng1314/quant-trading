@@ -15,9 +15,9 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-v0.4.1-blue" alt="version" />
+  <img src="https://img.shields.io/badge/version-v0.4.2-blue" alt="version" />
   <img src="https://img.shields.io/badge/python-3.11-green" alt="python" />
-  <img src="https://img.shields.io/badge/tests-196%20passed-brightgreen" alt="tests" />
+  <img src="https://img.shields.io/badge/tests-201%20passed-brightgreen" alt="tests" />
   <img src="https://img.shields.io/badge/streamlit-1.58-red" alt="streamlit" />
 </p>
 
@@ -466,6 +466,14 @@ class MyStrategy(BaseStrategy):
 ## 📜 Changelog
 
 详见 [CHANGELOG.md](./CHANGELOG.md)
+
+### v0.4.2 关键更新（2026-11-06）
+
+- 🎯 **自选股 AI 策略智能推荐与性格诊断** — 研发 `services/strategy_recommender.py` 智能推荐引擎，结合历史行情对 4 大冠军策略进行快速真实撮合回测，自动为自选股计算最佳适配策略、胜率与收益。
+- 💼 **持仓管理「推荐策略」列** — 在自选股列表中增加推荐策略展示，一目了然看清适合做短线 KDJ、震荡布林还是中长线均线趋势。
+- 🔍 **添加自选股实时诊断与回测匹配** — 搜索选中标的时即时展现 AI 策略诊断卡片，添加标的时自动下载日线并进行深度策略回测校准。
+- 📊 **标的数据补全** — 彻底补齐士兰微 (`600460.SH`) 完整 5 年日线历史数据（1296 条）。
+- 🧪 **201 项测试全量通过** — 新增策略推荐单元测试，全量 201 项自动化测试 100% 通过。
 
 ### v0.4.1 关键更新（2026-11-05）
 

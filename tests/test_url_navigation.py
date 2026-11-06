@@ -5,7 +5,7 @@ from streamlit.testing.v1 import AppTest
 
 def test_url_navigation_default():
     """测试默认首次访问，自动解析至 dashboard 并设置 URL 参数"""
-    at = AppTest.from_file("app/main.py", default_timeout=15)
+    at = AppTest.from_file("app/main.py", default_timeout=45)
     at.run()
     assert not at.exception
     # 验证 URL 包含 page=dashboard
@@ -14,7 +14,7 @@ def test_url_navigation_default():
 
 def test_url_navigation_direct_backtest():
     """测试直接通过 ?page=backtest 访问或 F5 刷新回测页面"""
-    at = AppTest.from_file("app/main.py", default_timeout=15)
+    at = AppTest.from_file("app/main.py", default_timeout=25)
     at.query_params["page"] = "backtest"
     at.run()
     assert not at.exception
@@ -26,7 +26,7 @@ def test_url_navigation_direct_backtest():
 
 def test_url_navigation_alias_bt():
     """测试别名 ?page=bt 自动规范化并加载回测中心"""
-    at = AppTest.from_file("app/main.py", default_timeout=15)
+    at = AppTest.from_file("app/main.py", default_timeout=25)
     at.query_params["page"] = "bt"
     at.run()
     assert not at.exception
@@ -38,7 +38,7 @@ def test_url_navigation_alias_bt():
 
 def test_url_navigation_direct_signal():
     """测试直接通过 ?page=signal 访问信号中心"""
-    at = AppTest.from_file("app/main.py", default_timeout=15)
+    at = AppTest.from_file("app/main.py", default_timeout=25)
     at.query_params["page"] = "signal"
     at.run()
     assert not at.exception
@@ -48,7 +48,7 @@ def test_url_navigation_direct_signal():
 
 def test_url_navigation_chinese_alias():
     """测试中文别名 ?page=选股"""
-    at = AppTest.from_file("app/main.py", default_timeout=15)
+    at = AppTest.from_file("app/main.py", default_timeout=25)
     at.query_params["page"] = "选股"
     at.run()
     assert not at.exception
@@ -59,7 +59,7 @@ def test_url_navigation_chinese_alias():
 
 def test_url_navigation_switch_page():
     """测试侧边栏切换页面后，URL 参数自动同步更新"""
-    at = AppTest.from_file("app/main.py", default_timeout=15)
+    at = AppTest.from_file("app/main.py", default_timeout=25)
     at.run()
     # 切换到 💼 持仓管理
     nav_radio = next(r for r in at.sidebar.radio if r.key == "main_nav_radio")

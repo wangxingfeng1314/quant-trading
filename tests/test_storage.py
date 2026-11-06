@@ -208,6 +208,17 @@ class TestWatchlist:
         assert "长线池" in groups
         assert "短线池" in groups
 
+    def test_update_recommendation(self):
+        from data.storage import add_to_watchlist, update_watchlist_recommendation, get_watchlist
+
+        add_to_watchlist("000001.SZ", recommended_strategy="⚡ KDJ企稳")
+        wl = get_watchlist()
+        assert wl.iloc[0]["recommended_strategy"] == "⚡ KDJ企稳"
+
+        update_watchlist_recommendation("000001.SZ", "📈 双均线趋势")
+        wl2 = get_watchlist()
+        assert wl2.iloc[0]["recommended_strategy"] == "📈 双均线趋势"
+
 
 class TestSignal:
     """信号 CRUD"""
