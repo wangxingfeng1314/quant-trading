@@ -23,6 +23,9 @@ class RiskManager:
                  trailing_stop_activation: float = 8.0,
                  trailing_stop_callback: float = 3.0,
                  max_holding_days: int = 0,
+                 enable_break_even: bool = False,
+                 break_even_trigger_pct: float = 5.0,
+                 break_even_buffer_pct: float = 0.2,
                  trailing_stop_pct: Optional[float] = None,
                  trailing_callback_pct: Optional[float] = None):
         """
@@ -31,6 +34,9 @@ class RiskManager:
             trailing_stop_activation: 移动跟踪止盈激活阈值百分比，如 8.0 代表涨幅达到8%激活
             trailing_stop_callback: 移动止盈回撤阈值百分比，如 3.0 代表从最高点回撤3%触发止盈
             max_holding_days: 最大持仓天数，0 表示不限制
+            enable_break_even: 是否启用保本止损保护机制
+            break_even_trigger_pct: 保本激活阈值百分比，如 5.0 代表浮盈达5%后开启成本保护
+            break_even_buffer_pct: 保本保护缓冲百分比，如 0.2 代表回落至成本+0.2%即平仓锁定本金
             trailing_stop_pct: trailing_stop_activation 的参数别名
             trailing_callback_pct: trailing_stop_callback 的参数别名
         """
@@ -51,10 +57,19 @@ class RiskManager:
         if 0 < trailing_stop_callback < 1.0:
             trailing_stop_callback = trailing_stop_callback * 100.0
 
+        if 0 < abs(break_even_trigger_pct) < 1.0:
+            break_even_trigger_pct = break_even_trigger_pct * 100.0
+
+        if 0 < abs(break_even_buffer_pct) <= 0.02:
+            break_even_buffer_pct = break_even_buffer_pct * 100.0
+
         self.stop_loss_pct = stop_loss_pct
         self.trailing_stop_activation = trailing_stop_activation
         self.trailing_stop_callback = trailing_stop_callback
         self.max_holding_days = max_holding_days
+        self.enable_break_even = enable_break_even
+        self.break_even_trigger_pct = break_even_trigger_pct
+        self.break_even_buffer_pct = break_even_buffer_pct
 
         # 跟踪每个持仓标的的最高价: {ts_code: highest_price}
         self.highest_prices: Dict[str, float] = {}
@@ -167,7 +182,32 @@ class RiskManager:
                     ))
                     continue
 
-            # --- 风控规则3: 最大持仓周期退出 ---
+            # --- 风控规则3: 保本止损保护 (Break-even Stop) ---
+            # 浮盈曾达到预设触发线（如 +5%），若后续回撤至保本保护线（成本 + 0.2%缓冲）触发平仓，锁定本金不转亏
+            if self.enable_break_even and max_gain_pct >= self.break_even_trigger_pct and pnl_pct <= self.break_even_buffer_pct:
+                risk_signals.append(Signal(
+                    ts_code=ts_code,
+                    trade_date=trade_date,
+                    strategy="risk_manager",
+                    direction="SELL",
+                    score=1.0,
+                    reason=(f"风控保本平仓: 最高浮盈曾达 +{max_gain_pct:.2f}%, "
+                            f"现回落至成本保护线 ({pnl_pct:.2f}%) 锁定本金离场"),
+                    price_ref=price,
+                    created_at=trade_date,
+                    context_snapshot={
+                        "risk_type": "break_even_stop",
+                        "cost": cost,
+                        "highest_price": highest,
+                        "current_price": price,
+                        "max_gain_pct": round(max_gain_pct, 2),
+                        "pnl_pct": round(pnl_pct, 2),
+                        "break_even_buffer_pct": self.break_even_buffer_pct,
+                    }
+                ))
+                continue
+
+            # --- 风控规则4: 最大持仓周期退出 ---
             if self.max_holding_days > 0 and pos.buy_date:
                 try:
                     b_str = str(pos.buy_date).replace("-", "").replace("/", "").strip()[:8]

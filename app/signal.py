@@ -39,11 +39,18 @@ def _show_scan():
     try:
         from services.signal_service import get_market_regime
         regime_info = get_market_regime()
-        st.info(
+        reg_type = regime_info.get("regime", "RANGE")
+        reg_text = (
             f"**大盘风控温度计：{regime_info['label']}** ｜ "
             f"**建议总仓位上限：≤ {regime_info['max_position_pct']}%** ｜ "
             f"{regime_info['advice']}"
         )
+        if reg_type == "BULL":
+            st.success(reg_text)
+        elif reg_type == "BEAR":
+            st.warning(reg_text)
+        else:
+            st.info(reg_text)
     except Exception:
         pass
 

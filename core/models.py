@@ -72,6 +72,16 @@ class BacktestResult:
             self.alpha = 0.0
         if not hasattr(self, "beta"):
             self.beta = 0.0
+        if not hasattr(self, "profit_factor"):
+            self.profit_factor = 1.0
+        if not hasattr(self, "win_loss_ratio"):
+            self.win_loss_ratio = 1.0
+        if not hasattr(self, "avg_win"):
+            self.avg_win = 0.0
+        if not hasattr(self, "avg_loss"):
+            self.avg_loss = 0.0
+        if not hasattr(self, "break_even_count"):
+            self.break_even_count = 0
 
 
 @dataclass

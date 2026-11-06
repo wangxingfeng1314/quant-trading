@@ -282,10 +282,28 @@ class Portfolio:
                 if not np.isnan(a_val) and not np.isinf(a_val):
                     alpha = a_val
 
-        # 胜率
+        # 胜率与核心盈亏指标
         sell_trades = [t for t in self.trades if t.direction == "SELL"]
         win_trades = [t for t in sell_trades if t.pnl > 0]
-        win_rate = len(win_trades) / len(sell_trades) * 100 if sell_trades else 0
+        loss_trades = [t for t in sell_trades if t.pnl < 0]
+        break_even_trades = [t for t in sell_trades if abs(t.pnl) <= 15.0 or (isinstance(getattr(t, "context_snapshot", {}), dict) and t.context_snapshot.get("risk_type") == "break_even_stop")]
+
+        win_rate = len(win_trades) / len(sell_trades) * 100 if sell_trades else 0.0
+
+        total_profit = sum(t.pnl for t in win_trades)
+        total_loss = abs(sum(t.pnl for t in loss_trades))
+
+        # 盈亏比 Profit Factor (总盈利 / 总亏损)
+        if total_loss > 0:
+            profit_factor = round(total_profit / total_loss, 2)
+        elif total_profit > 0:
+            profit_factor = 99.9
+        else:
+            profit_factor = 1.0
+
+        avg_win = round(total_profit / len(win_trades), 2) if win_trades else 0.0
+        avg_loss = round(total_loss / len(loss_trades), 2) if loss_trades else 0.0
+        win_loss_ratio = round(avg_win / avg_loss, 2) if avg_loss > 0 else (avg_win if avg_win > 0 else 1.0)
 
         return {
             "total_return": round(total_return, 2),
@@ -296,6 +314,11 @@ class Portfolio:
             "alpha": round(alpha, 2),
             "beta": round(beta, 2),
             "win_rate": round(win_rate, 2),
+            "profit_factor": profit_factor,
+            "win_loss_ratio": win_loss_ratio,
+            "avg_win": avg_win,
+            "avg_loss": avg_loss,
+            "break_even_count": len(break_even_trades),
             "trade_count": len(self.trades),
             "sell_count": len(sell_trades),
             "initial_capital": self.initial_capital,

@@ -202,6 +202,35 @@ def test_risk_manager_snapshot():
     assert sig.context_snapshot["current_price"] == 9.40
 
 
+def test_risk_manager_break_even_stop():
+    """验证 RiskManager 保本止损保护机制：浮盈达标后回撤至成本保护线及时平仓"""
+    rm = RiskManager(
+        stop_loss_pct=-5.0,
+        trailing_stop_activation=12.0,
+        trailing_stop_callback=4.0,
+        enable_break_even=True,
+        break_even_trigger_pct=5.0,
+        break_even_buffer_pct=0.2,
+    )
+    p = Portfolio(initial_capital=100000)
+    p.buy(ts_code="000001.SZ", price=10.0, volume=1000, trade_date="20240102")
+
+    # 1. 价格上涨至 10.6 (+6.0%)，达到保本激活线 (5.0%)，但不触及移动止盈线 (12.0%)
+    sigs1 = rm.check_risks("20240103", p, {"000001.SZ": 10.60})
+    assert len(sigs1) == 0
+    assert rm.highest_prices["000001.SZ"] == 10.60
+
+    # 2. 价格震荡回落至 10.01 (+0.1%)，触及保本保护线 (<= 0.2%)，触发保本平仓
+    sigs2 = rm.check_risks("20240104", p, {"000001.SZ": 10.01})
+    assert len(sigs2) == 1
+    sig = sigs2[0]
+    assert sig.direction == "SELL"
+    assert sig.context_snapshot["risk_type"] == "break_even_stop"
+    assert "保本" in sig.reason
+    assert sig.context_snapshot["max_gain_pct"] >= 5.0
+
+
+
 # -------------------------------------------------------------
 # Tier 4 测试：横截面排序与持仓上限控制
 # -------------------------------------------------------------
@@ -513,13 +542,14 @@ def test_storage_get_index_daily_range():
     """验证 storage.get_index_daily_range 正确支持日期区间过滤与升序排列"""
     from data.storage import get_conn, get_index_daily_range
 
+    test_code = "TEST_IDX.SH"
     with get_conn() as conn:
         conn.execute("CREATE TABLE IF NOT EXISTS index_daily (ts_code TEXT, trade_date TEXT, open REAL, high REAL, low REAL, close REAL, volume REAL, amount REAL, PRIMARY KEY (ts_code, trade_date))")
-        conn.execute("INSERT OR REPLACE INTO index_daily VALUES ('000300.SH', '20260101', 3800, 3850, 3790, 3820, 1000, 2000)")
-        conn.execute("INSERT OR REPLACE INTO index_daily VALUES ('000300.SH', '20260105', 3820, 3860, 3810, 3850, 1000, 2000)")
-        conn.execute("INSERT OR REPLACE INTO index_daily VALUES ('000300.SH', '20260110', 3850, 3880, 3840, 3870, 1000, 2000)")
+        conn.execute("INSERT OR REPLACE INTO index_daily VALUES (?, '20260101', 3800, 3850, 3790, 3820, 1000, 2000)", (test_code,))
+        conn.execute("INSERT OR REPLACE INTO index_daily VALUES (?, '20260105', 3820, 3860, 3810, 3850, 1000, 2000)", (test_code,))
+        conn.execute("INSERT OR REPLACE INTO index_daily VALUES (?, '20260110', 3850, 3880, 3840, 3870, 1000, 2000)", (test_code,))
 
-    df = get_index_daily_range("000300.SH", "20260102", "20260108")
+    df = get_index_daily_range(test_code, "20260102", "20260108")
     assert len(df) == 1
     assert df.iloc[0]["trade_date"] == "20260105"
 
@@ -533,6 +563,62 @@ def test_backtest_service_options_passthrough():
     assert "execution_mode" in sig.parameters
     assert "risk_manager" in sig.parameters
     assert "max_active_positions" in sig.parameters
+    assert "market_regime_filter" in sig.parameters
+
+
+def test_backtester_market_regime_filter(monkeypatch):
+    """验证 Backtester 大盘牛熊择时网关：空头熊市环境下自动拦截逆势 BUY 信号"""
+    from engine.backtester import Backtester
+
+    idx_dates = [f"202401{i:02d}" for i in range(1, 31)] + [f"202402{i:02d}" for i in range(1, 29)]
+    idx_df = pd.DataFrame({
+        "ts_code": ["000300.SH"] * len(idx_dates),
+        "trade_date": idx_dates,
+        "open": [4000.0 - i * 10 for i in range(len(idx_dates))],
+        "high": [4010.0 - i * 10 for i in range(len(idx_dates))],
+        "low": [3990.0 - i * 10 for i in range(len(idx_dates))],
+        "close": [4000.0 - i * 10 for i in range(len(idx_dates))],
+        "volume": [100000.0] * len(idx_dates),
+        "amount": [1000000.0] * len(idx_dates),
+        "pct_chg": [-0.5] * len(idx_dates),
+    })
+
+    stock_df = pd.DataFrame({
+        "ts_code": ["000001.SZ"] * len(idx_dates),
+        "trade_date": idx_dates,
+        "open": [10.0] * len(idx_dates),
+        "high": [10.5] * len(idx_dates),
+        "low": [9.5] * len(idx_dates),
+        "close": [10.0] * len(idx_dates),
+        "volume": [10000.0] * len(idx_dates),
+        "amount": [100000.0] * len(idx_dates),
+        "pct_chg": [0.0] * len(idx_dates),
+    })
+
+    monkeypatch.setattr("data.storage.get_index_daily_range", lambda *args, **kwargs: idx_df)
+    monkeypatch.setattr("engine.backtester.get_daily", lambda *args, **kwargs: stock_df)
+    monkeypatch.setattr("data.storage.get_instrument_list", lambda: pd.DataFrame({"ts_code": ["000001.SZ"], "is_st": [0], "name": ["平安银行"]}))
+
+    class AlwaysBuyStrategy:
+        name = "always_buy"
+        param_schema = {}
+        def __init__(self, **kwargs): pass
+        def on_bar(self, date, data, portfolio):
+            from core.models import Signal
+            return [Signal(ts_code="000001.SZ", trade_date=date, strategy="always_buy", direction="BUY", score=0.9, price_ref=10.0)]
+
+    bt = Backtester(
+        strategy_cls=AlwaysBuyStrategy,
+        params={},
+        universe=["000001.SZ"],
+        start_date="20240201",
+        end_date="20240228",
+        market_regime_filter=True,
+    )
+    res = bt.run(save=False)
+    assert res.trade_count == 0
+    assert hasattr(res, "profit_factor")
+    assert hasattr(res, "win_loss_ratio")
 
 
 # test_divergence_reference_swing_excludes_current_bar removed (strategy pruned)

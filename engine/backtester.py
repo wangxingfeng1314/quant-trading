@@ -32,7 +32,9 @@ class Backtester:
                  preloaded_data: dict = None,
                  max_active_positions: int = 0,
                  position_sizing: str = "score",
-                 risk_per_trade: float = 0.015):
+                 risk_per_trade: float = 0.015,
+                 market_regime_filter: bool = False,
+                 market_index: str = "000300.SH"):
         """
         Args:
             strategy_cls: 策略类（不是实例）
@@ -47,6 +49,8 @@ class Backtester:
             max_active_positions: 最大并发持仓股票只数，0 表示不限制
             position_sizing: 仓位分配模式，"score"（按信号评分阶梯分配）或 "atr_risk"（按ATR波动率风险平价定仓）
             risk_per_trade: ATR风险平价模式下单笔交易最大风险占总净值比例（默认 1.5%）
+            market_regime_filter: 是否开启大盘牛熊择时网关（熊市防守期自动拦截逆势买入，减少假突破磨损）
+            market_index: 大盘基准指数代码，默认沪深300 '000300.SH'
         """
         self.strategy_cls = strategy_cls
         self.params = params
@@ -60,6 +64,8 @@ class Backtester:
         self.max_active_positions = max_active_positions
         self.position_sizing = position_sizing
         self.risk_per_trade = risk_per_trade
+        self.market_regime_filter = market_regime_filter
+        self.market_index = market_index
 
     def run(self, save: bool = True) -> BacktestResult:
         """执行回测
@@ -149,10 +155,44 @@ class Backtester:
 
         pending_signals = []
 
+        # 初始化大盘牛熊择时网关环境映射表
+        self.market_regime_lookup = {}
+        if self.market_regime_filter:
+            try:
+                from data.storage import get_index_daily_range
+                idx_warmup = ""
+                if self.start_date:
+                    try:
+                        from datetime import datetime, timedelta
+                        idx_dt = datetime.strptime(self.start_date, "%Y%m%d")
+                        idx_warmup = (idx_dt - timedelta(days=180)).strftime("%Y%m%d")
+                    except Exception:
+                        idx_warmup = self.start_date
+
+                bm_df = get_index_daily_range(self.market_index, idx_warmup, self.end_date)
+                if bm_df.empty or len(bm_df) < 20:
+                    bm_df = get_index_daily_range("000001.SH", idx_warmup, self.end_date)
+                if not bm_df.empty and len(bm_df) >= 20:
+                    bm_df = clean_daily(bm_df)
+                    bm_df = apply_indicators(bm_df, ["ma", "macd"])
+                    for _, row in bm_df.iterrows():
+                        d_str = str(row["trade_date"]).replace("-", "").strip()
+                        c = float(row["close"])
+                        m60 = float(row.get("ma60", c) or c)
+                        m20 = float(row.get("ma20", c) or c)
+                        # 熊市防守判定: 指数在MA60下方且在MA20下方，确立空头下行趋势
+                        is_bear = (c < m60) and (c < m20 or m20 < m60)
+                        self.market_regime_lookup[d_str] = not is_bear
+            except Exception as e:
+                logger.warning(f"大盘牛熊择时网关初始化失败: {e}")
+
         # 4. 逐日迭代
         for date in trade_dates:
             # 每日开盘前触发持仓日结（T+1结转）
             portfolio.on_new_day(date)
+
+            # 大盘环境检查：熊市防守期禁止逆势开仓
+            market_allow_buy = self.market_regime_lookup.get(date, True) if self.market_regime_filter else True
 
             # 收集当日价格
             prices = {}
@@ -189,6 +229,10 @@ class Backtester:
                     snapshot = self._build_snapshot(sig, df_stock, curr_idx)
 
                     if sig.direction == "BUY":
+                        # 大盘空头防守：禁止逆势建仓
+                        if not market_allow_buy:
+                            continue
+
                         # 最大持仓只数控制：若非已有持仓且已达上限，则跳过
                         curr_pos = portfolio.get_position(ts_code)
                         if self.max_active_positions > 0 and (curr_pos is None or curr_pos.is_empty):
@@ -234,6 +278,10 @@ class Backtester:
             # 策略产生信号
             signals = strategy.on_bar(date, data_slice, portfolio)
 
+            # 大盘空头防守期：拦截逆势买入信号，防止假突破磨损
+            if not market_allow_buy and signals:
+                signals = [s for s in signals if s.direction != "BUY"]
+
             # 风控拦截器检查（止损/跟踪止盈/到期强制平仓）
             if self.risk_manager is not None:
                 risk_signals = self.risk_manager.check_risks(date, portfolio, prices)
@@ -268,6 +316,10 @@ class Backtester:
                     snapshot = self._build_snapshot(sig, df_stock, curr_idx)
 
                     if sig.direction == "BUY":
+                        # 大盘空头防守：禁止逆势建仓
+                        if not market_allow_buy:
+                            continue
+
                         # 最大持仓只数控制
                         curr_pos = portfolio.get_position(ts_code)
                         if self.max_active_positions > 0 and (curr_pos is None or curr_pos.is_empty):
@@ -344,6 +396,11 @@ class Backtester:
         )
         result.alpha = metrics.get("alpha", 0.0)
         result.beta = metrics.get("beta", 0.0)
+        result.profit_factor = metrics.get("profit_factor", 1.0)
+        result.win_loss_ratio = metrics.get("win_loss_ratio", 1.0)
+        result.avg_win = metrics.get("avg_win", 0.0)
+        result.avg_loss = metrics.get("avg_loss", 0.0)
+        result.break_even_count = metrics.get("break_even_count", 0)
 
         # 6. 保存到数据库
         if save and portfolio.trades:

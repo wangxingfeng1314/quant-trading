@@ -32,7 +32,9 @@ class BacktestService:
                      capital: float = None, save: bool = True,
                      execution_mode: str = "current_close",
                      risk_manager = None,
-                     max_active_positions: int = 0):
+                     max_active_positions: int = 0,
+                     market_regime_filter: bool = False,
+                     market_index: str = "000300.SH"):
         """执行单次回测
 
         Args:
@@ -46,6 +48,8 @@ class BacktestService:
             execution_mode: 撮合模式 "current_close" 或 "next_open"
             risk_manager: 独立风控拦截器 RiskManager 实例
             max_active_positions: 最大持仓只数控制
+            market_regime_filter: 是否开启大盘牛熊择时网关
+            market_index: 大盘基准指数代码，默认沪深300 '000300.SH'
 
         Returns:
             BacktestResult 对象
@@ -78,6 +82,8 @@ class BacktestService:
             execution_mode=execution_mode,
             risk_manager=risk_manager,
             max_active_positions=max_active_positions,
+            market_regime_filter=market_regime_filter,
+            market_index=market_index,
         )
         return bt.run(save=save)
 

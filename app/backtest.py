@@ -178,7 +178,14 @@ def _show_run_backtest():
             if not universe:
                 st.warning("自选股列表为空，请先添加自选股")
             else:
-                st.caption(f"📊 将对 {len(universe)} 只自选股逐只回测并对比结果")
+                wl_eval_mode = st.radio(
+                    "自选股回测策略分配",
+                    ["⭐ 智能自适应匹配 (推荐·每只标的采用AI专属最高胜率策略)", "统一策略回测 (所有自选股均使用左侧选定策略)"],
+                    index=0,
+                    key="bt_wl_eval_mode",
+                    help="智能自适应模式下，系统会为每只自选股自动匹配其专属胜率最高的量化策略（如白马匹配布林反转、成长股匹配双均线趋势），并叠加牛熊择时与保本止损，实现最高胜率与最低回撤。"
+                )
+                st.caption(f"📊 将对 {len(universe)} 只自选股逐只回测并呈现全维度胜率与收益分析")
         else:
             all_codes = stock_df_data["ts_code"].tolist()
             name_map = dict(zip(stock_df_data["ts_code"], stock_df_data["name"]))
@@ -286,11 +293,21 @@ def _show_run_backtest():
             )
             exec_mode = "next_open" if "next_open" in exec_mode_opt else "current_close"
 
+            enable_regime = st.checkbox(
+                "🛡️ 启用大盘牛熊择时网关 (熊市防守期自动拦截逆势买入，防假突破，大幅压降回撤)",
+                value=True,
+                key="bt_enable_regime",
+                help="当沪深300指数处于60日均线下方且处于空头下行时，自动禁止开多仓，保护本金并降低最大回撤。"
+            )
+
             enable_rm = st.checkbox("启用独立出场风控管理器 (RiskManager)", value=True, key="bt_enable_rm")
             rm_stop_loss = -5.0
             rm_trail_start = 8.0
             rm_trail_callback = 3.0
             rm_max_days = 0
+            enable_be = True
+            be_trigger = 5.0
+            be_buffer = 0.2
             if enable_rm:
                 rm_c1, rm_c2 = st.columns(2)
                 with rm_c1:
@@ -303,6 +320,15 @@ def _show_run_backtest():
                     rm_trail_callback = float(trail_pullback_pct)
                     max_days_val = st.number_input("最长持仓天数 (0=不限)", value=0, min_value=0, max_value=250, step=5, key="bt_max_days", help="推荐设为0(不强制平仓)，避免波段策略被30天硬中断")
                     rm_max_days = int(max_days_val)
+
+                # 保本止损机制
+                enable_be = st.checkbox("🛡️ 启用保本止损保护 (浮盈达标后回撤保本，锁定本金不转亏)", value=True, key="bt_enable_be")
+                if enable_be:
+                    bec1, bec2 = st.columns(2)
+                    with bec1:
+                        be_trigger = st.number_input("保本激活浮盈 (%)", value=5.0, min_value=1.0, max_value=30.0, step=0.5, key="bt_be_trigger", help="浮盈达到该百分比后，开启成本保本守护")
+                    with bec2:
+                        be_buffer = st.number_input("保本平仓缓冲 (%)", value=0.2, min_value=0.0, max_value=2.0, step=0.1, key="bt_be_buffer", help="回撤至成本+缓冲线时平仓锁定本金（覆盖手续费）")
 
             # 单只股票回测默认 1 (全仓)，多只股票组合默认 4
             default_max_pos = 1 if (mode == "单只标的" or len(universe) <= 1) else 4
@@ -330,6 +356,9 @@ def _show_run_backtest():
                 trailing_stop_activation=rm_trail_start,
                 trailing_stop_callback=rm_trail_callback,
                 max_holding_days=rm_max_days,
+                enable_break_even=enable_be,
+                break_even_trigger_pct=be_trigger,
+                break_even_buffer_pct=be_buffer,
             )
 
         # 批量回测自选股模式
@@ -337,10 +366,48 @@ def _show_run_backtest():
             results = []
             progress_bar = st.progress(0)
             status_text = st.empty()
+            watchlist = get_watchlist()
+            wl_dict = dict(zip(watchlist["ts_code"], watchlist["recommended_strategy"])) if not watchlist.empty and "recommended_strategy" in watchlist.columns else {}
+
             for i, ts_code in enumerate(universe):
                 status_text.text(f"回测中 {i+1}/{len(universe)}: {ts_code}")
+                # 判定采用的策略类与参数
+                cur_strategy_cls = strategy_cls
+                cur_params = params
+                cur_strat_label = format_strategy_cn(strategy_cls.name)
+
+                if 'wl_eval_mode' in locals() and wl_eval_mode.startswith("⭐"):
+                    # 智能自适应匹配模式
+                    rec_str = wl_dict.get(ts_code, "")
+                    matched_key = None
+                    if "布林" in rec_str or "bollinger" in rec_str:
+                        matched_key = "bollinger_reversal"
+                    elif "双均线" in rec_str or "ma_cross" in rec_str:
+                        matched_key = "ma_cross"
+                    elif "KDJ" in rec_str or "kdj" in rec_str:
+                        matched_key = "kdj_cross"
+                    elif "多因子" in rec_str or "combo" in rec_str:
+                        matched_key = "signal_combo"
+
+                    if not matched_key:
+                        from services.strategy_recommender import evaluate_stock_strategy
+                        inst_df = cached_instrument_list()
+                        nm = ""
+                        ind = ""
+                        if not inst_df.empty and ts_code in inst_df["ts_code"].values:
+                            r = inst_df[inst_df["ts_code"] == ts_code].iloc[0]
+                            nm = r.get("name", "")
+                            ind = r.get("industry", "")
+                        ev = evaluate_stock_strategy(ts_code, name=nm, industry=ind, start_date=start_date, end_date=end_date)
+                        matched_key = ev.get("strategy", "kdj_cross")
+
+                    if matched_key in STRATEGY_REGISTRY:
+                        cur_strategy_cls = STRATEGY_REGISTRY[matched_key]
+                        cur_params = {k: v.get("default", 0) for k, v in cur_strategy_cls.param_schema.items()}
+                        cur_strat_label = format_strategy_cn(matched_key)
+
                 bt = Backtester(
-                    strategy_cls=strategy_cls, params=params,
+                    strategy_cls=cur_strategy_cls, params=cur_params,
                     universe=[ts_code],
                     start_date=start_date, end_date=end_date,
                     initial_capital=float(capital),
@@ -348,10 +415,15 @@ def _show_run_backtest():
                     risk_manager=rm_instance,
                     max_active_positions=int(max_pos_val),
                     position_sizing=pos_sizing,
+                    market_regime_filter=enable_regime,
                 )
                 result = bt.run(save=False)
                 if result.equity_curve:
-                    results.append({"ts_code": ts_code, "result": result})
+                    results.append({
+                        "ts_code": ts_code,
+                        "strategy_name": cur_strat_label,
+                        "result": result,
+                    })
                 progress_bar.progress((i + 1) / len(universe))
 
             progress_bar.empty()
@@ -371,18 +443,33 @@ def _show_run_backtest():
                 res = r["result"]
                 compare_rows.append({
                     "股票": f"{r['ts_code']} {name_map.get(r['ts_code'], '')}",
+                    "采用策略": r.get("strategy_name", ""),
                     "总收益%": float(res.total_return),
                     "年化%": float(res.annual_return),
                     "夏普": float(res.sharpe_ratio),
                     "最大回撤%": float(res.max_drawdown),
                     "胜率%": float(res.win_rate),
+                    "盈亏比": float(getattr(res, "profit_factor", 1.0)),
                     "交易次数": int(res.trade_count),
                 })
 
             df_compare = pd.DataFrame(compare_rows)
-            st.subheader("📊 自选股回测对比")
+            st.subheader("📊 自选股回测对比与胜率大屏")
+
+            # 汇总核心卡片
+            avg_win = df_compare["胜率%"].mean()
+            avg_ret = df_compare["总收益%"].mean()
+            avg_mdd = df_compare["最大回撤%"].mean()
+            avg_pf = df_compare["盈亏比"].mean()
+
+            sm1, sm2, sm3, sm4 = st.columns(4)
+            sm1.metric("组合平均胜率", f"{avg_win:.1f}%")
+            sm2.metric("标的平均收益", f"{avg_ret:+.2f}%")
+            sm3.metric("平均最大回撤", f"{avg_mdd:.2f}%")
+            sm4.metric("平均盈亏比", f"{avg_pf:.2f}")
+
             styled_compare = (
-                df_compare.style.highlight_max(subset=["总收益%", "夏普", "胜率%"], color="#90EE90")
+                df_compare.style.highlight_max(subset=["总收益%", "夏普", "胜率%", "盈亏比"], color="#90EE90")
                                 .highlight_min(subset=["最大回撤%"], color="#90EE90")
                                 .format({
                                     "总收益%": "{:+.2f}%",
@@ -390,16 +477,18 @@ def _show_run_backtest():
                                     "夏普": "{:.2f}",
                                     "最大回撤%": "{:.2f}%",
                                     "胜率%": "{:.1f}%",
+                                    "盈亏比": "{:.2f}",
                                 })
             )
             st.dataframe(styled_compare, hide_index=True, width="stretch")
 
             # 最佳结果展示
             best = max(results, key=lambda r: r["result"].total_return)
-            st.subheader(f"🏆 最佳表现: {best['ts_code']} {name_map.get(best['ts_code'], '')}")
+            st.subheader(f"🏆 最佳表现: {best['ts_code']} {name_map.get(best['ts_code'], '')} ({best.get('strategy_name', '')})")
             st.caption(f"总收益 {best['result'].total_return:+.2f}% | "
                        f"夏普 {best['result'].sharpe_ratio:.2f} | "
-                       f"胜率 {best['result'].win_rate:.1f}%")
+                       f"胜率 {best['result'].win_rate:.1f}% | "
+                       f"最大回撤 {best['result'].max_drawdown:.2f}%")
             return
 
         # 单只/多只模式
@@ -414,6 +503,7 @@ def _show_run_backtest():
                 risk_manager=rm_instance,
                 max_active_positions=int(max_pos_val),
                 position_sizing=pos_sizing,
+                market_regime_filter=enable_regime,
             )
             result = bt.run(save=True)
 
@@ -1069,29 +1159,35 @@ def _display_result(result, benchmark_curve=None):
     """展示回测结果（含绩效归因）"""
     st.subheader("📊 回测结果")
 
-    # 指标卡片
+    # 指标卡片 (第一行：核心收益与风险)
     c1, c2, c3, c4, c5, c6 = st.columns(6)
     c1.metric("总收益", f"{result.total_return:.2f}%")
     c2.metric("年化收益", f"{result.annual_return:.2f}%")
     c3.metric("最大回撤", f"{result.max_drawdown:.2f}%")
     c4.metric("夏普比率", f"{result.sharpe_ratio:.2f}")
     c5.metric("卡玛比率", f"{result.calmar_ratio:.2f}")
-    c6.metric("胜率", f"{result.win_rate:.1f}%")
+    c6.metric("综合胜率", f"{result.win_rate:.1f}%")
+
+    # 第二行指标：高胜率与盈亏比双轮驱动核心看板 (页面清晰明了)
+    st.markdown("##### 🎯 胜率与盈亏比双轮驱动核心看板")
+    pf = getattr(result, "profit_factor", 1.0)
+    avg_w = getattr(result, "avg_win", 0.0)
+    avg_l = getattr(result, "avg_loss", 0.0)
+    be_cnt = getattr(result, "break_even_count", 0)
+
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
+    m1.metric("盈亏比 (Profit Factor)", f"{pf:.2f}", help="总盈利额 / 总亏损额，> 1.5 表明盈利质量显著超越试错成本")
+    m2.metric("平均单笔盈利", f"+¥{avg_w:,.1f}")
+    m3.metric("平均单笔亏损", f"-¥{avg_l:,.1f}")
+    m4.metric("保本出场单数", f"{be_cnt} 笔", help="浮盈达标后回撤至成本线保本平仓的笔数，成功守护本金")
+    m5.metric("平仓/总交易", f"{getattr(result, 'sell_count', 0)} / {result.trade_count} 笔")
+    if hasattr(result, 'alpha') and result.alpha != 0:
+        m6.metric("Alpha 超额", f"{result.alpha:.2f}%")
+    else:
+        m6.metric("初始资金", f"¥{result.initial_capital:,.0f}")
 
     # 自然语言结论
     _show_nlp_summary(result)
-
-    # 第二行指标（Alpha/Beta 需要基准数据才有值）
-    if hasattr(result, 'alpha') and result.alpha != 0:
-        c7, c8, c9, c10 = st.columns(4)
-        c7.metric("Alpha", f"{result.alpha:.2f}%")
-        c8.metric("Beta", f"{result.beta:.2f}")
-        c9.metric("交易次数", f"{result.trade_count}")
-        c10.metric("初始资金", f"¥{result.initial_capital:,.0f}")
-    else:
-        c7, c8 = st.columns(2)
-        c7.metric("交易次数", f"{result.trade_count}")
-        c8.metric("初始资金", f"¥{result.initial_capital:,.0f}")
 
     # 权益曲线（含基准）
     if result.equity_curve:
@@ -1321,6 +1417,21 @@ def _draw_monthly_heatmap(eq_df):
     col1.metric("月均收益", f"{monthly_stats.mean():.2f}%")
     col2.metric("盈利月数", f"{(monthly_stats > 0).sum()}/{len(monthly_stats)}")
     col3.metric("最佳月份", f"{monthly_stats.max():.2f}%")
+
+    # 结构化月度与年度日历明细矩阵表 (页面清晰明了)
+    cal_rows = []
+    for y in years:
+        r_item = {"年份": str(y)}
+        for m in range(1, 13):
+            val = heat_data[years.index(y)][m - 1]
+            r_item[f"{m}月"] = f"{val:+.1f}%" if pd.notna(val) else "-"
+        y_slice = eq_df[eq_df["year"] == y]["daily_return"]
+        y_ret = ((1 + y_slice).prod() - 1) * 100 if not y_slice.empty else 0.0
+        r_item["全年合计"] = f"{y_ret:+.1f}%"
+        cal_rows.append(r_item)
+
+    st.markdown("**📅 月度与年度收益日历明细表**")
+    st.dataframe(pd.DataFrame(cal_rows), hide_index=True, width="stretch")
 
 
 def _draw_yearly_returns(eq_df):
