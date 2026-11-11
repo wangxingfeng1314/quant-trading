@@ -27,15 +27,19 @@ from core.config import DEFAULT_CAPITAL
 def show():
     st.title("🔬 回测中心")
 
-    tab1, tab2, tab3, tab4 = st.tabs(["运行回测", "参数优化", "多策略对比", "历史记录"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(
+        ["运行回测", "参数优化", "样本外验证", "多策略对比", "历史记录"]
+    )
 
     with tab1:
         _show_run_backtest()
     with tab2:
         _show_grid_search()
     with tab3:
-        _show_multi_strategy()
+        _show_validation()
     with tab4:
+        _show_multi_strategy()
+    with tab5:
         _show_history()
 
 
@@ -791,6 +795,398 @@ def _show_grid_search():
             })
             table_rows.append(row)
         chinese_dataframe(pd.DataFrame(table_rows))
+
+
+# ============================================================
+# 样本外验证（walk-forward / 参数稳定性 / 蒙特卡洛）
+# ============================================================
+
+def _show_validation():
+    """样本外验证：把历史切成多折，前段挑参数、后段验证，回答「这份收益能不能延续」"""
+    from engine.validation import walk_forward
+
+    stock_df = cached_instrument_list()
+    stocks_with_data = cached_get_stocks_with_data(min_days=60)
+    if stock_df.empty:
+        st.warning("暂无标的数据")
+        return
+    stock_df_data = stock_df[stock_df["ts_code"].isin(stocks_with_data)].copy()
+    if stock_df_data.empty:
+        st.warning("暂无足够行情数据的标的（需至少60条日线），请先下载数据")
+        return
+
+    st.subheader("🧪 样本外验证")
+    st.caption(
+        "参数优化得到的「最优参数」是在同一段历史上挑出来的，天然偏乐观。"
+        "本页把历史切成 n 折：每折只用前段数据挑参数，再在紧随其后的、"
+        "从未参与选参的样本外段上运行，最后把各折样本外曲线拼接，看真实表现。"
+    )
+
+    # ---------- 配置区 ----------
+    c1, c2 = st.columns(2)
+    with c1:
+        strategies = list_strategies()
+        strategy_names = [s["name"] for s in strategies]
+        strategy_descs = {s["name"]: s["desc"] for s in strategies}
+        selected_strategy = st.selectbox(
+            "选择策略",
+            strategy_names,
+            format_func=lambda x: strategy_label(
+                x, strategy_descs[x], getattr(STRATEGY_REGISTRY[x], "style", "综合"),
+            ),
+            key="wf_strategy",
+        )
+        strategy_cls = STRATEGY_REGISTRY[selected_strategy]
+    with c2:
+        metric = st.selectbox(
+            "选参目标",
+            ["total_return", "sharpe_ratio", "calmar_ratio", "max_drawdown"],
+            format_func=lambda x: {
+                "total_return": "总收益率",
+                "sharpe_ratio": "夏普比率",
+                "calmar_ratio": "卡玛比率",
+                "max_drawdown": "最大回撤（越小越好）",
+            }.get(x, x),
+            key="wf_metric",
+        )
+
+    if not strategy_cls.param_schema:
+        st.info("该策略无可调参数，无法做样本外参数验证（可直接看单次回测的样本外切分结果）")
+        return
+
+    st.markdown("**参数搜索范围**（每折在这组网格内独立挑参）")
+    param_grid = {}
+    cols = st.columns(len(strategy_cls.param_schema))
+    for i, (pname, pinfo) in enumerate(strategy_cls.param_schema.items()):
+        with cols[i]:
+            default = pinfo.get("default", 10)
+            st.markdown(f"**{pinfo.get('desc', pname)}**")
+            is_int = isinstance(default, int)
+            if default >= 0:
+                calc_min = int(default * 0.5) if is_int else round(default * 0.5, 2)
+                calc_max = int(default * 2) if is_int else round(default * 2, 2)
+            else:
+                calc_min = int(default * 2) if is_int else round(default * 2, 2)
+                calc_max = int(default * 0.5) if is_int else round(default * 0.5, 2)
+            if calc_min == calc_max:
+                calc_min -= 1
+                calc_max += 1
+            min_v = st.number_input("最小值", value=calc_min, key=f"wf_min_{pname}")
+            max_v = st.number_input("最大值", value=calc_max, key=f"wf_max_{pname}")
+            steps = st.number_input("步数", value=3, min_value=2, max_value=8, key=f"wf_steps_{pname}")
+            low_v, high_v = min(min_v, max_v), max(min_v, max_v)
+            if is_int:
+                step_size = max(1, int(round((high_v - low_v) / max(1, steps - 1))))
+                param_grid[pname] = sorted(set(range(int(low_v), int(high_v) + 1, step_size)))
+            else:
+                step_size = (high_v - low_v) / max(1, steps - 1)
+                param_grid[pname] = sorted(set(round(low_v + i * step_size, 2) for i in range(int(steps))))
+
+    total_combos = 1
+    for v in param_grid.values():
+        total_combos *= len(v)
+
+    # ---------- 标的与窗口 ----------
+    all_codes = stock_df_data["ts_code"].tolist()
+    name_map = dict(zip(stock_df_data["ts_code"], stock_df_data["name"]))
+    watchlist = get_watchlist()
+    wl_codes = [c for c in watchlist["ts_code"].tolist() if c in all_codes] if not watchlist.empty else []
+
+    wcol1, wcol2 = st.columns([3, 1])
+    with wcol1:
+        universe = st.multiselect(
+            "标的（建议 3 只以上，单只标的的样本外结论噪声极大）",
+            options=all_codes,
+            default=(wl_codes[:5] if wl_codes else all_codes[:3]),
+            format_func=lambda c: f"{c} {name_map.get(c, '')}",
+            key="wf_universe",
+        )
+    with wcol2:
+        st.caption("快速选择")
+        if st.button("➕ 自选股", key="wf_quick_wl"):
+            st.session_state["wf_universe"] = sorted(set(wl_codes))
+            st.rerun()
+
+    d1, d2 = st.columns(2)
+    with d1:
+        wf_start = chinese_date_picker("开始日期", default_val=date(2020, 1, 1), key="wf_start")
+    with d2:
+        wf_end = chinese_date_picker("结束日期", default_val=date.today(), key="wf_end")
+
+    o1, o2, o3 = st.columns(3)
+    with o1:
+        n_splits = st.slider("折数", 2, 6, 4, key="wf_splits",
+                             help="折数越多，样本外覆盖越完整，但每折训练数据越少")
+    with o2:
+        train_ratio = st.slider("首折训练占比", 0.5, 0.9, 0.7, 0.05, key="wf_ratio",
+                                help="首折训练段占整段历史的比例，之后每折向前滚动一个测试窗宽度")
+    with o3:
+        wf_enable_rm = st.checkbox("出场风控", value=True, key="wf_enable_rm",
+                                   help="-6% 止损 / +12% 启动 4% 回撤止盈")
+
+    st.caption(
+        f"参数组合 {total_combos} 组 × {n_splits} 折 ≈ {total_combos * n_splits} 次回测，"
+        f"另加一次全区间网格用于参数稳定性检验"
+    )
+
+    if st.button("🧪 开始样本外验证", type="primary", width='stretch', key="wf_run"):
+        if not universe:
+            st.error("请至少选择一只标的")
+            return
+        if len(universe) < 3:
+            st.warning("标的少于 3 只时，样本外结论的统计意义有限，建议扩大标的池")
+
+        progress_bar = st.progress(0.0)
+        status_text = st.empty()
+
+        def on_progress(done, total):
+            if total:
+                progress_bar.progress(min(1.0, done / total))
+            status_text.text(f"进度 {done}/{total}")
+
+        risk_manager = None
+        if wf_enable_rm:
+            from engine.risk_manager import RiskManager
+            risk_manager = RiskManager(stop_loss_pct=-6.0,
+                                       trailing_stop_activation=12.0,
+                                       trailing_stop_callback=4.0)
+
+        try:
+            report = walk_forward(
+                strategy_cls=strategy_cls,
+                param_grid=param_grid,
+                universe=universe,
+                start_date=wf_start,
+                end_date=wf_end,
+                initial_capital=DEFAULT_CAPITAL,
+                n_splits=n_splits,
+                train_ratio=float(train_ratio),
+                metric=metric,
+                execution_mode="next_open",
+                risk_manager=risk_manager,
+                progress_callback=on_progress,
+            )
+        except Exception as e:
+            progress_bar.empty()
+            status_text.empty()
+            st.error(f"验证失败：{e}")
+            return
+
+        progress_bar.empty()
+        status_text.empty()
+        st.session_state["wf_report"] = report
+        st.session_state["wf_meta"] = {
+            "strategy": selected_strategy,
+            "metric": metric,
+            "universe": list(universe),
+            "start": wf_start,
+            "end": wf_end,
+            "n_splits": n_splits,
+        }
+
+    report = st.session_state.get("wf_report")
+    if report is None:
+        st.info("配置完成后点击上方按钮开始验证。首次运行需要拉取行情并逐折回测，标的较多时请耐心等待。")
+        return
+
+    _render_validation_report(report, st.session_state.get("wf_meta", {}))
+
+
+def _render_validation_report(report, meta: dict):
+    """渲染样本外验证报告"""
+    if not report.windows:
+        st.error("所有折均未产出有效结果，无法评估")
+        for w in report.warnings:
+            st.warning(w)
+        return
+
+    # ---------- 结论条 ----------
+    verdict = report.verdict or ""
+    if "不适合实盘" in verdict or "不通过" in verdict or "脆弱" in verdict:
+        st.error(f"**结论：{verdict}**")
+    elif "谨慎" in verdict or "有限" in verdict:
+        st.warning(f"**结论：{verdict}**")
+    else:
+        st.success(f"**结论：{verdict}**")
+
+    st.caption(
+        f"策略 {meta.get('strategy', '-')} | 标的 {len(meta.get('universe', []))} 只 | "
+        f"区间 {meta.get('start', '-')}~{meta.get('end', '-')} | "
+        f"{len(report.windows)} 折 | 选参目标 {report.metric}"
+    )
+
+    # ---------- 核心指标 ----------
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("样本外总收益", f"{report.oos_total_return:.2f}%")
+    m2.metric("样本外年化", f"{report.oos_annual_return:.2f}%")
+    m3.metric("样本外最大回撤", f"{report.oos_max_drawdown:.2f}%")
+    m4.metric("样本外夏普", f"{report.oos_sharpe:.2f}")
+    if report.is_mean_metric > 1e-9:
+        m5.metric("样本外效率", f"{report.efficiency:.0%}",
+                  help="样本外均值 / 样本内均值。低于 50% 说明收益主要来自过拟合")
+    else:
+        m5.metric("样本外效率", "不适用", help="样本内均值为负，效率比无解释力")
+
+    # ---------- 逐折明细 ----------
+    st.markdown("**逐折明细**")
+    fold_df = pd.DataFrame([w.as_dict() for w in report.windows])
+    chinese_dataframe(fold_df, height=260)
+
+    fig_fold = go.Figure()
+    fold_labels = [f"第{w.index + 1}折" for w in report.windows]
+    fig_fold.add_trace(go.Bar(
+        name="样本内（训练段）", x=fold_labels,
+        marker_color="#5B8FF9",
+        y=[round(w.train_metric, 2) for w in report.windows],
+    ))
+    fig_fold.add_trace(go.Bar(
+        name="样本外（测试段）", x=fold_labels,
+        marker_color="#F6BD16",
+        y=[round(w.test_metric, 2) for w in report.windows],
+    ))
+    fig_fold.update_layout(
+        barmode="group", height=280, margin=dict(l=10, r=10, t=30, b=10),
+        legend=dict(orientation="h", yanchor="bottom", y=1.0, x=0),
+        yaxis_title=report.metric,
+    )
+    st.plotly_chart(fig_fold, width='stretch')
+
+    # ---------- 样本外权益曲线 ----------
+    if report.oos_equity:
+        st.markdown("**拼接样本外净值曲线**（各折测试段首尾相接，不含任何训练段数据）")
+        eq_df = pd.DataFrame(report.oos_equity)
+        eq_df["date"] = eq_df["date"].astype(str)
+        fig_eq = go.Figure()
+        fig_eq.add_trace(go.Scatter(
+            x=eq_df["date"], y=eq_df["equity"], mode="lines",
+            name="样本外净值", line=dict(color="#5AD8A6", width=2),
+            fill="tozeroy", fillcolor="rgba(90,216,166,0.12)",
+        ))
+        peak = eq_df["equity"].cummax()
+        fig_eq.add_trace(go.Scatter(
+            x=eq_df["date"], y=peak, mode="lines",
+            name="历史峰值", line=dict(color="#B0B0B0", width=1, dash="dot"),
+        ))
+        fig_eq.update_layout(
+            height=320, margin=dict(l=10, r=10, t=20, b=10),
+            legend=dict(orientation="h", yanchor="bottom", y=1.0, x=0),
+            yaxis_title="组合权益（元）",
+        )
+        st.plotly_chart(fig_eq, width='stretch')
+
+    # ---------- 参数稳定性 ----------
+    st.markdown("**参数稳定性检验**")
+    ps = report.param_stability or {}
+    if not ps or ps.get("robustness") is None:
+        st.info("网格过小，无法构造邻居参数（每个参数至少需要 2 个候选值）")
+    else:
+        rob = float(ps.get("robustness", 0))
+        nb = ps.get("neighbor_mean")
+        p1, p2, p3, p4 = st.columns(4)
+        p1.metric("最优参数指标", f"{ps.get('best_metric', 0):.2f}")
+        p2.metric("邻居参数均值", f"{nb:.2f}" if nb is not None else "—")
+        p3.metric("稳定性（邻居/最优）", f"{rob:.2f}",
+                  help="≥0.7 视为稳健高原；<0.5 说明最优点是孤立尖峰，大概率拟合噪声")
+        p4.metric("全网格正收益占比", f"{ps.get('positive_ratio', 0):.0%}")
+
+        if rob >= 0.7:
+            st.success(f"参数稳定：把参数挪动一档后指标仍有最优值的 {rob:.0%}，优势不依赖精确点位")
+        elif rob >= 0.5:
+            st.warning(f"参数中等稳定（{rob:.0%}）：最优参数附近性能已有明显衰减，实盘建议取参数区间中枢")
+        else:
+            st.error(f"参数脆弱（{rob:.0%}）：最优点是孤立尖峰，改一档参数就失效，属于典型过拟合特征")
+
+        per_param = ps.get("per_param") or {}
+        if per_param:
+            rows = []
+            for pname, info in per_param.items():
+                pm = info.get("mean")
+                rows.append({
+                    "参数": pname,
+                    "最优值": info.get("best"),
+                    "邻居值": ", ".join(str(v) for v in info.get("neighbors", [])) or "—",
+                    "邻居均值": round(float(pm), 2) if pm is not None else "—",
+                })
+            chinese_dataframe(pd.DataFrame(rows), height=220)
+
+    # ---------- 蒙特卡洛 ----------
+    st.markdown("**交易序列蒙特卡洛**")
+    mc = report.monte_carlo or {}
+    if not mc.get("runs"):
+        st.info(mc.get("note", "交易笔数不足，蒙特卡洛无统计意义"))
+    else:
+        st.caption(
+            "左：路径风险 —— 同样的交易换个发生顺序，回撤可能多深。"
+            "右：收益不确定性 —— 如果市场给你的是另一批统计特征相同但结果不同的交易，会赚还是亏。"
+        )
+        g1, g2 = st.columns(2)
+        with g1:
+            samples = mc.get("drawdown_samples") or []
+            if samples:
+                fig_dd = go.Figure()
+                fig_dd.add_trace(go.Histogram(
+                    x=samples, nbinsx=40, marker_color="rgba(246,189,22,0.75)", name="重排回撤分布",
+                ))
+                fig_dd.add_vline(
+                    x=mc.get("observed_realized_drawdown", 0), line_dash="dash",
+                    line_color="#E8684A", annotation_text="实际路径", annotation_position="top",
+                )
+                fig_dd.add_vline(
+                    x=mc.get("drawdown_p95", 0), line_dash="dot",
+                    line_color="#6DC8EC", annotation_text="95%分位", annotation_position="top",
+                )
+                fig_dd.update_layout(
+                    height=300, margin=dict(l=10, r=10, t=30, b=10),
+                    xaxis_title="最大回撤（%）", yaxis_title="频次", showlegend=False,
+                )
+                st.plotly_chart(fig_dd, width='stretch')
+            k1, k2 = st.columns(2)
+            k1.metric("中位回撤", f"{mc.get('drawdown_p50', 0):.2f}%")
+            k2.metric("95% 分位回撤", f"{mc.get('drawdown_p95', 0):.2f}%")
+            st.caption(
+                f"实测路径回撤 {mc.get('observed_realized_drawdown', 0):.2f}%，"
+                f"重排中有 {mc.get('worse_than_observed_pct', 0):.0f}% 的路径比它更深。"
+                f"实盘应按 95% 分位（{mc.get('drawdown_p95', 0):.2f}%）准备承受能力。"
+            )
+        with g2:
+            rets = mc.get("return_samples") or []
+            if rets:
+                fig_ret = go.Figure()
+                fig_ret.add_trace(go.Histogram(
+                    x=rets, nbinsx=40, marker_color="rgba(90,216,166,0.75)", name="收益分布",
+                ))
+                fig_ret.add_vline(x=0, line_dash="dash", line_color="#B0B0B0")
+                fig_ret.update_layout(
+                    height=300, margin=dict(l=10, r=10, t=30, b=10),
+                    xaxis_title="已实现盈亏收益率（%）", yaxis_title="频次", showlegend=False,
+                )
+                st.plotly_chart(fig_ret, width='stretch')
+            r1, r2 = st.columns(2)
+            r1.metric("收益 90% 区间",
+                      f"{mc.get('final_return_p5', 0):.1f}% ~ {mc.get('final_return_p95', 0):.1f}%")
+            r2.metric("亏损概率", f"{mc.get('loss_probability', 0):.1f}%",
+                      help="自助重采样下有放回抽取同笔数交易，收益为负的比例")
+
+        st.caption(
+            f"以上分布基于已实现盈亏（合计 {mc.get('realized_pnl_total', 0):,.0f} 元），"
+            f"与组合盯市口径的总收益 {report.oos_total_return:.2f}% 不可直接比较 —— "
+            f"后者含持仓浮盈浮亏。组合盯市回撤为 {mc.get('observed_drawdown', 0):.2f}%。"
+        )
+
+    # ---------- 警告与导出 ----------
+    for w in report.warnings:
+        st.warning(w)
+
+    with st.expander("📄 文字版报告（可复制/下载）"):
+        summary = report.summary()
+        st.code(summary, language="text")
+        st.download_button(
+            "⬇️ 下载 Markdown",
+            data=f"# 样本外验证报告\n\n```\n{summary}\n```\n",
+            file_name=f"walk_forward_{meta.get('strategy', 'strategy')}.md",
+            mime="text/markdown",
+            key="wf_download",
+        )
 
 
 def _draw_heatmap(results, param_grid, metric):

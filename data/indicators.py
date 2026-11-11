@@ -137,6 +137,9 @@ def add_kdj(df: pd.DataFrame, n: int = 9, m1: int = 3,
         m2: D值平滑周期，默认 3
     添加列: kdj_k, kdj_d, kdj_j
     """
+    if not isinstance(df, pd.DataFrame):
+        # 兼容回测引擎传给策略的列式只读视图（engine/bar_view.py）
+        df = df.to_frame()
     if any(c not in df.columns for c in ["high", "low", "close"]):
         return df
     df = df.copy()

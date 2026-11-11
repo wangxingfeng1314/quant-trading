@@ -1,19 +1,146 @@
 """回测引擎主循环"""
 import json
 import logging
+import time
+from functools import lru_cache
 from typing import List, Type, Callable
 import pandas as pd
 import itertools
 import concurrent.futures
 
 from engine.portfolio import Portfolio
+from engine.bar_view import BarFrame, FrameStore
 from data.storage import get_daily, save_backtest_result, save_backtest_trades
 from data.indicators import apply_indicators
 from data.cleaner import clean_daily
 from core.models import BacktestResult
-from core.config import BACKTEST_MIN_POSITION_PCT, BACKTEST_POSITION_STEP
+from core.config import (
+    BACKTEST_MIN_POSITION_PCT, BACKTEST_POSITION_STEP,
+    BACKTEST_ST_CACHE_TTL, BACKTEST_BENCHMARK_CACHE_SIZE,
+    BACKTEST_FAST_BAR_VIEW,
+)
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================
+# 进程内缓存 —— 消除网格搜索 / 批量回测中的重复 I/O
+# ============================================================
+
+_ST_CACHE = {"ts": 0.0, "lookup": {}}
+
+
+def get_st_lookup(force_refresh: bool = False) -> dict:
+    """获取 {ts_code: is_st} 映射，进程内带 TTL 缓存。
+
+    回测主循环此前每次 run() 都全量拉取标的列表并 iterrows 建字典，
+    网格搜索 N 个参数组合就是 N 次重复解析。这里做进程级缓存，
+    标的名称变更（如戴帽/摘帽）在 TTL 内可能滞后，可通过 force_refresh 强制刷新。
+    """
+    now = time.time()
+    if (not force_refresh and _ST_CACHE["lookup"]
+            and now - _ST_CACHE["ts"] < BACKTEST_ST_CACHE_TTL):
+        return _ST_CACHE["lookup"]
+
+    from data.storage import get_instrument_list
+    lookup: dict = {}
+    try:
+        instruments = get_instrument_list()
+    except Exception as e:
+        logger.warning(f"标的列表加载失败，ST 判定全部按非 ST 处理: {e}")
+        instruments = None
+
+    if instruments is not None and not instruments.empty:
+        codes = instruments["ts_code"].tolist()
+        # is_st 字段优先，其次按名称含 "ST" 兜底；两者任一命中即为 ST
+        if "is_st" in instruments.columns:
+            flag_col = instruments["is_st"].fillna(0).astype(int).eq(1).tolist()
+        else:
+            flag_col = [False] * len(codes)
+        if "name" in instruments.columns:
+            name_col = (instruments["name"].astype(str).str.upper()
+                        .str.contains("ST", na=False).tolist())
+        else:
+            name_col = [False] * len(codes)
+        lookup = {c: bool(a or b) for c, a, b in zip(codes, flag_col, name_col)}
+
+    _ST_CACHE["lookup"] = lookup
+    _ST_CACHE["ts"] = now
+    return lookup
+
+
+def clear_backtester_cache():
+    """清空引擎级缓存（标的信息变更后调用，测试亦可用它隔离状态）"""
+    _ST_CACHE["lookup"] = {}
+    _ST_CACHE["ts"] = 0.0
+    get_benchmark_returns.cache_clear()
+    _preload_cached.cache_clear()
+
+
+@lru_cache(maxsize=BACKTEST_BENCHMARK_CACHE_SIZE)
+def get_benchmark_returns(start_date: str, end_date: str) -> dict:
+    """获取基准指数日收益 {trade_date: ret}，LRU 缓存。
+
+    失败返回空字典，由调用方降级处理（Alpha/Beta 置零）。
+    """
+    import numpy as np
+    from data.storage import get_index_daily_range
+
+    for bm_code in ("000300.SH", "000001.SH"):
+        try:
+            bm_df = get_index_daily_range(bm_code, start_date, end_date)
+        except Exception as e:
+            logger.warning(f"基准 {bm_code} 加载失败: {e}")
+            continue
+        if bm_df.empty or len(bm_df) < 2 or "close" not in bm_df.columns:
+            continue
+        bm_df = bm_df.sort_values("trade_date")
+        pct = bm_df["close"].astype(float).pct_change()
+        dates = bm_df["trade_date"].astype(str).str.replace("-", "")
+        bm_map = {d: float(r) for d, r in zip(dates, pct)
+                  if pd.notna(r) and np.isfinite(r)}
+        if bm_map:
+            return bm_map
+    return {}
+
+
+class _StockArrays:
+    """单只标的的列式 numpy 视图。
+
+    回测主循环此前用 ``df.iloc[idx]["close"]`` 取当日收盘价 —— 在 30 余列的
+    宽表上每次都会构造一整行 Series 再取单值，是纯浪费。这里复用 ``FrameStore``
+    的惰性列数组，主循环按整数下标直接读取，避免任何 Series 构造开销。
+    策略仍拿到原始 DataFrame 视图，接口完全不变。
+    """
+    __slots__ = ("ts_code", "n", "dates", "_row_of", "_store",
+                 "is_st", "is_cy", "is_bj")
+
+    # 主循环与快照所需的列
+    FAST_COLS = ("open", "close", "high", "low", "ma5", "ma20", "ma60",
+                 "rsi14", "dif", "dea", "kdj_k", "atr14")
+
+    def __init__(self, ts_code: str, df: pd.DataFrame, st_lookup: dict,
+                 store: FrameStore = None):
+        self.ts_code = ts_code
+        self.n = len(df)
+        self.dates = df["trade_date"].tolist()
+        self._row_of = {d: i for i, d in enumerate(self.dates)}
+        self._store = store if store is not None else FrameStore(df)
+        self.is_st = st_lookup.get(ts_code, False)
+        self.is_cy = ts_code.startswith(("300", "301", "688"))
+        self.is_bj = ts_code.startswith(("43", "83", "87", "92")) or ts_code.endswith(".BJ")
+
+    def row_of(self, date: str):
+        """返回该交易日对应的行下标，缺失（停牌）返回 None"""
+        return self._row_of.get(date)
+
+    def val(self, col: str, i: int, default=None):
+        """读取指定列第 i 行的标量，越界或 NaN 返回 default"""
+        if i is None or i < 0 or i >= self.n or col not in self._store.columns:
+            return default
+        v = self._store.array(col)[i]
+        # NaN 判定（含 numpy float）
+        return default if v != v else float(v)
 
 
 class Backtester:
@@ -73,21 +200,9 @@ class Backtester:
         Returns:
             BacktestResult对象
         """
-        import numpy as np
-
         # 1. 初始化 ST 标的缓存 (解决 is_st 判定失效问题)
-        from data.storage import get_instrument_list
-        instruments = get_instrument_list()
-        self.st_lookup = {}
-        if not instruments.empty:
-            for _, row in instruments.iterrows():
-                code = row["ts_code"]
-                is_st = False
-                if "is_st" in row and row["is_st"] == 1:
-                    is_st = True
-                elif "name" in row and isinstance(row["name"], str) and "ST" in row["name"].upper():
-                    is_st = True
-                self.st_lookup[code] = is_st
+        #    进程内带 TTL 缓存：网格搜索 N 个组合不再重复解析标的列表
+        self.st_lookup = get_st_lookup()
 
         # 2. 加载并预处理所有股票数据（若已传入 preloaded_data 则免重复 I/O）
         if self.preloaded_data is not None and self.preloaded_data:
@@ -146,12 +261,19 @@ class Backtester:
         portfolio = Portfolio(self.initial_capital)
 
         # 预先按日期索引数据（加速查找）
+        # 向量化构建：此前用 iterrows 逐行遍历全量K线（含180天warmup），
+        # 单次回测就要 2.7s —— 占整个 run() 的 30%，且与策略复杂度无关。
         date_index = {}  # {ts_code: {trade_date: row_index}}
         for ts_code, df in stock_data.items():
-            date_index[ts_code] = {
-                row["trade_date"]: i
-                for i, row in df.iterrows()
-            }
+            date_index[ts_code] = dict(zip(df["trade_date"].tolist(), range(len(df))))
+
+        # 列式 numpy 视图：主循环取当前价/开盘价/前收/快照字段时零 Series 构造
+        frame_stores = {ts_code: FrameStore(df) for ts_code, df in stock_data.items()}
+        fast_data = {
+            ts_code: _StockArrays(ts_code, df, self.st_lookup, store=frame_stores[ts_code])
+            for ts_code, df in stock_data.items()
+        }
+        use_fast_view = BACKTEST_FAST_BAR_VIEW
 
         pending_signals = []
 
@@ -199,11 +321,14 @@ class Backtester:
             data_slice = {}  # 传给策略的数据切片
 
             for ts_code, df in stock_data.items():
-                if date in date_index[ts_code]:
-                    idx = date_index[ts_code][date]
-                    prices[ts_code] = df.iloc[idx]["close"]
-                    # 零拷贝优化：传视图而非 copy()，策略内部按需读取
-                    data_slice[ts_code] = df.iloc[:idx + 1]
+                idx = date_index[ts_code].get(date)
+                if idx is not None:
+                    prices[ts_code] = fast_data[ts_code].val("close", idx, 0.0)
+                    # 零拷贝：列式视图语义等价于 df.iloc[:idx+1]，但列访问不再构造 Series
+                    if use_fast_view:
+                        data_slice[ts_code] = BarFrame(frame_stores[ts_code], 0, idx + 1)
+                    else:
+                        data_slice[ts_code] = df.iloc[:idx + 1]
 
             if not prices:
                 continue
@@ -215,18 +340,17 @@ class Backtester:
                 pending_signals.sort(key=lambda s: (0 if s.direction == "SELL" else 1, -s.score))
                 for sig in pending_signals:
                     ts_code = sig.ts_code
-                    if ts_code not in stock_data or date not in date_index[ts_code]:
+                    curr_idx = date_index.get(ts_code, {}).get(date)
+                    if ts_code not in stock_data or curr_idx is None:
                         if sig.direction == "SELL":
                             deferred_sells.append(sig)
                         continue
-                    curr_idx = date_index[ts_code][date]
                     df_stock = stock_data[ts_code]
-                    open_price = float(df_stock.iloc[curr_idx]["open"])
-                    prev_close = float(df_stock.iloc[curr_idx - 1]["close"]) if curr_idx > 0 else 0.0
-                    is_st = self.st_lookup.get(ts_code, False)
-                    is_cy = ts_code.startswith(("300", "301", "688"))
-                    is_bj = ts_code.startswith(("43", "83", "87", "92")) or ts_code.endswith(".BJ")
-                    snapshot = self._build_snapshot(sig, df_stock, curr_idx)
+                    fa = fast_data[ts_code]
+                    open_price = fa.val("open", curr_idx, 0.0)
+                    prev_close = fa.val("close", curr_idx - 1, 0.0)
+                    is_st, is_cy, is_bj = fa.is_st, fa.is_cy, fa.is_bj
+                    snapshot = self._build_snapshot(sig, df_stock, curr_idx, fast=fa)
 
                     if sig.direction == "BUY":
                         # 大盘空头防守：禁止逆势建仓
@@ -241,7 +365,7 @@ class Backtester:
 
                         if open_price <= 0:
                             continue
-                        budget = self._calc_buy_budget(portfolio, sig, df_stock=df_stock, curr_idx=curr_idx)
+                        budget = self._calc_buy_budget(portfolio, sig, df_stock=df_stock, curr_idx=curr_idx, fast=fa)
                         volume = int(budget / open_price) // 100 * 100
                         if volume > 0:
                             portfolio.buy(
@@ -308,12 +432,14 @@ class Backtester:
                 for sig in signals:
                     ts_code = sig.ts_code
                     df_stock = stock_data.get(ts_code)
-                    curr_idx = date_index[ts_code][date] if (df_stock is not None and date in date_index.get(ts_code, {})) else 0
-                    prev_close = float(df_stock.iloc[curr_idx - 1]["close"]) if (df_stock is not None and curr_idx > 0) else 0.0
-                    is_st = self.st_lookup.get(ts_code, False)
-                    is_cy = ts_code.startswith(("300", "301", "688"))
-                    is_bj = ts_code.startswith(("43", "83", "87", "92")) or ts_code.endswith(".BJ")
-                    snapshot = self._build_snapshot(sig, df_stock, curr_idx)
+                    curr_idx = date_index.get(ts_code, {}).get(date)
+                    fa = fast_data.get(ts_code)
+                    prev_close = fa.val("close", curr_idx - 1, 0.0) if (fa is not None and curr_idx is not None) else 0.0
+                    is_st = fa.is_st if fa is not None else self.st_lookup.get(ts_code, False)
+                    is_cy = fa.is_cy if fa is not None else ts_code.startswith(("300", "301", "688"))
+                    is_bj = fa.is_bj if fa is not None else (
+                        ts_code.startswith(("43", "83", "87", "92")) or ts_code.endswith(".BJ"))
+                    snapshot = self._build_snapshot(sig, df_stock, curr_idx, fast=fa)
 
                     if sig.direction == "BUY":
                         # 大盘空头防守：禁止逆势建仓
@@ -328,7 +454,7 @@ class Backtester:
 
                         if sig.price_ref <= 0:
                             continue
-                        budget = self._calc_buy_budget(portfolio, sig, df_stock=df_stock, curr_idx=curr_idx)
+                        budget = self._calc_buy_budget(portfolio, sig, df_stock=df_stock, curr_idx=curr_idx, fast=fa)
                         volume = int(budget / sig.price_ref) // 100 * 100
                         if volume > 0:
                             portfolio.buy(
@@ -362,19 +488,12 @@ class Backtester:
             portfolio.record_equity(date, prices)
 
         # 5. 计算指标（自动关联沪深300/上证指数基准计算 Alpha 与 Beta）
-        benchmark_returns = None
-        try:
-            from data.storage import get_index_daily_range
-            for bm_code in ("000300.SH", "000001.SH"):
-                bm_df = get_index_daily_range(bm_code, self.start_date, self.end_date)
-                if not bm_df.empty and len(bm_df) >= 2 and "close" in bm_df.columns:
-                    bm_ret = bm_df["close"].pct_change().dropna().tolist()
-                    if bm_ret:
-                        benchmark_returns = bm_ret
-                        break
-        except Exception:
-            pass
-        metrics = portfolio.calc_metrics(benchmark_returns=benchmark_returns)
+        #    基准收益按 trade_date 建字典传给绩效模块做精确日期 join，
+        #    避免基准与组合交易日集合不一致时尾部截断造成的错位。
+        #    get_benchmark_returns 带 LRU 缓存：网格搜索/样本外验证反复跑同一区间时不再重复查询。
+        metrics = portfolio.calc_metrics(
+            benchmark_returns=get_benchmark_returns(self.start_date, self.end_date) or None
+        )
 
         result = BacktestResult(
             strategy=strategy.name,
@@ -419,8 +538,13 @@ class Backtester:
 
         return result
 
-    def _build_snapshot(self, sig, df_stock, curr_idx) -> dict:
-        """构建交易决策与风控执行的上下文快照"""
+    def _build_snapshot(self, sig, df_stock, curr_idx, fast=None) -> dict:
+        """构建交易决策与风控执行的上下文快照
+
+        Args:
+            fast: 可选的 _StockArrays 列式视图。传入时按整数下标直接取标量，
+                  避免在高维宽表上构造整行 Series（原本每次撮合都构造一次）。
+        """
         snap = {
             "score": getattr(sig, "score", 0.0),
             "reason": getattr(sig, "reason", ""),
@@ -429,22 +553,33 @@ class Backtester:
         if hasattr(sig, "context_snapshot") and sig.context_snapshot:
             snap.update(sig.context_snapshot)
         if df_stock is not None and curr_idx is not None and curr_idx < len(df_stock):
-            row = df_stock.iloc[curr_idx]
-            for col in ["close", "open", "high", "low", "ma5", "ma20", "ma60", "rsi14", "dif", "dea", "kdj_k", "atr14"]:
-                if col in row and pd.notna(row[col]):
-                    snap[col] = round(float(row[col]), 2)
+            if fast is not None:
+                for col in _StockArrays.FAST_COLS:
+                    v = fast.val(col, curr_idx)
+                    if v is not None:
+                        snap[col] = round(v, 2)
+            else:
+                row = df_stock.iloc[curr_idx]
+                for col in ["close", "open", "high", "low", "ma5", "ma20", "ma60",
+                            "rsi14", "dif", "dea", "kdj_k", "atr14"]:
+                    if col in row and pd.notna(row[col]):
+                        snap[col] = round(float(row[col]), 2)
         return snap
 
-    def _calc_buy_budget(self, portfolio, sig, df_stock=None, curr_idx=None) -> float:
+    def _calc_buy_budget(self, portfolio, sig, df_stock=None, curr_idx=None, fast=None) -> float:
         """根据组合总资产与持仓限制计算单笔买入预算（支持评分阶梯定仓与 ATR 波动率风险平价定仓）"""
         nav = portfolio.total_value
         max_pct = (1.0 / self.max_active_positions) if self.max_active_positions > 0 else 1.0
 
         if self.position_sizing == "atr_risk" and df_stock is not None and curr_idx is not None and curr_idx < len(df_stock):
-            row = df_stock.iloc[curr_idx]
-            atr_val = row.get("atr14")
-            ref_price = float(row.get("close", sig.price_ref or 0.0))
-            if pd.notna(atr_val) and float(atr_val) > 0 and ref_price > 0:
+            if fast is not None:
+                atr_val = fast.val("atr14", curr_idx)
+                ref_price = fast.val("close", curr_idx, 0.0)
+            else:
+                row = df_stock.iloc[curr_idx]
+                atr_val = row.get("atr14")
+                ref_price = float(row.get("close", sig.price_ref or 0.0))
+            if atr_val is not None and pd.notna(atr_val) and float(atr_val) > 0 and ref_price > 0:
                 # 单股止损距离设为 2 * ATR14（保底 2% 价格波动，防止极低波动股仓位无限膨胀）
                 stop_dist_pct = max(2.0 * float(atr_val) / ref_price, 0.02)
                 # 风险平价仓位比例 = 单笔最大风险比例 / 止损距离比例，同时结合信号置信度微调
@@ -464,8 +599,8 @@ class Backtester:
         return max(0.0, min(portfolio.cash, ideal_budget))
 
 
-def preload_backtest_data(universe: list, start_date: str, end_date: str) -> dict:
-    """预加载行情并预计算常用指标，用于多组回测与网格搜索共享内存（消除重复 I/O）"""
+@lru_cache(maxsize=BACKTEST_BENCHMARK_CACHE_SIZE)
+def _preload_cached(universe: tuple, start_date: str, end_date: str) -> dict:
     data = {}
     warmup_start = ""
     if start_date:
@@ -488,13 +623,50 @@ def preload_backtest_data(universe: list, start_date: str, end_date: str) -> dic
     return data
 
 
+def preload_backtest_data(universe: list, start_date: str, end_date: str,
+                          use_cache: bool = True) -> dict:
+    """预加载行情并预计算常用指标，用于多组回测与网格搜索共享内存（消除重复 I/O）
+
+    同一 (标的集合, 起止日期) 会命中进程级缓存。样本外验证会在多个窗口上
+    反复调用本函数，缓存可避免重复拉取与重算指标。
+    """
+    if not use_cache:
+        return _preload_cached.__wrapped__(tuple(universe), start_date, end_date)
+    return _preload_cached(tuple(universe), start_date, end_date)
+
+
+def clear_preload_cache():
+    """清空预加载数据缓存（释放内存 / 测试隔离）"""
+    _preload_cached.cache_clear()
+
+
+# 并行网格搜索的工作进程内共享数据。通过 initializer 注入一次，
+# 避免把整个 preloaded 字典随每个任务 pickle 一遍（N 个组合 = N 份数据）。
+_WORKER_STATE: dict = {}
+
+
+def _init_grid_worker(preloaded_data: dict):
+    _WORKER_STATE["preloaded"] = preloaded_data
+
+
 def _execute_single_grid_combo(args):
-    """顶层并行网格搜索执行函数（支持 Windows 跨进程序列化）"""
-    if len(args) == 7:
-        strategy_cls, params, universe, start_date, end_date, initial_capital, preloaded_data = args
-        execution_mode, risk_manager = "next_open", None
+    """顶层并行网格搜索执行函数（支持 Windows 跨进程序列化）
+
+    支持两种入参：
+      - 9 元组（旧接口，携带 preloaded_data，向后兼容）
+      - (params, strategy_cls, start_date, end_date, initial_capital,
+         execution_mode, risk_manager, universe) —— 工作进程从 initializer
+        注入的全局状态取预加载数据，不再逐任务传输。
+    """
+    if len(args) == 8 and isinstance(args[0], dict) and "preloaded" in _WORKER_STATE:
+        params, strategy_cls, start_date, end_date, initial_capital, execution_mode, risk_manager, universe = args
+        preloaded_data = _WORKER_STATE["preloaded"]
     else:
-        strategy_cls, params, universe, start_date, end_date, initial_capital, preloaded_data, execution_mode, risk_manager = args
+        if len(args) == 7:
+            strategy_cls, params, universe, start_date, end_date, initial_capital, preloaded_data = args
+            execution_mode, risk_manager = "next_open", None
+        else:
+            strategy_cls, params, universe, start_date, end_date, initial_capital, preloaded_data, execution_mode, risk_manager = args
     bt = Backtester(
         strategy_cls=strategy_cls,
         params=params,
@@ -512,10 +684,15 @@ def _execute_single_grid_combo(args):
 def grid_search(strategy_cls, universe: list, start_date: str, end_date: str,
                 initial_capital: float = 100000, param_grid: dict = None,
                 metric: str = "total_return", progress_callback: Callable = None,
-                execution_mode: str = "next_open", risk_manager = None) -> list:
+                execution_mode: str = "next_open", risk_manager = None,
+                preloaded_data: dict = None) -> list:
     """参数网格搜索（带数据预热加速，默认对齐 next_open 实盘撮合防过拟合）
 
     遍历所有参数组合，运行回测并返回按指定指标排序的结果。
+
+    Args:
+        preloaded_data: 可选的预加载数据。样本外验证会在多个窗口间复用同一份预加载
+            结果，避免每个折、每个参数组合都重复拉取行情与重算指标。
     """
     if param_grid is None:
         param_grid = {}
@@ -529,7 +706,8 @@ def grid_search(strategy_cls, universe: list, start_date: str, end_date: str,
         return []
 
     # Tier 1 优化：在网格循环前单次预热加载数据与指标计算
-    preloaded = preload_backtest_data(universe, start_date, end_date)
+    preloaded = preloaded_data if preloaded_data is not None else preload_backtest_data(
+        universe, start_date, end_date)
 
     results = []
     for i, combo in enumerate(combinations):
@@ -602,12 +780,18 @@ def grid_search_parallel(strategy_cls, universe: list, start_date: str, end_date
     tasks = []
     for combo in combinations:
         params = dict(zip(param_names, combo))
-        args = (strategy_cls, params, universe, start_date, end_date, initial_capital, preloaded, execution_mode, risk_manager)
+        # 只传参数，预加载数据通过 initializer 一次性注入各工作进程，
+        # 避免 N 个任务各自 pickle 一份完整行情字典（全市场扫描时会直接爆内存）
+        args = (params, strategy_cls, start_date, end_date, initial_capital,
+                execution_mode, risk_manager, universe)
         tasks.append((combo, args))
 
     results = []
     completed = 0
-    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+    with concurrent.futures.ProcessPoolExecutor(
+            max_workers=max_workers,
+            initializer=_init_grid_worker,
+            initargs=(preloaded,)) as executor:
         futures = {executor.submit(_execute_single_grid_combo, args): combo
                    for combo, args in tasks}
 

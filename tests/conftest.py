@@ -10,6 +10,20 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 
+@pytest.fixture(autouse=True)
+def _isolate_backtester_cache():
+    """每个用例前后清空回测引擎的进程级缓存。
+
+    引擎为了消除网格搜索中的重复 I/O，对 ST 标记与基准收益做了进程级缓存。
+    测试里会 monkeypatch data.storage 的取数函数，若不隔离缓存，
+    前一用例的结果会泄漏到后一用例，造成顺序相关的假通过/假失败。
+    """
+    from engine.backtester import clear_backtester_cache
+    clear_backtester_cache()
+    yield
+    clear_backtester_cache()
+
+
 @pytest.fixture
 def sample_prices() -> dict:
     """模拟 30 个交易日的价格数据（用于回测引擎测试）

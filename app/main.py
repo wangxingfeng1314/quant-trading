@@ -209,7 +209,7 @@ st.sidebar.markdown(
     f"**系统状态**\n\n"
     f"⭐ 自选股: {watchlist_count} 只\n\n"
     f"📊 日线数据: {db_count:,} 条\n\n"
-    f"版本: **v0.4.0**"
+    f"版本: **v0.4.4**"
 )
 
 # 登出按钮（仅认证模式下显示）

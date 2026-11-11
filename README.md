@@ -15,9 +15,9 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-v0.4.2-blue" alt="version" />
+  <img src="https://img.shields.io/badge/version-v0.4.4-blue" alt="version" />
   <img src="https://img.shields.io/badge/python-3.11-green" alt="python" />
-  <img src="https://img.shields.io/badge/tests-201%20passed-brightgreen" alt="tests" />
+  <img src="https://img.shields.io/badge/tests-249%20passed-brightgreen" alt="tests" />
   <img src="https://img.shields.io/badge/streamlit-1.58-red" alt="streamlit" />
 </p>
 
@@ -106,14 +106,15 @@ py run.py
 - 默认只列出有数据的标的（股票 + ETF）
 - **同花顺风格 K线**：红涨绿跌、四色均线、十字光标联动、昨收/最新价虚线
 
-### 🔬 回测中心（4个Tab）
+### 🔬 回测中心（5个Tab）
 
 | Tab | 功能 | 说明 |
 |:----|:-----|:------|
 | ① **运行回测** | 单次回测/批量自选股 | 选策略→调参数→选股票→运行→权益曲线+月度热力图+滚动夏普 |
 | ② **参数优化** | 网格搜索(串行+并行) | 选策略→设优化目标→设参数范围→运行→热力图+最佳参数 |
-| ③ **多策略对比** | 叠加权益曲线 | 对比单股多策略效果 |
-| ④ **历史记录** | 过往回测 | 展开查看详情+交易明细 |
+| ③ **样本外验证** | Walk-forward 滚动验证 | 每折前段挑参、后段验证→逐折对比+样本外拼接曲线+参数稳定性+蒙特卡洛 |
+| ④ **多策略对比** | 叠加权益曲线 | 对比单股多策略效果 |
+| ⑤ **历史记录** | 过往回测 | 展开查看详情+交易明细 |
 
 **回测特性：**
 - ✅ A股费用模型（佣金万2.5/最低5元/印花万5/过户费）
@@ -127,12 +128,15 @@ py run.py
 - ✅ **自选股智能自适应匹配**：批量回测时每只标的自动匹配其专属最高胜率量化策略，告别单策略削足适履
 - ✅ **双轮驱动看板与收益日历**：盈亏比(Profit Factor)、平均单笔盈亏、保本出场单数、月度收益热力图与年度收益日历明细表
 - ✅ **决策上下文快照 (Tier 3)**：`context_snapshot` 记录触发信号与成交时当期的关键指标与决策依据
-- ✅ **送转派息现金分红**：`handle_corporate_action` 自动除权除息与红利再投资结转
+- ✅ **停牌日市值向前结转**：持仓标的停牌当日无 K 线时，按最近一次已知收盘价结转市值，杜绝"停牌一天 = 净值暴跌"的虚假回撤
+- ✅ **前复权口径统一**：行情统一为前复权序列，送转派息已内含于价格，回测不再二次叠加现金分红（`handle_corporate_action` 仅保留给不复权数据管道）
 - ✅ 评分仓位管理（5%~20% 动态权重）
 - ✅ 沪深300基准对比（优先本地离线检索，自动降级网络）
 - ✅ 绩效归因（月度热力图/逐年收益/滚动夏普/卡玛比率/最大回撤）
 - ✅ 导出报告与交易明细
 - 🚀 **网格搜索并行化**：多核 CPU 加速参数优化
+- 🧪 **样本外验证框架**：Walk-forward 滚动验证（前段选参 / 后段验证）、参数稳定性检验（最优 vs 邻居）、交易序列蒙特卡洛（重排测路径风险 + 自助重采样测收益不确定性）
+- ⚡ **列式行情视图**：`BarFrame` / `BarSeries` 提供 DataFrame 兼容子集，避开 pandas 3.0 移除 `_item_cache` 后每次取列重建 Series 的开销，热点路径提速 2.5~8 倍
 
 ### 🔍 选股筛选
 按技术因子筛选股票/ETF：均线多头/MACD金叉/RSI范围/放量/布林带/KDJ金叉/涨跌幅。
@@ -270,10 +274,12 @@ FEISHU_WEBHOOK=              # 飞书机器人 Webhook
 - **智能自适应自选股回测**：根据每只标的历史特性（低波白马 vs 高弹成长）自动匹配专属最高胜率策略与最优风控参数
 - **A股完整费用模型**：佣金万2.5（最低5元）、印花税万5（仅卖出）、过户费万0.1、滑点千1
 - **风控交易规则**：涨跌停限制、T+1锁定、评分仓位管理（5%~20%）
-- **送转派息处理**：`handle_corporate_action` 自动除权除息与红利再投资结转
+- **停牌市值结转**：持仓股停牌当日沿用最近一次已知收盘价，避免市值归零污染回撤与夏普
+- **前复权口径**：行情为前复权序列，分红送转已内含于价格，不重复叠加现金分红
 - **全链路决策快照 (Tier 3)**：交易记录与风控平仓包含 `context_snapshot`，实现完整因果归因
 - **绩效全面评估**：总收益、年化收益、最大回撤、夏普比率、卡玛比率(Calmar)、Alpha、Beta、胜率
-- **网格搜索**：`grid_search()`（串行）+ `grid_search_parallel()`（并行，利用多核 CPU）
+- **网格搜索**：`grid_search()`（串行）+ `grid_search_parallel()`（并行，利用多核 CPU），预加载数据带 LRU 缓存，多组合复用同一份行情
+- **样本外验证**：`walk_forward()` + `parameter_stability()` + `monte_carlo_trades()`（`engine/validation.py`）
 - **基准对比**：沪深300归一化权益曲线（优先本地数据库检索，自动降级在线获取）
 
 ### 网格搜索并行化
@@ -290,6 +296,36 @@ results = grid_search_parallel(
     max_workers=4,   # 默认 = CPU 核心数
 )
 ```
+
+### 样本外验证（walk-forward）
+
+网格搜索得到的是**样本内最优**参数，直接当业绩展示会系统性高估。`walk_forward` 把区间切成 n 折，每折只用训练段挑参，再在紧随其后、从未参与选参的测试段运行：
+
+```python
+from engine.validation import walk_forward
+
+report = walk_forward(
+    strategy_cls=MyStrategy,
+    param_grid={"fast": [5, 10], "slow": [20, 30]} ,
+    universe=["600900.SH", "600036.SH", "601318.SH"],
+    start_date="20200101", end_date="20241231",
+    n_splits=4,          # 4 折：测试段互不重叠且首尾相接
+    train_ratio=0.7,     # 首折训练段占 70%，之后每折滚动一个测试窗宽度
+    metric="total_return",
+    execution_mode="next_open",
+)
+print(report.summary())
+```
+
+报告包含三件事：
+
+| 检验 | 回答的问题 | 判读标准 |
+|:--|:--|:--|
+| **样本外效率** | 收益在样本外衰减了多少 | 样本外均值/样本内均值 ≥ 50% 才算站得住 |
+| **参数稳定性** | 最优参数是稳健高原还是孤立尖峰 | 邻居均值/最优值 ≥ 0.7 稳健，< 0.5 高度可疑 |
+| **蒙特卡洛** | 换个交易顺序/换批交易会怎样 | 实盘承受能力按重排 95% 分位回撤准备 |
+
+蒙特卡洛刻意分成两个口径，避免常见误用：**重排（permutation）** 不改变盈亏总和，只能测路径风险（回撤可能多深）；**自助重采样（bootstrap）** 才有收益分布，亏损概率取自它。
 
 ---
 
@@ -316,7 +352,7 @@ results = grid_search_parallel(
 
 ## 🧪 测试与CI/CD
 
-### 单元测试（196个全部通过）
+### 单元测试（249个全部通过）
 
 ```bash
 # 运行全部测试
@@ -340,6 +376,9 @@ py -m pytest tests/test_tier_optimizations.py -v
 | `test_expert_optimizations.py` | 6 | 专家级风控与连接池并发测试 |
 | `test_p0_p1_p2.py` | 8 | P0~P2 级历史缺陷回归与防护验证 |
 | `test_ui_cache.py` | 7 | Streamlit 缓存机制与 UI 状态一致性 |
+| `test_p0_correctness_fixes.py` | 14 | P0 正确性回归（停牌市值结转/保本阈值/收益基准/基准日期对齐/Beta ddof） |
+| `test_bar_view.py` | 14 | 列式视图与 DataFrame 接口等价性（切片/负索引/NaN/回退路径） |
+| `test_validation.py` | 18 | 样本外验证（折切分无穿越/收益复利一致/参数稳定性/蒙特卡洛双口径） |
 
 ### CI/CD
 
@@ -347,7 +386,7 @@ py -m pytest tests/test_tier_optimizations.py -v
 
 ```
 ✅ 语法检查（py_compile 全量扫描 50+ 文件）
-✅ pytest 全部 196 个测试
+✅ pytest 全部 249 个测试
 ✅ 关键模块 import 一致性验证
 ```
 
@@ -409,6 +448,8 @@ quant-trading/
 │   └── cleaner.py            # 数据清洗（OHLC校验/停牌过滤/去重）
 ├── engine/                   # 回测与执行引擎
 │   ├── backtester.py         # 回测主循环 + next_open/current_close 双撮合 + 零拷贝
+│   ├── bar_view.py           # 列式只读视图（BarFrame/BarSeries，DataFrame 兼容子集）
+│   ├── validation.py         # 样本外验证（walk-forward + 参数稳定性 + 蒙特卡洛）
 │   ├── portfolio.py          # 组合管理（滑点/费用/除权除息/权益跟踪）
 │   ├── position.py           # 持仓类（T+1规则 + __bool__ 语义）
 │   ├── risk_manager.py       # 统一风控管理器（硬止损/跟踪止盈/周期退出）
@@ -423,7 +464,7 @@ quant-trading/
 ├── scripts/                  # 运维脚本（init_data 断层保护 + ETF 列表同步）
 ├── scheduler/                # APScheduler 定时调度（更新→扫描→推送闭环）
 ├── notifier/                 # 消息推送（5通道：Server酱/PushPlus/企微/钉钉/飞书）
-├── tests/                    # 196 个单元与回归测试（13个测试模块 100% 通过）
+├── tests/                    # 249 个单元与回归测试（17个测试模块 100% 通过）
 ├── .github/workflows/        # CI/CD
 ├── CHANGELOG.md              # 更新日志
 └── requirements.txt          # 版本锁定
@@ -473,6 +514,22 @@ class MyStrategy(BaseStrategy):
 
 详见 [CHANGELOG.md](./CHANGELOG.md)
 
+### v0.4.4 关键更新（2026-11-06）
+
+- 🧪 **样本外验证框架** — 新增 `engine/validation.py`：Walk-forward 滚动验证（每折前段挑参、后段验证，测试段严格不参与选参）+ 参数稳定性检验（最优 vs 邻居，识别孤立尖峰）+ 交易序列蒙特卡洛（重排测路径风险、自助重采样测收益不确定性）。回测中心新增「样本外验证」Tab，含逐折对比、样本外拼接净值、分布直方图与 Markdown 导出
+- ⚡ **回测提速 3.5s → 1.1s** — 消除 `date_index` 的 `iterrows` 构建（单次 2.7s）、新增 `engine/bar_view.py` 列式只读视图（绕过 pandas 3.0 移除 `_item_cache` 后每次取列重建 Series 的开销）、主循环改 numpy 直读、ST 与基准收益加缓存。四条内置策略指标完全一致，单策略提速 2.5~8 倍
+- 🗂️ **网格搜索数据复用** — `preload_backtest_data` 加 LRU 缓存，多组合与多折共享同一份预计算指标；`grid_search()` 新增 `preloaded_data` 入参
+- 🧪 **249 项测试全量通过** — 新增 `test_bar_view.py`(14) 与 `test_validation.py`(18)；测试套件耗时 66.9s → 26.8s
+
+### v0.4.3 关键更新（2026-11-06）
+
+- 🩺 **停牌日持仓市值向前结转** — 修复持仓标的停牌当日市值被按 0 计的缺陷。实测（600900.SH 停牌区间买入持有）最大回撤由 **21.87% 修正为 2.56%**、夏普 0.24 → 0.34，此前回撤与风险指标被系统性放大
+- ⚖️ **保本单判定改为相对成交额** — 由固定 15 元绝对阈值改为 `|盈亏|/成交额 <= 0.1%`，与资金规模脱钩问题解决，阈值支持 `.env` 配置
+- 📐 **总收益率分母修正** — 改用 `initial_capital` 而非首日收盘权益，消除首日成交带来的系统性偏移
+- 🎯 **Alpha/Beta 基准按日期精确对齐** — 由尾部截断改为 `trade_date` join；同时修正 `np.cov(ddof=1)` 与 `np.var(ddof=0)` 混用导致 Beta 放大 `n/(n-1)` 倍的问题
+- 📖 **前复权口径澄清** — 明确送转派息已内含于前复权价格，回测不重复叠加现金分红
+- 🧪 **217 项测试全量通过** — 新增 14 项 P0 正确性回归测试
+
 ### v0.4.2 关键更新（2026-11-06）
 
 - 🎯 **自选股 AI 策略智能推荐与性格诊断** — 研发 `services/strategy_recommender.py` 智能推荐引擎，结合历史行情对 4 大冠军策略进行快速真实撮合回测，自动为自选股计算最佳适配策略、胜率与收益。
@@ -518,5 +575,5 @@ class MyStrategy(BaseStrategy):
 ---
 
 <p align="center">
-  Made with ❤️ for A股量化 | v0.4.1
+  Made with ❤️ for A股量化 | v0.4.4
 </p>

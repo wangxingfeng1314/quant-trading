@@ -138,6 +138,34 @@ BACKTEST_MAX_POSITION_PCT = float(os.getenv("BACKTEST_MAX_POSITION_PCT", "0.20")
 BACKTEST_POSITION_STEP = BACKTEST_MAX_POSITION_PCT - BACKTEST_MIN_POSITION_PCT
 # 仓位步进 = max - min（score 乘以此值加 min）
 
+BACKTEST_BREAK_EVEN_PCT = float(os.getenv("BACKTEST_BREAK_EVEN_PCT", "0.001"))
+# 保本出场判定阈值：|单笔已实现盈亏| / 成交金额 低于此比例即视为保本离场
+# 默认 0.001（0.1%），约等于一次完整买卖来回的佣金+印花税+过户费成本
+# 说明：该判定必须与成交金额挂钩，不能用固定元数（否则 10 万与 1000 万本金共用同一阈值）
+
+BACKTEST_ST_CACHE_TTL = float(os.getenv("BACKTEST_ST_CACHE_TTL", "300"))
+# ST 标记（{ts_code: is_st}）的进程内缓存有效期（秒）
+# 网格搜索 N 个参数组合会重复建 N 次该字典，缓存后只建一次
+# 设为 0 表示每次回测都重新解析（正确性优先，牺牲性能）
+
+BACKTEST_BENCHMARK_CACHE_SIZE = int(os.getenv("BACKTEST_BENCHMARK_CACHE_SIZE", "32"))
+# 基准指数日收益（{trade_date: ret}）的 LRU 缓存条数
+# 同一区间反复回测（网格搜索/样本外验证）时命中缓存，省掉重复查询与 pct_change
+
+BACKTEST_WALK_FORWARD_MIN_TRAIN_DAYS = int(os.getenv("BACKTEST_WALK_FORWARD_MIN_TRAIN_DAYS", "120"))
+# 滚动样本外验证：单个训练窗口的最小交易日数（低于此值拒绝执行，避免参数在噪声上过拟合）
+
+BACKTEST_WALK_FORWARD_MIN_TEST_DAYS = int(os.getenv("BACKTEST_WALK_FORWARD_MIN_TEST_DAYS", "20"))
+# 滚动样本外验证：单个测试窗口的最小交易日数
+
+BACKTEST_MONTE_CARLO_RUNS = int(os.getenv("BACKTEST_MONTE_CARLO_RUNS", "1000"))
+# 交易序列蒙特卡洛重排次数（用于估计回撤与收益的分布区间）
+
+BACKTEST_FAST_BAR_VIEW = os.getenv("BACKTEST_FAST_BAR_VIEW", "true").lower() not in ("0", "false", "no")
+# 是否给策略传列式 numpy 视图（engine/bar_view.py）而非 pandas 切片。
+# 开启后列访问不再反复构造 Series，实测回测提速约 3 倍；语义完全等价。
+# 置为 false 可退回原生 DataFrame 路径，用于排查兼容性问题或做新旧对拍。
+
 # ============================================================
 # 数据源熔断配置（原 fetcher.py 硬编码）
 # ============================================================
