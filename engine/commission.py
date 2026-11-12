@@ -1,5 +1,18 @@
 """A股交易费用模型 + 滑点模型"""
+from decimal import Decimal, ROUND_HALF_UP
+
 from core.config import COMMISSION_RATE, MIN_COMMISSION, STAMP_TAX_RATE, TRANSFER_FEE_RATE, SLIPPAGE_RATE
+
+
+def _exchange_round(value) -> float:
+    """按交易所规则把价格舍入到分（ROUND_HALF_UP）。
+
+    Python 内置 ``round`` 是银行家舍入（ROUND_HALF_EVEN），在 ``x.xx5`` 这类
+    恰好半分的价位上会向下/向偶数取整，与交易所公布的涨跌停价差 1 分。
+    例如 prev_close=2.05：Python 给 1.84/2.25，交易所应为 1.85/2.26。
+    用 ``Decimal(str(...))`` 避免二进制浮点误差干扰舍入方向。
+    """
+    return float(Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
 
 def calc_cost(price: float, volume: int, direction: str,
@@ -69,31 +82,31 @@ def apply_slippage(price: float, direction: str, slippage_rate: float = None) ->
 
     if direction == "BUY":
         # 买入：实际成交价 = 触发价 * (1 + 滑点率)
-        return round(price * (1 + slippage_rate), 2)
+        return _exchange_round(price * (1 + slippage_rate))
     else:
         # 卖出：实际成交价 = 触发价 * (1 - 滑点率)
-        return round(price * (1 - slippage_rate), 2)
+        return _exchange_round(price * (1 - slippage_rate))
 
 
 def get_price_limits(prev_close: float, is_st: bool = False,
                      is_cy: bool = False, is_bj: bool = False) -> tuple:
-    """获取A股当日跌停价与涨停价 (lower, upper)"""
+    """获取A股当日跌停价与涨停价 (lower, upper)，按交易所 ROUND_HALF_UP 舍入。"""
     if prev_close <= 0:
         return (0.0, float("inf"))
 
+    p = Decimal(str(prev_close))
     if is_st:
-        upper = round(prev_close * 1.05, 2)
-        lower = round(prev_close * 0.95, 2)
+        up_factor, lo_factor = Decimal("1.05"), Decimal("0.95")
     elif is_bj:
-        upper = round(prev_close * 1.30, 2)
-        lower = round(prev_close * 0.70, 2)
+        up_factor, lo_factor = Decimal("1.30"), Decimal("0.70")
     elif is_cy:
-        upper = round(prev_close * 1.20, 2)
-        lower = round(prev_close * 0.80, 2)
+        up_factor, lo_factor = Decimal("1.20"), Decimal("0.80")
     else:
-        upper = round(prev_close * 1.10, 2)
-        lower = round(prev_close * 0.90, 2)
+        up_factor, lo_factor = Decimal("1.10"), Decimal("0.90")
 
+    q = Decimal("0.01")
+    upper = float((p * up_factor).quantize(q, rounding=ROUND_HALF_UP))
+    lower = float((p * lo_factor).quantize(q, rounding=ROUND_HALF_UP))
     return (lower, upper)
 
 
@@ -145,7 +158,7 @@ def adjust_price(price: float, prev_close: float, is_st: bool = False,
         return price
 
     lower, upper = get_price_limits(prev_close, is_st=is_st, is_cy=is_cy, is_bj=is_bj)
-    return round(max(lower, min(upper, price)), 2)
+    return _exchange_round(max(lower, min(upper, price)))
 
 
 def round_lot(volume: int, direction: str) -> int:

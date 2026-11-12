@@ -15,13 +15,56 @@ from app.st_utils import (
     format_strategy_cn, format_direction_cn, format_stock_cn,
 )
 from strategies import STRATEGY_REGISTRY, list_strategies
-from engine.backtester import Backtester, grid_search, preload_backtest_data
+from engine.backtester import (
+    Backtester, grid_search, preload_backtest_data, build_backtest_options,
+)
 from data.storage import (
     get_instrument_list, get_daily, get_backtest_results, get_backtest_trades,
     get_stocks_with_data, get_watchlist, get_backtest_result_by_id,
 )
 from data.indicators import apply_indicators
 from core.config import DEFAULT_CAPITAL
+
+
+def _render_backtest_options(prefix: str) -> dict:
+    """选参 / 样本外验证阶段的撮合规则配置。
+
+    网格搜索和 walk-forward 过去把仓位方式、持仓上限、大盘择时留在默认值上，
+    用户在单次回测里配的规则在选参阶段全部失效 —— 挑出来的「最优参数」
+    与实盘配置根本不是一回事。这里把同一套规则显式暴露出来并透传下去。
+    """
+    with st.expander("⚖️ 撮合规则（请与单次回测保持一致）", expanded=False):
+        st.caption(
+            "选参阶段与样本外验证必须使用与单次回测相同的仓位方式、持仓上限和"
+            "大盘择时，否则结论不可比。"
+        )
+        a, b = st.columns(2)
+        with a:
+            max_pos = st.number_input(
+                "最大持仓只数（0 = 不限）", min_value=0, max_value=30, value=0,
+                key=f"{prefix}_max_pos",
+            )
+            pos_sizing = st.selectbox(
+                "仓位方式", ["score", "atr_risk"],
+                format_func=lambda x: {"score": "评分阶梯定仓", "atr_risk": "ATR 风险平价"}.get(x, x),
+                key=f"{prefix}_pos_sizing",
+            )
+        with b:
+            risk_pct = st.slider(
+                "单笔风险占净值（%，仅 ATR 模式）", 0.5, 5.0, 1.5, 0.1,
+                key=f"{prefix}_risk_pct",
+            )
+            regime = st.checkbox("大盘牛熊择时", value=False, key=f"{prefix}_regime")
+        index_code = st.text_input(
+            "择时基准指数", value="000300.SH", key=f"{prefix}_index",
+        )
+    return build_backtest_options(
+        max_active_positions=int(max_pos),
+        position_sizing=pos_sizing,
+        risk_per_trade=float(risk_pct) / 100.0,
+        market_regime_filter=bool(regime),
+        market_index=(index_code or "").strip() or "000300.SH",
+    )
 
 
 def show():
@@ -726,6 +769,7 @@ def _show_grid_search():
         gs_exec_mode = "next_open" if "next_open" in gs_exec_mode_label else "current_close"
     with gs_opt_c2:
         gs_enable_rm = st.checkbox("同步开启出场风控 (RiskManager: -6%止损 / +12%回撤4%止盈)", value=True, key="gs_enable_rm")
+    gs_options = _render_backtest_options("gs")
     st.caption(f"参数组合数: {total_combos}")
 
     if st.button("🚀 开始参数优化", type="primary", width='stretch'):
@@ -755,6 +799,7 @@ def _show_grid_search():
             progress_callback=on_progress,
             execution_mode=gs_exec_mode,
             risk_manager=gs_rm,
+            backtest_options=gs_options,
         )
 
         progress_bar.empty()
@@ -924,6 +969,7 @@ def _show_validation():
         wf_enable_rm = st.checkbox("出场风控", value=True, key="wf_enable_rm",
                                    help="-6% 止损 / +12% 启动 4% 回撤止盈")
 
+    wf_options = _render_backtest_options("wf")
     st.caption(
         f"参数组合 {total_combos} 组 × {n_splits} 折 ≈ {total_combos * n_splits} 次回测，"
         f"另加一次全区间网格用于参数稳定性检验"
@@ -965,6 +1011,7 @@ def _show_validation():
                 execution_mode="next_open",
                 risk_manager=risk_manager,
                 progress_callback=on_progress,
+                backtest_options=wf_options,
             )
         except Exception as e:
             progress_bar.empty()

@@ -24,6 +24,41 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================
+# 回测引擎配置 —— 单次回测 / 网格搜索 / 样本外验证必须共用同一套撮合规则
+# ============================================================
+# 网格搜索和 walk_forward 过去只把 strategy/params/dates 传给 Backtester，
+# 把下面这些参数留在默认值上。结果就是：用户在单次回测里选了 ATR 仓位、
+# 持仓上限、大盘择时，选参阶段却按「评分定仓 + 不限持仓 + 不择时」跑，
+# 挑出来的「最优参数」与实盘配置根本不是一回事。
+BACKTEST_OPTION_KEYS = (
+    "max_active_positions", "position_sizing", "risk_per_trade",
+    "market_regime_filter", "market_index",
+)
+
+
+def build_backtest_options(max_active_positions: int = 0,
+                           position_sizing: str = "score",
+                           risk_per_trade: float = 0.015,
+                           market_regime_filter: bool = False,
+                           market_index: str = "000300.SH") -> dict:
+    """把影响撮合结果的引擎配置打包，交给 grid_search / walk_forward 复用。"""
+    return {
+        "max_active_positions": int(max_active_positions),
+        "position_sizing": position_sizing,
+        "risk_per_trade": float(risk_per_trade),
+        "market_regime_filter": bool(market_regime_filter),
+        "market_index": market_index,
+    }
+
+
+def _options_kwargs(backtest_options: dict) -> dict:
+    """只展开 Backtester 认识的配置键，忽略调用方塞进来的其它信息。"""
+    if not backtest_options:
+        return {}
+    return {k: v for k, v in backtest_options.items() if k in BACKTEST_OPTION_KEYS}
+
+
+# ============================================================
 # 进程内缓存 —— 消除网格搜索 / 批量回测中的重复 I/O
 # ============================================================
 
@@ -349,6 +384,13 @@ class Backtester:
                     fa = fast_data[ts_code]
                     open_price = fa.val("open", curr_idx, 0.0)
                     prev_close = fa.val("close", curr_idx - 1, 0.0)
+                    # 当日最低/最高价：用于区分「一字板封死」与「触板但盘中打开」
+                    bar_low = fa.val("low", curr_idx)
+                    bar_high = fa.val("high", curr_idx)
+                    # 开盘撮合时点能看到的最后一根**已收盘**K线是前一行（信号日）。
+                    # ATR14 含当日 high-low、close 更是收盘价，用执行日的这两列
+                    # 定仓位属于未来函数，必须回退一行。
+                    decision_idx = curr_idx - 1 if curr_idx and curr_idx > 0 else None
                     is_st, is_cy, is_bj = fa.is_st, fa.is_cy, fa.is_bj
                     snapshot = self._build_snapshot(sig, df_stock, curr_idx, fast=fa)
 
@@ -365,7 +407,9 @@ class Backtester:
 
                         if open_price <= 0:
                             continue
-                        budget = self._calc_buy_budget(portfolio, sig, df_stock=df_stock, curr_idx=curr_idx, fast=fa)
+                        budget = self._calc_buy_budget(
+                            portfolio, sig, df_stock=df_stock,
+                            curr_idx=decision_idx, fast=fa)
                         volume = int(budget / open_price) // 100 * 100
                         if volume > 0:
                             portfolio.buy(
@@ -378,6 +422,8 @@ class Backtester:
                                 is_cy=is_cy,
                                 is_bj=is_bj,
                                 context_snapshot=snapshot,
+                                bar_low=bar_low,
+                                bar_high=bar_high,
                             )
                     elif sig.direction == "SELL":
                         pos = portfolio.get_position(ts_code)
@@ -393,6 +439,8 @@ class Backtester:
                                 is_cy=is_cy,
                                 is_bj=is_bj,
                                 context_snapshot=snapshot,
+                                bar_low=bar_low,
+                                bar_high=bar_high,
                             )
                             # 若因一字跌停封死导致未能卖出，顺延至下一交易日继续挂单卖出
                             if sold_trade is None and sell_vol > 0:
@@ -435,6 +483,9 @@ class Backtester:
                     curr_idx = date_index.get(ts_code, {}).get(date)
                     fa = fast_data.get(ts_code)
                     prev_close = fa.val("close", curr_idx - 1, 0.0) if (fa is not None and curr_idx is not None) else 0.0
+                    # 收盘撮合时当日 low/high 已经确定，可安全用于封板判定
+                    bar_low = fa.val("low", curr_idx) if (fa is not None and curr_idx is not None) else None
+                    bar_high = fa.val("high", curr_idx) if (fa is not None and curr_idx is not None) else None
                     is_st = fa.is_st if fa is not None else self.st_lookup.get(ts_code, False)
                     is_cy = fa.is_cy if fa is not None else ts_code.startswith(("300", "301", "688"))
                     is_bj = fa.is_bj if fa is not None else (
@@ -467,6 +518,8 @@ class Backtester:
                                 is_cy=is_cy,
                                 is_bj=is_bj,
                                 context_snapshot=snapshot,
+                                bar_low=bar_low,
+                                bar_high=bar_high,
                             )
                     elif sig.direction == "SELL":
                         pos = portfolio.get_position(sig.ts_code)
@@ -482,6 +535,8 @@ class Backtester:
                                 is_cy=is_cy,
                                 is_bj=is_bj,
                                 context_snapshot=snapshot,
+                                bar_low=bar_low,
+                                bar_high=bar_high,
                             )
 
             # 记录权益
@@ -645,8 +700,9 @@ def clear_preload_cache():
 _WORKER_STATE: dict = {}
 
 
-def _init_grid_worker(preloaded_data: dict):
+def _init_grid_worker(preloaded_data: dict, backtest_options: dict = None):
     _WORKER_STATE["preloaded"] = preloaded_data
+    _WORKER_STATE["options"] = backtest_options or {}
 
 
 def _execute_single_grid_combo(args):
@@ -658,15 +714,17 @@ def _execute_single_grid_combo(args):
          execution_mode, risk_manager, universe) —— 工作进程从 initializer
         注入的全局状态取预加载数据，不再逐任务传输。
     """
-    if len(args) == 8 and isinstance(args[0], dict) and "preloaded" in _WORKER_STATE:
+    if len(args) == 8 and isinstance(args[0], dict):
         params, strategy_cls, start_date, end_date, initial_capital, execution_mode, risk_manager, universe = args
-        preloaded_data = _WORKER_STATE["preloaded"]
+        # 未经 initializer 直接调用（如单元测试）时没有共享数据，退回自行加载
+        preloaded_data = _WORKER_STATE.get("preloaded")
     else:
         if len(args) == 7:
             strategy_cls, params, universe, start_date, end_date, initial_capital, preloaded_data = args
             execution_mode, risk_manager = "next_open", None
         else:
             strategy_cls, params, universe, start_date, end_date, initial_capital, preloaded_data, execution_mode, risk_manager = args
+    from engine.risk_manager import clone_risk_manager
     bt = Backtester(
         strategy_cls=strategy_cls,
         params=params,
@@ -675,8 +733,10 @@ def _execute_single_grid_combo(args):
         end_date=end_date,
         initial_capital=initial_capital,
         execution_mode=execution_mode,
-        risk_manager=risk_manager,
+        # 并行 worker 内多个组合可能复用同一进程，必须逐组合克隆风控状态
+        risk_manager=clone_risk_manager(risk_manager),
         preloaded_data=preloaded_data,
+        **_options_kwargs(_WORKER_STATE.get("options")),
     )
     return bt.run(save=False)
 
@@ -685,7 +745,8 @@ def grid_search(strategy_cls, universe: list, start_date: str, end_date: str,
                 initial_capital: float = 100000, param_grid: dict = None,
                 metric: str = "total_return", progress_callback: Callable = None,
                 execution_mode: str = "next_open", risk_manager = None,
-                preloaded_data: dict = None) -> list:
+                preloaded_data: dict = None,
+                backtest_options: dict = None) -> list:
     """参数网格搜索（带数据预热加速，默认对齐 next_open 实盘撮合防过拟合）
 
     遍历所有参数组合，运行回测并返回按指定指标排序的结果。
@@ -693,6 +754,8 @@ def grid_search(strategy_cls, universe: list, start_date: str, end_date: str,
     Args:
         preloaded_data: 可选的预加载数据。样本外验证会在多个窗口间复用同一份预加载
             结果，避免每个折、每个参数组合都重复拉取行情与重算指标。
+        backtest_options: 由 ``build_backtest_options()`` 生成的引擎配置。选参阶段
+            必须使用与单次回测相同的仓位/持仓/择时规则，否则结果不可比。
     """
     if param_grid is None:
         param_grid = {}
@@ -713,16 +776,10 @@ def grid_search(strategy_cls, universe: list, start_date: str, end_date: str,
     for i, combo in enumerate(combinations):
         params = dict(zip(param_names, combo))
 
-        # 若传入了 risk_manager，为每轮回测克隆独立状态实例，防止 highest_prices 跨轮次污染
-        rm_copy = None
-        if risk_manager is not None:
-            from engine.risk_manager import RiskManager
-            rm_copy = RiskManager(
-                stop_loss_pct=risk_manager.stop_loss_pct,
-                trailing_stop_activation=risk_manager.trailing_stop_activation,
-                trailing_stop_callback=risk_manager.trailing_stop_callback,
-                max_holding_days=risk_manager.max_holding_days,
-            )
+        # 每轮回测克隆独立风控实例：既隔离 highest_prices 状态，也完整保留
+        # 保本止损等全部配置（旧的手工复制会静默丢掉 3 个字段）
+        from engine.risk_manager import clone_risk_manager
+        rm_copy = clone_risk_manager(risk_manager)
 
         bt = Backtester(
             strategy_cls=strategy_cls,
@@ -734,6 +791,7 @@ def grid_search(strategy_cls, universe: list, start_date: str, end_date: str,
             execution_mode=execution_mode,
             risk_manager=rm_copy,
             preloaded_data=preloaded,
+            **_options_kwargs(backtest_options),
         )
         result = bt.run(save=False)
 
@@ -758,7 +816,8 @@ def grid_search_parallel(strategy_cls, universe: list, start_date: str, end_date
                           initial_capital: float = 100000, param_grid: dict = None,
                           metric: str = "total_return", max_workers: int = None,
                           progress_callback: Callable = None,
-                          execution_mode: str = "next_open", risk_manager = None) -> list:
+                          execution_mode: str = "next_open", risk_manager = None,
+                          backtest_options: dict = None) -> list:
     """并行参数网格搜索（基于 ProcessPoolExecutor + 数据预热加速）
 
     适用于参数组合较多（>10）的场景。利用多核 CPU 并行执行，并共享预加载数据。
@@ -791,7 +850,7 @@ def grid_search_parallel(strategy_cls, universe: list, start_date: str, end_date
     with concurrent.futures.ProcessPoolExecutor(
             max_workers=max_workers,
             initializer=_init_grid_worker,
-            initargs=(preloaded,)) as executor:
+            initargs=(preloaded, backtest_options)) as executor:
         futures = {executor.submit(_execute_single_grid_combo, args): combo
                    for combo, args in tasks}
 

@@ -19,14 +19,29 @@ logger = logging.getLogger(__name__)
 # ============================================================
 # 成交量/额归一化阈值常量
 #   ratio = amount / (close * volume)
-#   用于检测AKShare不同版本返回的数据格式并自动修正
+#
+# ⚠️ close 是**前复权价**，而 amount/volume 是**未复权成交原价**，两者相差一个
+# 随除权事件阶梯变化的复权因子 f（A股长期分红股常见 1~3）。因此 ratio 不是常数，
+# 不能用 1.5 这种贴近 1 的阈值逐行判定 —— 那样会让同一批数据里一部分行 ×100、
+# 另一部分不动，直接制造成交量单位混用（历史上 601318.SH 就出现 99.7 倍断层）。
+#
+# 判定改为：整批取 ratio 中位数做**一次**决策，阈值放在 100 量级：
+#   ratio_med >= LOTS_RATIO_THRESHOLD(20) → volume 是「手」→ 整批 ×100
+#   ratio_med <= OLD_FORMAT_RATIO_THRESHOLD(0.15) → 旧格式 → V×100, Amt×1000
+#   其余 → 已是「股」，保持不动（f 在 1~20 内漂移都不会误判）
 # ============================================================
-OLD_FORMAT_RATIO_THRESHOLD = 0.15    # 旧格式: V手, Amt千元 → ratio≈0.1, 阈值<0.15
-MIXED_FORMAT_RATIO_THRESHOLD = 1.5   # 混合格式: V手, Amt元 → ratio≈100, 阈值>1.5
+OLD_FORMAT_RATIO_THRESHOLD = 0.15    # 旧格式: V手, Amt千元 → ratio≈0.1
+LOTS_RATIO_THRESHOLD = 20.0          # V手+Amt元 → ratio≈100（含复权因子）
 
 
-def clean_daily(df: pd.DataFrame) -> pd.DataFrame:
+def clean_daily(df: pd.DataFrame, volume_unit: str = "auto") -> pd.DataFrame:
     """清洗日线数据，确保数据质量
+
+    Args:
+        volume_unit: 数据源显式声明的成交量单位，避免启发式误判：
+            ``"shares"`` / ``"股"`` → 已是股，不做手→股换算；
+            ``"lots"``   / ``"手"`` → 强制 ×100；
+            ``"auto"``（默认）→ 用整批 ratio 中位数判定。
 
     清洗流程:
       0. 成交量/额单位归一化 → 统一为 V=股, Amt=元
@@ -71,46 +86,36 @@ def clean_daily(df: pd.DataFrame) -> pd.DataFrame:
 
     # ==================== 步骤2: 成交量/额单位归一化 ====================
     #
-    # 兼容 AKShare API 不同版本返回的三种数据格式：
-    #   DataFrame 中 volume 和 amount 的单位可能不一致
+    # 统一目标：volume = 股，amount = 元。
     #
-    # 检测方法：计算 ratio = amount / (close * volume)
-    #   - 新格式（当前版本）: V=股, Amt=元, ratio ≈ 1.0
-    #   - 旧格式:             V=手(100股), Amt=千元(1000元), ratio ≈ 0.1
-    #   - 混合格式:           V=手(100股), Amt=元, ratio ≈ 100
-    #
-    # 修正策略:
-    #   - ratio < OLD_FORMAT_RATIO_THRESHOLD(0.15)    → 旧格式: V×100(手→股), Amt×1000(千元→元)
-    #   - ratio > MIXED_FORMAT_RATIO_THRESHOLD(1.5)   → 混合格式: V×100(手→股), Amt不变
-    #   - 之间                                            → 新格式: 无需处理
-    #
-    # 注意: 此检测只对有成交量的样本有效(close>0, volume>0, amount>0)
+    # **整批一次决策**：ratio 含前复权因子 f（随除权事件阶梯变化，A股常见 1~3），
+    # 逐行拿阈值判断会让同一批数据里一部分行 ×100、另一部分不动，直接造成单位
+    # 混用。这里只看整批 ratio 的**中位数**，阈值放在 100 量级、远离 f 的取值域。
+    # 若数据源能显式声明 volume_unit，则完全跳过启发式。
     # ====================
-    if "close" in df.columns and "volume" in df.columns and "amount" in df.columns:
-        # 筛选有效样本（价格和量都大于0）
+    if all(c in df.columns for c in ("close", "volume", "amount")):
         mask_ok = (df["close"] > 0) & (df["volume"] > 0) & (df["amount"] > 0)
+        declared = str(volume_unit).strip().lower()
         if mask_ok.any():
-            # 计算归一化比率
-            ratio = df.loc[mask_ok, "amount"] / (df.loc[mask_ok, "close"] * df.loc[mask_ok, "volume"])
+            ratio_med = float(
+                (df.loc[mask_ok, "amount"] /
+                 (df.loc[mask_ok, "close"] * df.loc[mask_ok, "volume"])).median()
+            )
 
-            # ----- 旧格式检测: ratio ≈ 0.1 -----
-            # V在"手"单位下数值偏小 → volume × 100 转为"股"
-            # Amt在"千元"单位下数值偏小 → amount × 1000 转为"元"
-            is_old = ratio < OLD_FORMAT_RATIO_THRESHOLD
-            if is_old.any():
-                idx = ratio[is_old].index
-                df.loc[idx, "volume"] *= 100
-                df.loc[idx, "amount"] *= 1000
-                logger.info(f"规范化{len(idx)}条旧格式数据: V手→V股(×100), Amt千元→Amt元(×1000)")
-
-            # ----- 混合格式检测: ratio ≈ 100 -----
-            # V在"手"单位下数值偏小 → volume × 100 转为"股"
-            # Amt已经是"元"单位 → 不变
-            is_mixed = ratio > MIXED_FORMAT_RATIO_THRESHOLD
-            if is_mixed.any():
-                idx = ratio[is_mixed].index
-                df.loc[idx, "volume"] *= 100
-                logger.info(f"规范化{len(idx)}条混合格式数据: V手→V股(×100), Amt不变")
+            if declared in ("lots", "手") or (
+                    declared == "auto" and ratio_med >= LOTS_RATIO_THRESHOLD):
+                # V手 → V股；amount 已是元，保持不动
+                df["volume"] = df["volume"] * 100
+                logger.info(
+                    f"规范化整批 {len(df)} 条: V手→V股(×100)，整批 ratio 中位数={ratio_med:.2f}"
+                )
+            elif declared == "auto" and ratio_med <= OLD_FORMAT_RATIO_THRESHOLD:
+                # 旧格式：V手 + Amt千元
+                df["volume"] = df["volume"] * 100
+                df["amount"] = df["amount"] * 1000
+                logger.info(
+                    f"规范化整批 {len(df)} 条旧格式: V×100, Amt×1000，ratio 中位数={ratio_med:.3f}"
+                )
 
     # ==================== 步骤3: high >= low 验证 ====================
     # 最高价必须 ≥ 最低价，否则数据有误，直接剔除

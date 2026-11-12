@@ -2,9 +2,9 @@
 
 ## 项目概况
 - **路径**: `E:\wxf\claude\quant-trading\`
-- **版本**: v0.4.4（2026-11-06 性能优化 + 样本外验证）
+- **版本**: v0.4.5（2026-11-12 数据止血 + 撮合正确性）
 - **技术栈**: Streamlit + 自研 pandas 回测引擎 + 多数据源 + SQLite + Plotly
-- **测试**: 249 项全通过（17 个模块，套件 24s）
+- **测试**: 278 项全通过（18 个模块，套件 45s）
 - **Skill 位置**: 3 处已同步更新
   - `项目/.atomcode.md` — atomcode 项目指令（最详细）
   - `~/.claude/skills/quant-trading-system/SKILL.md` — atomcode 全局 skill
@@ -12,13 +12,13 @@
 
 ## 核心架构
 - `core/` — config.py + models.py + exceptions.py（自定义异常层次）
-- `data/` — fetcher.py(多源级联) / fetcher_base.py(DataSource ABC) / fetcher_circuit.py(CircuitBreaker+TokenBucket) / storage.py(SQLite+连接池+迁移) / indicators / cleaner
-- `engine/` — backtester(零拷贝+网格搜索+列式快路径) / bar_view(列式只读视图) / validation(样本外验证) / portfolio / position / commission / scanner / risk_manager
+- `data/` — fetcher.py(多源级联) / fetcher_base.py(DataSource ABC) / fetcher_circuit.py(CircuitBreaker+TokenBucket) / storage.py(SQLite+连接池+迁移+安全全量替换) / indicators / cleaner(整批单位归一化)
+- `engine/` — backtester(零拷贝+网格搜索+列式快路径+撮合规则透传) / bar_view(列式只读视图) / validation(样本外验证) / portfolio / position / commission(交易所舍入+封板判定) / scanner / risk_manager(clone_risk_manager)
 - `services/` — DataService / BacktestService / SignalService / validators / strategy_recommender
 - `strategies/` — 4 个精选冠军策略（kdj_cross / ma_cross / bollinger_reversal / signal_combo），importlib 自动发现
 - `app/` — 7个页面 + 认证 + 响应式CSS + CSV导出
 - `notifier/` — 5通道推送（Webhook日志脱敏）
-- `tests/` — 249 个单元测试（全部通过）
+- `tests/` — 278 个单元测试（全部通过）
 
 ## 数据源级联（优先级）
 1. AKShare (主力, 免费, 前复权, 熔断保护: 20次失败→300s)
@@ -35,6 +35,18 @@
 - **停牌日市值 carry-forward**：`Portfolio.last_prices` 保存最近已知价，缺行情不得按 0 计
 - **收益基准**：`calc_metrics` 用 `initial_capital` 作分母，非首日收盘权益
 - **基准对齐**：`benchmark_returns` 传 `{trade_date: ret}` dict，按日期 join；Beta 用 `ddof=1`
+- **涨跌停价必须 `ROUND_HALF_UP`**：Python `round` 是银行家舍入，交易所不是；1~200 元区间曾有 769 个价位差 1 分
+- **封板判定必须传当日 `bar_low`/`bar_high`**：只有一字板才拒单，否则「触及涨跌停价」会被误当成封死
+- **ATR 仓位只用信号日数据**：`next_open` 在 D+1 开盘撮合，绝不能读 D+1 的 close/atr14
+- **撮合规则必须透传**：网格搜索 / walk_forward / 参数稳定性一律经 `build_backtest_options()` 拿配置，否则选参阶段与实盘不是一回事
+- **风控克隆统一用 `clone_risk_manager()`**：手工复制会漏掉 `enable_break_even` 等 3 个字段，导致训练段与验证段配置不同
+
+## 数据口径约定（勿退回）
+- **禁止 `clear_daily` + 重拉**：全量替换必须走 `replace_daily()`（校验+备份+单事务）与 `resync_full_history()`（重拉失败整次放弃、绝不写回断裂数据）
+- **断层判定不可只用 `pct_chg` 反推**：字段为 0/缺失时会把合法涨停误判成除权进而清库。现按重叠日同日价格 → 可信涨跌幅 → 相邻交易日超涨跌停三级证据判定，宁可漏判不可误判
+- **全量重拉起点取库内最早日**，不是固定回溯 730 天
+- **成交量单位整批判定**：`clean_daily` 用 ratio 中位数一次决策（阈值 20），**不可用前复权 close 做逐行分母**（复权因子会漂移）。落库前经 `align_volume_unit()` 对齐历史口径
+- **真实库已修复**：`601318.SH` 2015–2025 共 2812 行「手」→「股」，消除 2026-07-31 的 99.69 倍断层；备份 `data/backups/quant_before_volume_repair_20261112_114001.db`。修复脚本 `scripts/repair_volume_units.py`（默认 dry-run）
 
 ## 性能约定（勿退回）
 - **不要用 `iterrows` 建索引**：`{d: i for i, d in enumerate(df["trade_date"].tolist())}`
@@ -53,3 +65,6 @@
 - SQLite 路径: `data/quant.db`，WAL模式 + 线程级连接池 + 文件锁
 - 认证: 在 .env 设置 `APP_AUTH_ENABLED=true` + `APP_AUTH_PASSWORD=xxx`
 - 数据缺口：`600900.SH` 在 2021-11-29~12-10 有 10 天停牌缺行，是验证市值结转的标准样本
+- v0.4.5 修复会改变历史回测指标，`backtest_result` 表中的旧记录建议重跑
+- 沙箱内 `app/main.py` 启动调 `schtasks.exe` 被黑名单拦截（容错已捕获，勿绕过），是测试套件耗时波动的根因
+- Windows 上 heredoc stdin 脚本不能用 `ProcessPoolExecutor`（spawn 报 `<stdin>`），改用 `py -c` 或临时 .py 文件

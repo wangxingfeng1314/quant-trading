@@ -91,7 +91,8 @@ class BacktestService:
     def run_grid_search(strategy_name: str, param_grid: dict, universe: list,
                         start_date: str, end_date: str,
                         capital: float = None, metric: str = "total_return",
-                        parallel: bool = False, progress_callback=None):
+                        parallel: bool = False, progress_callback=None,
+                        backtest_options: dict = None):
         """参数网格搜索
 
         Args:
@@ -104,6 +105,8 @@ class BacktestService:
             metric: 排序指标
             parallel: 是否并行
             progress_callback: 进度回调
+            backtest_options: 由 ``build_backtest_options()`` 打包的撮合规则，
+                保证选参阶段与单次回测使用相同的仓位/持仓/择时配置
 
         Returns:
             排序后的结果列表
@@ -122,6 +125,7 @@ class BacktestService:
                 start_date=start_date, end_date=end_date,
                 initial_capital=capital, param_grid=param_grid,
                 metric=metric, progress_callback=progress_callback,
+                backtest_options=backtest_options,
             )
         else:
             return grid_search(
@@ -129,6 +133,7 @@ class BacktestService:
                 start_date=start_date, end_date=end_date,
                 initial_capital=capital, param_grid=param_grid,
                 metric=metric, progress_callback=progress_callback,
+                backtest_options=backtest_options,
             )
 
     @staticmethod

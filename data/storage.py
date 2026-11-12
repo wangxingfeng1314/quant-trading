@@ -13,6 +13,8 @@ import os               # 文件路径/环境变量/锁文件
 import time             # 休眠
 import logging          # 日志记录
 import threading        # 线程本地存储（连接池）
+import re               # 备份文件名消毒
+from datetime import datetime          # 断层判定的日期间隔、备份时间戳
 from contextlib import contextmanager  # 上下文管理器装饰器
 from pathlib import Path               # 路径处理
 from typing import Optional            # 类型提示
@@ -623,20 +625,15 @@ def get_instrument_list() -> pd.DataFrame:
 # 日线行情 (daily_price) 表操作
 # ============================================================
 
-def save_daily(df: pd.DataFrame):
-    """保存日线数据到 daily_price 表（支持断点续传）
+_DAILY_COLS = ["ts_code", "trade_date", "open", "high", "low", "close",
+               "volume", "amount", "pct_chg", "turnover", "adj_factor"]
 
-    自动做以下数据标准化:
-      1. open/high/low/close → round(2) 到 2 位小数
-      2. pct_chg → round(2) 到 2 位小数
-      3. volume/amount → round(2) 避免浮点噪声
-      4. OHLC 校验：high >= low, high >= open/close, low <= open/close
 
-    使用 INSERT OR REPLACE，重复调用安全。
+def _prepare_daily_rows(df: pd.DataFrame):
+    """把日线 DataFrame 标准化为 (INSERT SQL, 参数行列表)。
+
+    供 save_daily 与 replace_daily 共用，确保两条写入路径的口径完全一致。
     """
-    if df.empty:
-        return
-
     df = df.copy()
 
     # 价格精度标准化: 统一 rounding 到2位小数
@@ -654,17 +651,78 @@ def save_daily(df: pd.DataFrame):
             df[col] = df[col].astype(float).round(2)
 
     # 动态拼接 INSERT 语句，兼容部分列缺失的场景
-    cols = ["ts_code", "trade_date", "open", "high", "low", "close",
-            "volume", "amount", "pct_chg", "turnover", "adj_factor"]
-    for col in cols:
+    for col in _DAILY_COLS:
         if col not in df.columns:
             df[col] = None                           # 缺失列补 None
-    placeholders = ",".join(["?"] * len(cols))        # 生成占位符: ?,?,?,...
-    col_names = ",".join(cols)                        # 列名列表
+    placeholders = ",".join(["?"] * len(_DAILY_COLS))
+    col_names = ",".join(_DAILY_COLS)
     sql = f"INSERT OR REPLACE INTO daily_price ({col_names}) VALUES ({placeholders})"
-    rows = df[cols].values.tolist()                   # 转为列表（性能优化：一次写入）
+    return sql, df[_DAILY_COLS].values.tolist()
+
+
+def save_daily(df: pd.DataFrame):
+    """保存日线数据到 daily_price 表（支持断点续传）
+
+    自动做以下数据标准化:
+      1. open/high/low/close → round(2) 到 2 位小数
+      2. pct_chg → round(2) 到 2 位小数
+      3. volume/amount → round(2) 避免浮点噪声
+      4. OHLC 校验：high >= low, high >= open/close, low <= open/close
+
+    使用 INSERT OR REPLACE，重复调用安全。
+    """
+    if df.empty:
+        return
+
+    sql, rows = _prepare_daily_rows(df)               # 一次标准化
     with get_conn() as conn:
         conn.executemany(sql, rows)                    # 批量写入
+
+
+def align_volume_unit(ts_code: str, df: pd.DataFrame) -> pd.DataFrame:
+    """把增量数据的 volume 单位对齐到库内该标的的历史口径（统一为「股」）。
+
+    数据源切换（AKShare → Baostock / TickFlow）可能返回不同单位的成交量。若不对齐，
+    同一标的的历史序列会出现 100 倍断层，`vol_ma`、流动性过滤、量价策略全部失真。
+
+    只在**库内历史口径本身正常**（ratio 中位数落在 0.15~20）时才对齐；若历史本身
+    是「手」，应由 ``scripts/repair_volume_units.py`` 修复历史，而不是把新数据
+    改坏去迁就错误的历史。
+    """
+    if df.empty or not all(c in df.columns for c in ("close", "volume", "amount")):
+        return df
+
+    def _ratio_med(frame: pd.DataFrame):
+        m = (frame["close"] > 0) & (frame["volume"] > 0) & (frame["amount"] > 0)
+        if not m.any():
+            return None
+        r = frame.loc[m, "amount"] / (frame.loc[m, "close"] * frame.loc[m, "volume"])
+        return float(r.median()) if len(r) else None
+
+    with get_conn() as conn:
+        hist = pd.read_sql(
+            "SELECT close, volume, amount FROM daily_price WHERE ts_code = ? "
+            "ORDER BY trade_date DESC LIMIT 30", conn, params=(ts_code,)
+        )
+    if hist.empty:
+        return df
+
+    h, n = _ratio_med(hist), _ratio_med(df)
+    if h is None or n is None or h <= 0 or n <= 0 or not (0.15 <= h <= 20):
+        return df
+
+    q = n / h
+    if 50 < q < 200:
+        out = df.copy()
+        out["volume"] = out["volume"] * 100
+        logger.warning(f"[{ts_code}] 增量成交量单位为「手」，已 ×100 对齐库内「股」口径")
+        return out
+    if 0.005 < q < 0.02:
+        out = df.copy()
+        out["volume"] = out["volume"] / 100
+        logger.warning(f"[{ts_code}] 增量成交量疑似被放大 100 倍，已 /100 对齐库内口径")
+        return out
+    return df
 
 
 def get_daily(ts_code: str, start_date: str = "", end_date: str = "",
@@ -703,64 +761,239 @@ def get_daily(ts_code: str, start_date: str = "", end_date: str = "",
 
 
 def clear_daily(ts_code: str):
-    """清空单只标的的所有日线数据（用于除权送配异常时的全量重置）"""
+    """清空单只标的的所有日线数据。
+
+    ⚠️ 危险：DELETE 会立即提交且不可撤销。**增量更新路径禁止调用本函数**。
+    除权基准迁移请改用 replace_daily()：先校验全量新数据、备份旧数据，并在
+    单个事务内完成替换，任何异常自动回滚。本函数仅供测试与显式维护使用。
+    """
     with get_conn() as conn:
         conn.execute("DELETE FROM daily_price WHERE ts_code = ?", (ts_code,))
-        logger.info(f"已清空标的 {ts_code} 的本地日线缓存")
+        logger.warning(f"已清空标的 {ts_code} 的本地日线缓存（不可撤销）")
+
+
+def get_earliest_date(ts_code: str) -> str:
+    """获取某只股票在库中最早的交易日（全量重拉的正确起点）"""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT MIN(trade_date) FROM daily_price WHERE ts_code = ?", (ts_code,)
+        ).fetchone()
+        return row[0] if row and row[0] else ""
+
+
+def _backup_daily(ts_code: str, conn):
+    """原子替换前把旧数据导出成压缩 CSV，每标的最多保留最近 3 份。"""
+    old = pd.read_sql(
+        "SELECT * FROM daily_price WHERE ts_code = ? ORDER BY trade_date",
+        conn, params=(ts_code,),
+    )
+    if old.empty:
+        return None
+    backup_dir = DB_PATH.parent / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    safe_code = re.sub(r"[^A-Za-z0-9_.-]", "_", str(ts_code))
+    path = backup_dir / f"daily_{safe_code}_{datetime.now():%Y%m%d_%H%M%S}.csv.gz"
+    old.to_csv(path, index=False, compression="gzip")
+    files = sorted(backup_dir.glob(f"daily_{safe_code}_*.csv.gz"))
+    for f in files[:-3]:
+        try:
+            f.unlink()
+        except OSError:
+            pass
+    logger.info(f"[{ts_code}] 替换前已备份 {len(old)} 行 → {path}")
+    return path
+
+
+def replace_daily(ts_code: str, new_df: pd.DataFrame,
+                  min_history_ratio: float = 0.9,
+                  allow_partial: bool = False) -> bool:
+    """原子替换单只标的的全量日线（除权基准迁移后的安全重置入口）。
+
+    取代旧的「clear_daily + 重拉」链条，消除三类不可逆丢失：
+
+      1. **先校验再删除**：新数据行数不足旧数据的 ``min_history_ratio``、或起点
+         晚于旧数据起点时直接拒绝，绝不用短历史覆盖长历史。
+      2. **备份**：替换前把旧数据导出到 ``data/backups/``（每标的最近 3 份）。
+      3. **单事务**：DELETE + INSERT 在同一个 ``get_conn()`` 事务内，异常自动回滚。
+
+    Returns:
+        True  = 已安全替换；False = 校验不通过，调用方**必须放弃本次写入**并保留原库。
+    """
+    if new_df is None or new_df.empty or "trade_date" not in new_df.columns:
+        logger.warning(f"[{ts_code}] 全量替换被拒绝：新数据为空")
+        return False
+
+    sql, rows = _prepare_daily_rows(new_df)
+    new_dates = (new_df["trade_date"].astype(str)
+                 .str.replace("-", "", regex=False).str[:8])
+    new_min = new_dates.min()
+
+    with get_conn() as conn:
+        old_n, old_min, _ = conn.execute(
+            "SELECT COUNT(*), MIN(trade_date), MAX(trade_date) "
+            "FROM daily_price WHERE ts_code = ?", (ts_code,)
+        ).fetchone()
+        old_n = int(old_n or 0)
+
+        if old_n > 0 and not allow_partial:
+            if len(new_df) < old_n * min_history_ratio:
+                logger.error(
+                    f"[{ts_code}] 全量替换被拒绝：新数据 {len(new_df)} 行 < 旧数据 "
+                    f"{old_n} 行的 {min_history_ratio:.0%}，保留原库"
+                )
+                return False
+            if old_min and new_min > str(old_min):
+                logger.error(
+                    f"[{ts_code}] 全量替换被拒绝：新数据起点 {new_min} 晚于旧数据 "
+                    f"{old_min}，会永久丢失早期历史，保留原库"
+                )
+                return False
+
+        _backup_daily(ts_code, conn)
+        conn.execute("DELETE FROM daily_price WHERE ts_code = ?", (ts_code,))
+        conn.executemany(sql, rows)
+
+    logger.info(f"[{ts_code}] 全量替换完成：{old_n} → {len(new_df)} 行，起点 {new_min}")
+    return True
+
+
+# 同一交易日同一标的的收盘价在基准未变时必须完全一致；0.5% 容差覆盖浮点/舍入差异
+ANOMALY_OVERLAP_TOL = 0.005
+# 断层判定的通用容差（pct_chg 反推有误差，保留较宽的 8%）
+ANOMALY_RATIO_TOL = 0.08
+
+
+def _infer_price_limit_pct(ts_code: str) -> float:
+    """按板块推断单日涨跌幅上限（%）。ST 无法仅凭代码识别，保守取 10%。
+
+    仅在 pct_chg 缺失/为 0 时用于区分「合法涨跌」与「除权基准迁移」。
+    """
+    parts = str(ts_code).split(".")
+    code = parts[0]
+    suffix = parts[-1].upper() if len(parts) > 1 else ""
+    if suffix == "BJ" or code.startswith(("43", "83", "87", "92")):
+        return 30.0
+    if code.startswith(("300", "301", "688", "689")):
+        return 20.0
+    return 10.0
 
 
 def check_split_dividend_anomaly(ts_code: str, new_df: pd.DataFrame) -> bool:
-    """检测增量日线数据是否与本地历史数据发生除权除息断层 (Tier 2 优化)
+    """检测增量日线是否与本地历史发生前复权基准迁移（除权除息断层）。
 
-    当股票分红送配导致前复权基准发生迁移时，增量数据的新价格会与库中历史价格脱节。
-    比对逻辑：比较增量数据的推算前收盘价与本地库中最新一根K线的收盘价，
-    若差异显著（>8%）且当日真实涨跌幅无法解释，则判定存在除权除息价格跳空。
+    旧实现只用 ``pct_chg`` 反推前收：``implied = close / (1 + pct_chg/100)``。
+    当该字段缺失、或被数据源填成 0（TickFlow 首行 fillna(0)、Tushare 降级字段
+    缺失）时，``implied == close``，于是**任意涨跌超 8% 都会被误判为除权**，
+    进而触发清库。这里改成按证据可靠性分级：
+
+      1. **重叠交易日**：增量中若含库内已有日期，直接比较同日收盘价。基准未变时
+         两者必须完全一致，这是最可靠的信号，且与涨跌幅字段无关。
+      2. **pct_chg 可信**（非空、非 0、|值| ≤ 31）：用数据源自己的前收反推对比。
+      3. **pct_chg 不可信**：仅当两日期确为相邻交易日（自然日差 ≤ 10 天）、且价格
+         变动超过该板块涨跌停上限 + 2 个百分点缓冲时才判定断层。合法涨停、跌停、
+         长期停牌后复牌都不会再被误判。
+
+    宁可漏判（价格序列略有偏差），不可误判（清库会不可逆丢失历史）。
 
     Returns:
-        True: 检测到除权断层，建议清除旧数据全量重新抓取覆写
+        True: 检测到断层，调用方应走 ``replace_daily()`` 全量替换
         False: 数据连续平稳
     """
-    if new_df is None or new_df.empty or "trade_date" not in new_df.columns:
+    if new_df is None or new_df.empty:
         return False
+    if "trade_date" not in new_df.columns or "close" not in new_df.columns:
+        return False
+
+    keep = ["trade_date", "close"] + (["pct_chg"] if "pct_chg" in new_df.columns else [])
+    new = new_df[keep].copy()
+    new["trade_date"] = (new["trade_date"].astype(str)
+                         .str.replace("-", "", regex=False).str[:8])
+    new["close"] = pd.to_numeric(new["close"], errors="coerce")
+    new = new.dropna(subset=["close"])
+    new = new[new["close"] > 0]
+    if new.empty:
+        return False
+    new = new.sort_values("trade_date")
 
     with get_conn() as conn:
-        row = conn.execute(
-            "SELECT trade_date, close FROM daily_price WHERE ts_code = ? ORDER BY trade_date DESC LIMIT 1",
-            (ts_code,)
-        ).fetchone()
-
-    if not row:
+        hist = pd.read_sql(
+            "SELECT trade_date, close FROM daily_price WHERE ts_code = ? "
+            "ORDER BY trade_date DESC LIMIT 5", conn, params=(ts_code,)
+        )
+    if hist.empty:
+        return False
+    hist["trade_date"] = (hist["trade_date"].astype(str)
+                          .str.replace("-", "", regex=False).str[:8])
+    hist["close"] = pd.to_numeric(hist["close"], errors="coerce")
+    hist = hist.dropna(subset=["close"])
+    hist = hist[hist["close"] > 0]
+    if hist.empty:
         return False
 
-    db_latest_date, db_latest_close = row
-    if not db_latest_close or db_latest_close <= 0:
-        return False
+    # ---- 证据 1：重叠交易日的同日收盘价 ----
+    overlap = new.merge(hist, on="trade_date", suffixes=("_new", "_db"))
+    if not overlap.empty:
+        dev = (overlap["close_new"] / overlap["close_db"] - 1.0).abs()
+        if float(dev.max()) > ANOMALY_OVERLAP_TOL:
+            logger.warning(
+                f"[{ts_code}] 检测到前复权基准迁移：重叠交易日同日收盘价差异 "
+                f"{dev.max():.2%}，触发全量替换保护"
+            )
+            return True
+        # 重叠段一致 → 基准到目前为止未变；但新增日期仍可能跨越除权日，
+        # 因此不在这里提前下结论，继续用证据 2/3 检查新增首日。
 
-    # 提取新数据中大于数据库最新日期的记录
-    incoming = new_df[new_df["trade_date"] > str(db_latest_date)].sort_values("trade_date")
+    # ---- 新增段检查（无论是否有重叠都要做）----
+    latest = hist.sort_values("trade_date").iloc[-1]
+    db_latest_date = str(latest["trade_date"])
+    db_latest_close = float(latest["close"])
+    incoming = new[new["trade_date"] > db_latest_date]
     if incoming.empty:
         return False
-
-    first_row = incoming.iloc[0]
-    curr_close = float(first_row.get("close", 0))
-    pct_chg = float(first_row.get("pct_chg", 0)) if pd.notna(first_row.get("pct_chg")) else 0.0
-
-    if curr_close <= 0:
+    first = incoming.iloc[0]
+    curr_close = float(first["close"])
+    if curr_close <= 0 or db_latest_close <= 0:
         return False
 
-    # 根据收盘价和涨跌幅推导前一日理论收盘价
-    denom = 1 + pct_chg / 100.0
-    implied_prev_close = curr_close / denom if denom > 0.01 else curr_close
+    # ---- 证据 2：pct_chg 可信 ----
+    pct = None
+    if "pct_chg" in incoming.columns:
+        raw = first.get("pct_chg")
+        if raw is not None and pd.notna(raw):
+            try:
+                pct = float(raw)
+            except (TypeError, ValueError):
+                pct = None
+    if pct is not None and 0.0 < abs(pct) <= 31.0:
+        implied = curr_close / (1.0 + pct / 100.0)
+        if implied > 0:
+            ratio = db_latest_close / implied
+            if abs(ratio - 1.0) > ANOMALY_RATIO_TOL:
+                logger.warning(
+                    f"[{ts_code}] 检测到除权除息跳空断层: 本地最新价={db_latest_close:.2f}, "
+                    f"数据源前收={implied:.2f}, 差异比率={ratio:.3f}"
+                )
+                return True
+        return False
 
-    # 比对差异比率
-    ratio = db_latest_close / implied_prev_close
-    if abs(ratio - 1.0) > 0.08:
+    # ---- 证据 3：pct_chg 缺失/为 0，用涨跌停上界兜底 ----
+    try:
+        gap_days = (datetime.strptime(str(first["trade_date"]), "%Y%m%d")
+                    - datetime.strptime(db_latest_date, "%Y%m%d")).days
+    except (ValueError, TypeError):
+        gap_days = 999
+    if gap_days > 10:
+        logger.debug(f"[{ts_code}] 增量与库内最新日相隔 {gap_days} 天，跳过断层判定")
+        return False
+
+    limit_pct = _infer_price_limit_pct(ts_code)
+    move = abs(curr_close / db_latest_close - 1.0)
+    if move > limit_pct / 100.0 + 0.02:
         logger.warning(
-            f"[{ts_code}] 检测到除权除息跳空断层: 本地最新价={db_latest_close}, "
-            f"增量推导前收={implied_prev_close:.2f}, 差异比率={ratio:.3f}, 触发全量覆写保护"
+            f"[{ts_code}] pct_chg 不可信，但相邻交易日价格变动 {move:.1%} "
+            f"超出 {limit_pct:.0f}% 涨跌停上限，判定为除权断层"
         )
         return True
-
     return False
 
 

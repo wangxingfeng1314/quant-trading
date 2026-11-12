@@ -37,7 +37,8 @@ sys.path.insert(0, str(PROJECT_ROOT))  # 确保能 import 项目模块
 from core.config import DATA_START_DATE                     # 数据起始日期
 from data.storage import (init_db, save_stock_list, save_daily, get_instrument_list,
                           get_latest_date, get_watchlist, save_etf_list,
-                          check_split_dividend_anomaly, clear_daily)
+                          check_split_dividend_anomaly, align_volume_unit)
+from services.data_service import resync_full_history
 from data.fetcher import (fetch_stock_list, fetch_daily, fetch_index_components,
                           check_data_freshness, update_all_indices, INDEX_CODES,
                           fetch_index_daily, fetch_etf_list, fetch_instrument_daily)
@@ -222,18 +223,19 @@ def main():
                 if df.empty:
                     fail_count += 1
                     continue
+                # 落库前对齐历史成交量单位，防止数据源切换造成 100 倍断层
+                df = align_volume_unit(ts_code, df)
 
-                # 除权除息断层保护：检测到前复权基准迁移时全量重新拉取
+                # 前复权基准迁移保护：全量重拉成功并通过安全校验才替换；
+                # 失败则跳过本标的，绝不清库、也不写回基准已断裂的增量数据
                 if check_split_dividend_anomaly(ts_code, df):
-                    logger.warning(f"[{ts_code}] 检测到除权除息跳空断层，清空本地缓存并全量重新同步...")
-                    clear_daily(ts_code)
-                    full_start = (datetime.now() - timedelta(days=730)).strftime("%Y%m%d")
-                    full_df = fetch_instrument_daily(ts_code, full_start, end_date)
-                    if not full_df.empty:
-                        df = clean_daily(full_df)
-
-                # 写入数据库（INSERT OR REPLACE，安全重复执行）
-                save_daily(df)
+                    logger.warning(f"[{ts_code}] 检测到前复权基准迁移，执行安全全量重同步...")
+                    if not resync_full_history(ts_code, end_date):
+                        fail_count += 1
+                        continue
+                else:
+                    # 写入数据库（INSERT OR REPLACE，安全重复执行）
+                    save_daily(df)
                 success_count += 1
 
                 # 每50只打印一次进度

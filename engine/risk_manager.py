@@ -237,3 +237,31 @@ class RiskManager:
                     logger.warning(f"持仓周期计算失败: {e}")
 
         return risk_signals
+
+
+def clone_risk_manager(risk_manager):
+    """创建**配置完全相同、状态独立**的风控实例。
+
+    网格搜索 / walk-forward 会跑几十次回测，若共用一个 RiskManager，
+    ``highest_prices`` 等可变状态会跨组合、跨折污染。旧实现只手工复制了
+    4 个参数，导致 ``enable_break_even``、``break_even_trigger_pct``、
+    ``break_even_buffer_pct`` 被静默重置为默认值 —— 训练段开着保本止损，
+    验证段却关掉，结论与实盘配置不可比。
+
+    统一放在这里，避免调用方各写一份、再漏掉新增字段。
+    """
+    if risk_manager is None:
+        return None
+    try:
+        return RiskManager(
+            stop_loss_pct=risk_manager.stop_loss_pct,
+            trailing_stop_activation=risk_manager.trailing_stop_activation,
+            trailing_stop_callback=risk_manager.trailing_stop_callback,
+            max_holding_days=risk_manager.max_holding_days,
+            enable_break_even=getattr(risk_manager, "enable_break_even", False),
+            break_even_trigger_pct=getattr(risk_manager, "break_even_trigger_pct", 5.0),
+            break_even_buffer_pct=getattr(risk_manager, "break_even_buffer_pct", 0.2),
+        )
+    except Exception as e:  # pragma: no cover - 风控结构变化时的兜底
+        logger.warning(f"风控实例克隆失败，退回共享实例: {e}")
+        return risk_manager

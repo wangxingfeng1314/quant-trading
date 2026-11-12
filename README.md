@@ -15,9 +15,9 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-v0.4.4-blue" alt="version" />
+  <img src="https://img.shields.io/badge/version-v0.4.5-blue" alt="version" />
   <img src="https://img.shields.io/badge/python-3.11-green" alt="python" />
-  <img src="https://img.shields.io/badge/tests-249%20passed-brightgreen" alt="tests" />
+  <img src="https://img.shields.io/badge/tests-278%20passed-brightgreen" alt="tests" />
   <img src="https://img.shields.io/badge/streamlit-1.58-red" alt="streamlit" />
 </p>
 
@@ -130,6 +130,10 @@ py run.py
 - ✅ **决策上下文快照 (Tier 3)**：`context_snapshot` 记录触发信号与成交时当期的关键指标与决策依据
 - ✅ **停牌日市值向前结转**：持仓标的停牌当日无 K 线时，按最近一次已知收盘价结转市值，杜绝"停牌一天 = 净值暴跌"的虚假回撤
 - ✅ **前复权口径统一**：行情统一为前复权序列，送转派息已内含于价格，回测不再二次叠加现金分红（`handle_corporate_action` 仅保留给不复权数据管道）
+- ✅ **涨跌停按交易所规则**：涨跌停价用 `ROUND_HALF_UP` 舍入，封板判定结合当日最高/最低价，只有真正一字板才拒单
+- ✅ **ATR 仓位无未来函数**：`next_open` 撮合只用信号日已知数据，执行日收盘价与 ATR 不会反向改写买入股数
+- ✅ **撮合规则全链路一致**：网格搜索 / 样本外验证复用单次回测的仓位方式、持仓上限与大盘择时（`build_backtest_options`）
+- ✅ **成交量单位整批归一化**：避免前复权因子漂移导致同一标的出现 100 倍成交量断层
 - ✅ 评分仓位管理（5%~20% 动态权重）
 - ✅ 沪深300基准对比（优先本地离线检索，自动降级网络）
 - ✅ 绩效归因（月度热力图/逐年收益/滚动夏普/卡玛比率/最大回撤）
@@ -352,7 +356,7 @@ print(report.summary())
 
 ## 🧪 测试与CI/CD
 
-### 单元测试（249个全部通过）
+### 单元测试（278个全部通过）
 
 ```bash
 # 运行全部测试
@@ -379,6 +383,7 @@ py -m pytest tests/test_tier_optimizations.py -v
 | `test_p0_correctness_fixes.py` | 14 | P0 正确性回归（停牌市值结转/保本阈值/收益基准/基准日期对齐/Beta ddof） |
 | `test_bar_view.py` | 14 | 列式视图与 DataFrame 接口等价性（切片/负索引/NaN/回退路径） |
 | `test_validation.py` | 18 | 样本外验证（折切分无穿越/收益复利一致/参数稳定性/蒙特卡洛双口径） |
+| `test_p1_correctness_fixes.py` | 29 | P0/P1 正确性回归（断层判定/安全全量替换/成交量单位/涨跌停舍入与封板/ATR 无未来函数/风控克隆/撮合规则透传） |
 
 ### CI/CD
 
@@ -386,7 +391,7 @@ py -m pytest tests/test_tier_optimizations.py -v
 
 ```
 ✅ 语法检查（py_compile 全量扫描 50+ 文件）
-✅ pytest 全部 249 个测试
+✅ pytest 全部 278 个测试
 ✅ 关键模块 import 一致性验证
 ```
 
@@ -456,15 +461,15 @@ quant-trading/
 │   ├── commission.py         # A股费用模型（佣金/印花税/过户费/零量防护）
 │   └── scanner.py            # 信号扫描器（并行扫描 + 缓存，支持股票+ETF）
 ├── services/                 # 服务层（解耦 UI 与数据访问）
-│   ├── data_service.py       # 数据查询/更新服务（含除权断层检测）
+│   ├── data_service.py       # 数据查询/更新服务（断层检测 + 安全全量替换 + 单位对齐）
 │   ├── backtest_service.py   # 回测/网格搜索/对比服务
 │   ├── signal_service.py     # 信号扫描/仲裁/通知服务
 │   └── validators.py         # 输入校验（股票代码/日期/资金）
 ├── strategies/               # 4 个精选核心策略（短线/中长线/震荡/综合，自动发现注册）
-├── scripts/                  # 运维脚本（init_data 断层保护 + ETF 列表同步）
+├── scripts/                  # 运维脚本（init_data 断层保护 / ETF 列表同步 / 成交量单位修复）
 ├── scheduler/                # APScheduler 定时调度（更新→扫描→推送闭环）
 ├── notifier/                 # 消息推送（5通道：Server酱/PushPlus/企微/钉钉/飞书）
-├── tests/                    # 249 个单元与回归测试（17个测试模块 100% 通过）
+├── tests/                    # 278 个单元与回归测试（18个测试模块 100% 通过）
 ├── .github/workflows/        # CI/CD
 ├── CHANGELOG.md              # 更新日志
 └── requirements.txt          # 版本锁定
@@ -513,6 +518,15 @@ class MyStrategy(BaseStrategy):
 ## 📜 Changelog
 
 详见 [CHANGELOG.md](./CHANGELOG.md)
+
+### v0.4.5 关键更新（2026-11-12）
+
+- 🛡️ **数据丢失链条堵死** — 除权断层判定改为多证据分级（重叠交易日同日价格 / 可信涨跌幅 / 相邻交易日超板块涨跌停），合法涨停与长期停牌复牌不再被误判；新增 `replace_daily()` 安全全量替换（行数与起点校验 + 压缩备份 + 单事务）与 `resync_full_history()`（起点取库内最早日、重拉失败整次放弃、绝不写回断裂数据）
+- 📊 **成交量单位污染已清洗** — `clean_daily` 改为整批判定，不再用前复权价做逐行分母；新增 `align_volume_unit()` 与 `scripts/repair_volume_units.py`。真实库中 `601318.SH` 的 2812 行「手」已归一为「股」，消除 2026-07-31 的 99.69 倍断层（替换前已自动备份）
+- 🎯 **ATR 仓位未来函数修复** — `next_open` 撮合只用信号日已知数据，执行日收盘价/ATR 不再改写买入股数
+- 🚦 **涨跌停判定修正** — 封板判定接入当日 high/low（只有一字板才拒单），涨跌停价改用交易所 `ROUND_HALF_UP`，修复 769 个价位的 1 分钱偏差
+- ⚙️ **撮合规则全链路透传** — 新增 `build_backtest_options()`，网格搜索 / 并行网格 / walk-forward / 参数稳定性统一使用与单次回测相同的仓位、持仓上限与择时配置；风控克隆统一到 `clone_risk_manager()`，不再静默丢掉保本止损配置
+- 🧪 **278 项测试全量通过** — 新增 `test_p1_correctness_fixes.py`(29)
 
 ### v0.4.4 关键更新（2026-11-06）
 
@@ -575,5 +589,5 @@ class MyStrategy(BaseStrategy):
 ---
 
 <p align="center">
-  Made with ❤️ for A股量化 | v0.4.4
+  Made with ❤️ for A股量化 | v0.4.5
 </p>

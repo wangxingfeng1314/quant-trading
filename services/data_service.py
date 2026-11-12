@@ -10,12 +10,52 @@ from data.storage import (
     get_index_daily, check_db_integrity, init_db,
     acquire_update_lock, release_update_lock,
     check_split_dividend_anomaly, clear_daily, get_instrument_name,
+    get_earliest_date, replace_daily, align_volume_unit,
 )
 from data.fetcher import fetch_daily, fetch_stock_list, fetch_etf_list, fetch_index_daily, INDEX_CODES
+from data.fetcher import fetch_instrument_daily
 from data.cleaner import clean_daily
 from services.validators import validate_stock_code, validate_date
 
 logger = logging.getLogger(__name__)
+
+
+def resync_full_history(ts_code: str, end_date: str = "") -> bool:
+    """检测到前复权基准迁移后的全量重同步（供 services 与 scripts 共用）。
+
+    与旧的「先 clear_daily 再重拉」不同，这里**只有全量数据成功拉取并通过
+    replace_daily 的安全校验后才动库**。任何一步失败都直接放弃本次更新、保留原库，
+    因此不存在「清空了却没写回来」造成的历史不可逆丢失。
+
+    全量起点取库中该标的的最早交易日，而不是固定回溯 730 天 —— 后者会永久
+    丢掉更早的历史（例如库里存着 2015 年起的数据时）。
+    """
+    end = end_date or datetime.now().strftime("%Y%m%d")
+    earliest = get_earliest_date(ts_code)
+    if not earliest:
+        from datetime import timedelta
+        earliest = (datetime.now() - timedelta(days=730)).strftime("%Y%m%d")
+
+    try:
+        full_df = fetch_instrument_daily(ts_code, start_date=earliest, end_date=end)
+    except Exception as e:
+        logger.error(f"[{ts_code}] 断层后全量重拉异常，放弃本次更新并保留原库: {e}")
+        return False
+    if full_df is None or full_df.empty:
+        logger.error(f"[{ts_code}] 断层后全量重拉无数据，放弃本次更新并保留原库")
+        return False
+
+    full_clean = clean_daily(full_df)
+    if full_clean.empty:
+        logger.error(f"[{ts_code}] 全量数据清洗后为空，放弃本次更新并保留原库")
+        return False
+
+    if not replace_daily(ts_code, full_clean):
+        logger.error(f"[{ts_code}] 全量数据未通过安全校验，保留原库数据")
+        return False
+
+    logger.info(f"[{ts_code}] 前复权基准已重置：全量写入 {len(full_clean)} 行（起点 {earliest}）")
+    return True
 
 
 class DataService:
@@ -94,15 +134,14 @@ class DataService:
                 df = clean_daily(df)
                 if df.empty:
                     return False
+                # 数据源可能切换（不同源成交量单位不同），落库前先对齐历史口径，
+                # 避免同一标的出现 100 倍成交量断层
+                df = align_volume_unit(ts_code, df)
                 if check_split_dividend_anomaly(ts_code, df):
-                    logger.warning(f"[{ts_code}] 检测到除权除息价格断层，清空本地旧缓存并全量重新同步...")
-                    clear_daily(ts_code)
-                    full_start = (datetime.now() - timedelta(days=730)).strftime("%Y%m%d")
-                    full_df = fetch_instrument_daily(ts_code, start_date=full_start, end_date=end_date)
-                    if full_df is not None and not full_df.empty:
-                        df = clean_daily(full_df)
-                if df.empty:
-                    return False
+                    logger.warning(f"[{ts_code}] 检测到前复权基准迁移，执行安全全量重同步...")
+                    # 关键：不再先 clear_daily。全量重拉失败就整次放弃、原库分毫不动，
+                    # 也绝不把这条「基准已断裂」的增量数据写回污染历史。
+                    return resync_full_history(ts_code, end_date)
                 save_daily(df)
                 logger.info(f"更新 {ts_code}: +{len(df)} 条")
                 return True

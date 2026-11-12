@@ -1,5 +1,41 @@
 # Changelog
 
+## [v0.4.5] - 2026-11-12
+
+### 🩹 P0：两处已造成实际损害的数据缺陷
+
+**① 除权断层误判 → 清库 → 历史不可逆丢失**
+
+`check_split_dividend_anomaly` 原先只用 `pct_chg` 反推前收（`implied = close / (1 + pct_chg/100)`）。当该字段缺失或被数据源填成 0 时 `implied == close`，任意涨跌超 8% 都被误判为除权 → `clear_daily` 立即提交 DELETE → 若全量重拉失败，原增量仍被 `save_daily` 写回，历史从 5 行变 1 行。且 `full_start` 写死回溯 730 天，库里存着 2015 年起的数据时一次误判就永久丢掉前 3 年。
+
+- 判定改为按证据可靠性分级：重叠交易日同日收盘价（最可靠）→ `pct_chg` 可信时反推 → `pct_chg` 不可信时仅当两日期为相邻交易日且涨幅超过板块涨跌停上限 +2pct 才判定。宁可漏判，不可误判。
+- 新增 `replace_daily()`：先校验（新数据 ≥ 旧数据 90%、起点不晚于旧起点）、再备份到 `data/backups/`（压缩 CSV，每标的留最近 3 份）、DELETE + INSERT 同一事务。
+- 新增 `resync_full_history()`：全量起点取**库内最早交易日**；只有拉取 + 清洗 + 安全校验全部通过才动库，任何一步失败整次放弃，原库分毫不动。
+- `services/data_service.py` 与 `scripts/init_data.py` 统一改走新入口，移除 `clear_daily` 直接调用。
+
+**② 成交量单位污染（真实库已修复）**
+
+`clean_daily` 拿**前复权 close** 做 `ratio = amount/(close×volume)` 的分母，而 volume/amount 是未复权原值，比值随复权因子漂移；逐行阈值 1.5 会让同一批数据一部分 ×100、一部分不动。真实库中 `601318.SH` 2015–2025 共 2812 行成交量是「手」，2026-07-31 单日跳变 **99.69 倍**。
+
+- 改为**整批一次决策**（ratio 中位数、阈值 20，远离复权因子取值域），新增 `volume_unit="auto"/"shares"/"lots"` 显式声明。
+- 新增 `align_volume_unit()`：落库前对齐历史口径，防止数据源切换产生新断层。
+- 新增 `scripts/repair_volume_units.py`（默认 dry-run，`--apply` 才写库，自动备份 + 幂等）。已对真实库执行修复，备份位于 `data/backups/`。
+
+### 🔧 P1：改写回测结论的撮合缺陷
+
+- **ATR 仓位未来函数**：`next_open` 在 D+1 开盘撮合，`_calc_buy_budget` 却读 D+1 的 `close`/`atr14`。改为只用信号日已知数据；实测只改 D+1 收盘价时买入股数由 2700/1100/4000/600 变为完全一致。
+- **涨跌停封板判定退化**：`is_limit_*_locked` 的 `low_price/high_price` 参数在 `portfolio.py` 中从未传入，退化成「委托价等于涨跌停价就拒单」。现从 K 线传入当日 `low/high`，只有真正一字板才拒单；真实库 18330 根 K 线中 41 天原本会被误杀。
+- **涨跌停价舍入**：Python `round` 是银行家舍入，交易所是 `ROUND_HALF_UP`。1.00~200.00 元逐分扫描原有 **769 个价位差 1 分**（如 `prev_close=2.05` → 1.84/2.25，应为 1.85/2.26），会把成交价 clamp 到低于跌停价的不可能价格。改用 `Decimal`。
+- **风控克隆丢配置**：`_clone_risk_manager` 与 `grid_search` 的手工复制只带 4 个参数，`enable_break_even` 等 3 项被静默重置。统一为 `engine/risk_manager.clone_risk_manager()`，完整复制 7 个字段且可变状态独立。
+- **撮合规则不透传**：`grid_search` / `grid_search_parallel` / `walk_forward` / `parameter_stability` 过去把 `position_sizing`、`max_active_positions`、`risk_per_trade`、`market_regime_filter`、`market_index` 留在默认值，选参阶段与实盘配置不是一回事。新增 `build_backtest_options()` 统一打包并透传；回测中心两个 Tab 增加「撮合规则」配置面板；`services/backtest_service.py` 同步支持。
+- `grid_search_parallel` 改为通过 worker `initializer` 注入预加载数据，不再逐任务 pickle 整份行情字典。
+
+### 🧪 测试
+
+新增 `tests/test_p1_correctness_fixes.py`（29 项），全量 **278 项通过**（45.6s）。
+
+---
+
 ## [v0.4.4] - 2026-11-06
 
 ### 🧪 样本外验证框架（方法论补全）

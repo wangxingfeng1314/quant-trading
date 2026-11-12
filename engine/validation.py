@@ -43,7 +43,10 @@ from core.config import (
     BACKTEST_WALK_FORWARD_MIN_TEST_DAYS,
     BACKTEST_MONTE_CARLO_RUNS,
 )
-from engine.backtester import Backtester, grid_search, preload_backtest_data, get_benchmark_returns
+from engine.backtester import (
+    Backtester, grid_search, preload_backtest_data, get_benchmark_returns,
+    _options_kwargs, build_backtest_options,
+)
 from engine.portfolio import Portfolio
 
 logger = logging.getLogger(__name__)
@@ -221,7 +224,8 @@ def walk_forward(strategy_cls, param_grid: dict, universe: list,
                  test_days: Optional[int] = None,
                  min_train_days: Optional[int] = None,
                  min_test_days: Optional[int] = None,
-                 progress_callback: Callable = None) -> WalkForwardReport:
+                 progress_callback: Callable = None,
+                 backtest_options: dict = None) -> WalkForwardReport:
     """滚动样本外验证（walk-forward）
 
     把 [start_date, end_date] 切成 n_splits 个「训练段 + 测试段」：
@@ -243,6 +247,9 @@ def walk_forward(strategy_cls, param_grid: dict, universe: list,
         train_days / test_days: 直接指定窗口交易日数，给定时覆盖 n_splits/train_ratio
         min_train_days / min_test_days: 窗口最小交易日数，默认取配置
         progress_callback: 进度回调 callback(done, total)
+        backtest_options: 由 ``build_backtest_options()`` 打包的引擎配置。训练段选参
+            与测试段验证必须使用与单次回测相同的仓位/持仓/择时规则，否则样本外
+            结论与实盘配置不可比。
 
     Returns:
         WalkForwardReport
@@ -310,6 +317,7 @@ def walk_forward(strategy_cls, param_grid: dict, universe: list,
             execution_mode=execution_mode,
             risk_manager=risk_manager,
             preloaded_data=preloaded,
+            backtest_options=backtest_options,
         )
         if progress_callback:
             progress_callback(i * 2 + 1, total_steps)
@@ -332,6 +340,7 @@ def walk_forward(strategy_cls, param_grid: dict, universe: list,
             execution_mode=execution_mode,
             risk_manager=_clone_risk_manager(risk_manager),
             preloaded_data=preloaded,
+            **_options_kwargs(backtest_options),
         )
         test_result = bt.run(save=False)
         if progress_callback:
@@ -398,6 +407,7 @@ def walk_forward(strategy_cls, param_grid: dict, universe: list,
         initial_capital=initial_capital,
         risk_manager=risk_manager,
         preloaded_data=preloaded,
+        backtest_options=backtest_options,
     )
     report.monte_carlo = monte_carlo_trades(
         combined_trades,
@@ -412,17 +422,11 @@ def _clone_risk_manager(risk_manager):
     """为每个折克隆独立风控实例，防止 highest_prices 等状态跨折污染"""
     if risk_manager is None:
         return None
-    try:
-        from engine.risk_manager import RiskManager
-        return RiskManager(
-            stop_loss_pct=risk_manager.stop_loss_pct,
-            trailing_stop_activation=risk_manager.trailing_stop_activation,
-            trailing_stop_callback=risk_manager.trailing_stop_callback,
-            max_holding_days=risk_manager.max_holding_days,
-        )
-    except Exception as e:  # pragma: no cover - 风控结构变化时的兜底
-        logger.warning(f"风控实例克隆失败，本折退回共享实例: {e}")
-        return risk_manager
+    # 统一委托给 risk_manager.clone_risk_manager：旧的手工复制漏掉了
+    # enable_break_even / break_even_trigger_pct / break_even_buffer_pct，
+    # 会让训练段与验证段用不同的风控配置跑，结论不可比。
+    from engine.risk_manager import clone_risk_manager
+    return clone_risk_manager(risk_manager)
 
 
 # ============================================================
@@ -434,7 +438,8 @@ def parameter_stability(strategy_cls, universe: list, start_date: str, end_date:
                         execution_mode: str = "next_open",
                         initial_capital: float = 100000,
                         risk_manager=None,
-                        preloaded_data: dict = None) -> dict:
+                        preloaded_data: dict = None,
+                        backtest_options: dict = None) -> dict:
     """检验最优参数是「稳健高原」还是「孤立尖峰」
 
     做法：在整个区间上跑完整网格，取最优组合，再看与它**只差一档参数**的邻居
@@ -455,6 +460,7 @@ def parameter_stability(strategy_cls, universe: list, start_date: str, end_date:
         initial_capital=initial_capital, param_grid=param_grid,
         metric=metric, execution_mode=execution_mode,
         risk_manager=risk_manager, preloaded_data=preloaded_data,
+        backtest_options=backtest_options,
     )
     if not grid:
         return {}

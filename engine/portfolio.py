@@ -86,14 +86,23 @@ class Portfolio:
             trade_date: str, prev_close: float = 0,
             is_st: bool = False, is_cy: bool = False, is_bj: bool = False,
             slippage: bool = True,
-            context_snapshot: dict = None) -> Optional[Trade]:
+            context_snapshot: dict = None,
+            bar_low: float = None, bar_high: float = None) -> Optional[Trade]:
         """买入股票
+
+        Args:
+            bar_low / bar_high: 当日最低/最高价。传入后，「涨停封死」判定才使用
+                真正的**一字板**条件（当日最低价也在涨停价上）；不传则退化为
+                「委托价触及涨停价即拒单」，会把「盘中打开过涨停」的正常交易日
+                误杀。
 
         Returns:
             Trade对象，如果失败（如涨停封板无法买入、资金不足）返回None
         """
         # A股涨停封板不可买入检查（检验原始委托/市场价是否已封死涨停）
-        if prev_close > 0 and is_limit_up_locked(price, prev_close, is_st=is_st, is_cy=is_cy, is_bj=is_bj):
+        if prev_close > 0 and is_limit_up_locked(
+                price, prev_close, is_st=is_st, is_cy=is_cy, is_bj=is_bj,
+                low_price=bar_low):
             return None
 
         # 滑点调整
@@ -154,8 +163,13 @@ class Portfolio:
              trade_date: str, prev_close: float = 0,
              is_st: bool = False, is_cy: bool = False, is_bj: bool = False,
              slippage: bool = True,
-             context_snapshot: dict = None) -> Optional[Trade]:
+             context_snapshot: dict = None,
+             bar_low: float = None, bar_high: float = None) -> Optional[Trade]:
         """卖出股票
+
+        Args:
+            bar_low / bar_high: 当日最低/最高价，用于区分「一字跌停」与
+                「触及跌停但盘中打开」。
 
         Returns:
             Trade对象，如果失败返回None
@@ -169,7 +183,9 @@ class Portfolio:
             return None
 
         # A股跌停封板不可卖出检查（检验原始委托/市场价是否已封死跌停）
-        if prev_close > 0 and is_limit_down_locked(price, prev_close, is_st=is_st, is_cy=is_cy, is_bj=is_bj):
+        if prev_close > 0 and is_limit_down_locked(
+                price, prev_close, is_st=is_st, is_cy=is_cy, is_bj=is_bj,
+                high_price=bar_high):
             return None
 
         # 滑点调整
