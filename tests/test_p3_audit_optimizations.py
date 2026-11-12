@@ -264,3 +264,59 @@ def test_chinese_date_picker_clamps_invalid_month_day(monkeypatch):
     monkeypatch.setattr(su.st, "number_input", lambda *a, **kw: next(vals_leap))
     assert su.chinese_date_picker("测试闰年", key="t_dp2") == "20240229"
 
+
+def test_kdj_oversold_threshold_blocks_shallow_cross():
+    """KDJ 深度超卖门槛：K=31 浅回调金叉不触发买入，K=24 超卖企稳金叉正常买入。"""
+    from strategies.kdj_cross import KDJCrossStrategy
+
+    strat = KDJCrossStrategy()
+    base = pd.DataFrame({
+        "trade_date": ["20240102", "20240103", "20240104"],
+        "open": [10.0, 9.9, 9.95],
+        "high": [10.2, 10.1, 10.2],
+        "low": [9.8, 9.8, 9.9],
+        "close": [10.0, 9.9, 10.1],
+        "volume": [100000.0] * 3,
+        "ma20": [10.0] * 3,
+        "ma60": [9.5] * 3,
+        "kdj_k": [28.0, 29.0, 31.0],
+        "kdj_d": [30.0, 30.0, 30.5],
+    })
+    assert not any(s.direction == "BUY" for s in strat.on_bar("20240104", {"000001.SZ": base}))
+
+    deep = base.copy()
+    deep["kdj_k"] = [22.0, 22.0, 25.0]
+    deep["kdj_d"] = [24.0, 23.5, 24.0]
+    sigs = strat.on_bar("20240104", {"000001.SZ": deep})
+    assert len(sigs) == 1 and sigs[0].direction == "BUY"
+
+
+def test_signal_combo_blocks_deep_below_ma60():
+    """多因子共振：价格深度处于 MA60 下方（<0.96*MA60）时不追短线弱反弹。"""
+    from strategies.signal_combo import SignalComboStrategy
+
+    strat = SignalComboStrategy(ma_period=5, buy_threshold=2.0)
+    df = pd.DataFrame({
+        "trade_date": [f"202601{i+1:02d}" for i in range(32)],
+        "open": [10.0] * 32,
+        "high": [10.2] * 32,
+        "low": [9.8] * 32,
+        "close": [9.8] * 31 + [10.5],
+        "volume": [1000.0] * 31 + [2000.0],
+        "vol_ma5": [1000.0] * 32,
+        "ma5": [10.0] * 32,
+        "ma60": [12.0] * 32,  # 10.5 < 12.0 * 0.96 = 11.52，深度空头区
+        "dif": [-0.1] * 31 + [0.2],
+        "dea": [0.0] * 31 + [0.1],
+        "macd_hist": [-0.1] * 31 + [0.1],
+        "rsi14": [45.0] * 31 + [60.0],
+        "pct_chg": [0.0] * 31 + [3.5],
+    })
+    assert not any(s.direction == "BUY" for s in strat.on_bar("20260132", {"000001.SZ": df}))
+
+    df_ok = df.copy()
+    df_ok["ma60"] = [10.4] * 32
+    sigs = strat.on_bar("20260132", {"000001.SZ": df_ok})
+    assert len(sigs) == 1 and sigs[0].direction == "BUY"
+
+

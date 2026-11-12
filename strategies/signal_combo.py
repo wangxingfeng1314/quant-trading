@@ -120,14 +120,16 @@ class SignalComboStrategy(BaseStrategy):
 
             has_position = portfolio is not None and portfolio.get_position(ts_code) is not None and not portfolio.get_position(ts_code).is_empty
 
-            # 胜率增强过滤（剔除大阴线假金叉与大阳线追高）
+            # 胜率增强过滤（剔除大阴线假金叉、大阳线追高与深跌弱势反弹）
             pct_chg = df["pct_chg"].iloc[-1] if ("pct_chg" in df.columns and pd.notna(df["pct_chg"].iloc[-1])) else (
                 (df["close"].iloc[-1] / df["close"].iloc[-2] - 1) * 100 if len(df) >= 2 else 0
             )
             candle_ok = (-2.0 <= pct_chg <= 5.0)
+            ma60_val = df["ma60"].iloc[-1] if "ma60" in df.columns else price
+            trend_floor_ok = pd.isna(ma60_val) or price >= ma60_val * 0.96
 
-            # 买入: 边沿触发（昨日未达阈值、今日首次共振达标，避免高位连涨每日重复刷屏）
-            if not has_position and total >= self.buy_threshold and prev_total < self.buy_threshold and candle_ok:
+            # 买入: 边沿触发（昨日未达阈值、今日首次共振达标，且处于 MA60*0.96 中期安全线之上）
+            if not has_position and trend_floor_ok and total >= self.buy_threshold and prev_total < self.buy_threshold and candle_ok:
                 score = round(min(0.55 + (total - self.buy_threshold) * 0.15, 0.88), 2)
                 signals.append(Signal(
                     ts_code=ts_code, trade_date=trade_date,

@@ -344,7 +344,7 @@ def _show_run_backtest():
                 "🛡️ 启用大盘牛熊择时网关 (熊市防守期自动拦截逆势买入，防假突破，大幅压降回撤)",
                 value=True,
                 key="bt_enable_regime",
-                help="当沪深300指数处于60日均线下方且处于空头下行时，自动禁止开多仓，保护本金并降低最大回撤。"
+                help="当沪深300指数处于60日均线下方且处于空头下行时自动禁止开多仓。趋势策略（双均线/多因子共振）建议开启以压降回撤；超卖反转策略（KDJ/布林）如需捕捉大盘急跌末端反弹可按需关闭。"
             )
 
             enable_rm = st.checkbox("启用独立出场风控管理器 (RiskManager)", value=True, key="bt_enable_rm")

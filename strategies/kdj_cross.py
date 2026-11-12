@@ -56,7 +56,7 @@ class KDJCrossStrategy(BaseStrategy):
 
             has_position = portfolio is not None and portfolio.get_position(ts_code) is not None and not portfolio.get_position(ts_code).is_empty
 
-            # 中期趋势过滤（防止在空头主跌浪中因K=35普通金叉盲目抄底）
+            # 中期趋势过滤（防止在空头主跌浪中因普通金叉盲目抄底）
             downtrend_penalty = False
             if "ma20" in df.columns and "ma60" in df.columns:
                 ma20_val = df["ma20"].iloc[-1]
@@ -64,7 +64,8 @@ class KDJCrossStrategy(BaseStrategy):
                 if ma20_val == ma20_val and ma60_val == ma60_val and price < ma20_val < ma60_val:
                     downtrend_penalty = True
 
-            k_buy_limit = 22 if downtrend_penalty else 35
+            # 深度超卖阈值：普通行情 K < 28，空头排列 K < 20，剔除 K=28~35 震荡区浅回调假金叉
+            k_buy_limit = 20 if downtrend_penalty else 28
             candle_ok = (price >= df["open"].iloc[-1]) if "open" in df.columns else True
 
             # 金叉买入: K上穿D 且 K在超卖低位 + 当日收阳企稳
