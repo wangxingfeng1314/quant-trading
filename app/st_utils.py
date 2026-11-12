@@ -1,4 +1,5 @@
 """Streamlit 中文组件工具 - 替换内置组件的英文文本"""
+import calendar
 from datetime import date, datetime
 import streamlit as st
 import pandas as pd
@@ -71,8 +72,10 @@ def chinese_date_input(label: str, default_start: date = None,
         ed = st.number_input("日", min_value=1, max_value=31, step=1,
                              value=default_end.day, key=f"{key}_ed", label_visibility="collapsed")
 
-    s = f"{int(sy):04d}{int(sm):02d}{int(sd):02d}"
-    e = f"{int(ey):04d}{int(em):02d}{int(ed):02d}"
+    max_s_day = calendar.monthrange(int(sy), int(sm))[1]
+    max_e_day = calendar.monthrange(int(ey), int(em))[1]
+    s = f"{int(sy):04d}{int(sm):02d}{min(int(sd), max_s_day):02d}"
+    e = f"{int(ey):04d}{int(em):02d}{min(int(ed), max_e_day):02d}"
     return s, e
 
 
@@ -94,7 +97,8 @@ def chinese_date_picker(label: str, default_val: date = None,
         d = st.number_input("日", min_value=1, max_value=31,
                             value=default_val.day, key=f"{key}_d", label_visibility="collapsed")
 
-    return f"{int(y):04d}{int(m):02d}{int(d):02d}"
+    max_day = calendar.monthrange(int(y), int(m))[1]
+    return f"{int(y):04d}{int(m):02d}{min(int(d), max_day):02d}"
 
 
 def chinese_dataframe(df: pd.DataFrame, height: int = 400):

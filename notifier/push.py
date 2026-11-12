@@ -433,15 +433,18 @@ def calc_atr_stops_and_sizing(ts_code: str, price: float, score: float = 0.7,
     }
 
 
-def notify_signals(signals, strategy_names: list = None):
+def notify_signals(signals, strategy_names: list = None) -> bool:
     """推送信号摘要
 
     Args:
         signals: Signal对象列表
         strategy_names: 策略名称列表（用于标题）
+
+    Returns:
+        是否推送成功
     """
     if not signals:
-        return
+        return False
 
     buy_count = sum(1 for s in signals if s.direction == "BUY")
     sell_count = sum(1 for s in signals if s.direction == "SELL")
@@ -458,14 +461,12 @@ def notify_signals(signals, strategy_names: list = None):
 
     title = f"📊 量化信号日报 - {today}"
 
-    # 获取基准资金与仓位参数
+    # 获取基准资金
     try:
-        from core.config import DEFAULT_CAPITAL, BACKTEST_MIN_POSITION_PCT, BACKTEST_POSITION_STEP
+        from core.config import DEFAULT_CAPITAL
         base_capital = float(DEFAULT_CAPITAL)
     except Exception:
         base_capital = 100000.0
-        BACKTEST_MIN_POSITION_PCT = 0.05
-        BACKTEST_POSITION_STEP = 0.15
 
     # 获取大盘风控环境
     regime_line = ""
@@ -554,7 +555,7 @@ def notify_signals(signals, strategy_names: list = None):
 > 2. 建议次日 9:25 集合竞价或开盘后分批择机成交；如遇跳空高开超 3% 不建议盲目追涨。
 """
 
-    send_notification(title, content)
+    return send_notification(title, content)
 
 
 def notify_backtest_result(result):

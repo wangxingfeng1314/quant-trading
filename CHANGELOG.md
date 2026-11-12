@@ -1,5 +1,24 @@
 # Changelog
 
+## [v0.4.7] - 2026-11-12
+
+### 🔬 深度审计修复与边界加固
+
+- **撮合与流动性边界 (`engine/backtester.py`)**:
+  - `current_close` 模式下，顺延卖单遇到次日停牌（`curr_idx is None`）不再以昨日信号价虚假成交，而是继续顺延到复牌日；
+  - 启用 `MAX_PARTICIPATION_RATE` 导致单日卖出仅部分成交时，自动顺延剩余可用份额至后续交易日分批出清。
+- **推荐口径修正 (`services/strategy_recommender.py`)**:
+  - 样本外统计充足性改按**已平仓卖单数**（`oos["sells"] >= OOS_MIN_TRADES`）判定，避免 3 买 0 卖或仅 1 笔平仓产生误导性胜率标签；移除无效常数缩放并统一 `-1e9` 无成交哨兵；已刷新库内 13 只自选股推荐标签。
+- **数据源熔断器 (`data/fetcher_circuit.py`)**:
+  - 冷却到期退出熔断时清零历史失败计数，给予数据源完整的恢复探测窗口（而非单次失败立即二次熔断）。
+- **调度幂等与推送 (`scheduler/__init__.py`, `notifier/push.py`)**:
+  - `scan_and_notify()` 仅在扫描与推送均未抛出异常时才写入 `notify_log` 幂等键，防止瞬时异常锁死当日补跑；`notify_signals()` 规范返回布尔值。
+- **指标与缓存 (`data/indicators.py`, `app/main.py`, `app/portfolio.py`, `app/dashboard.py`)**:
+  - `_wilder_mean()` 支持前部存在孤立 `NaN` 空洞时从首个连续窗口起算；`apply_indicators()` 改入口单次深拷贝，消除 6 次冗余拷贝；
+  - 手动更新数据、添加自选股下载（同步走 `align_volume_unit` 与除权校验）及数据库恢复后统一清理 `st.cache_data` 与 `clear_backtester_cache()`，热备文件名增加秒级后缀；
+  - `validate_capital()` 拦截 `NaN/Inf/bool`，中文日期选择器按当月天数钳位，`app/backtest.py` 修复循环内 `name_map` 重复构造与 Ruff `B023`/`B904` 告警，移除 `app/dashboard.py` 首页渲染时的阻塞性 `bs.login()` 外网探测，清理根目录 4 个历史遗留临时脚本。
+- **测试验证**: 新增 [tests/test_p3_audit_optimizations.py](tests/test_p3_audit_optimizations.py)（8 项回归测试），全量 **305 项测试全部通过**。
+
 ## [v0.4.6] - 2026-11-12
 
 ### 🧪 方法论：策略推荐不再用「同一段数据既择优又展示业绩」

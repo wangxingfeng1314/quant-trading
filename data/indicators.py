@@ -20,24 +20,39 @@ def _wilder_mean(series: pd.Series, period: int) -> pd.Series:
 
     ``ewm(alpha=1/n, adjust=False)`` 是**以序列第一个值为种子**的指数递推，
     并不是 Wilder：标准做法是先取前 n 个有效值的简单平均作种子，再执行
-    ``avg = (avg*(n-1) + x)/n``。两者在同一段波动序列上首值可差 13 个 RSI 点，
+    ``avg = (avg*(n-1)+x)/n``。两者在同一段波动序列上首值可差 13 个 RSI 点，
     且偏差要很久才衰减，会直接改变 rsi>68 / rsi<45 之类的策略判定。
 
-    同时保证预热期（不足 n 个有效值）输出 NaN，不用短窗均值冒充长周期指标。
+    同时保证预热期（不足 n 个有效值）输出 NaN，不用短窗均值冒充长周期指标；
+    若前段存在孤立缺失洞，自动顺延到第一个长度足够的连续有效窗口起算。
     """
+    if period <= 0:
+        return pd.Series(np.full(len(series), np.nan), index=series.index)
     s = pd.to_numeric(series, errors="coerce")
     arr = s.to_numpy(dtype=float)
-    out = np.full(len(arr), np.nan)
-    valid = np.flatnonzero(~np.isnan(arr))
-    if len(valid) < period:
+    n = len(arr)
+    out = np.full(n, np.nan)
+    valid = ~np.isnan(arr)
+    if int(valid.sum()) < period:
         return pd.Series(out, index=s.index)
-    start = int(valid[0])
-    seed = arr[start:start + period]
-    if np.isnan(seed).any():
+
+    # 找到第一个长度为 period 的连续非 NaN 窗口作为 SMA 种子起点
+    start = -1
+    run = 0
+    for idx, ok in enumerate(valid):
+        if ok:
+            run += 1
+            if run == period:
+                start = idx - period + 1
+                break
+        else:
+            run = 0
+    if start < 0:
         return pd.Series(out, index=s.index)
-    avg = float(seed.mean())
+
+    avg = float(arr[start:start + period].mean())
     out[start + period - 1] = avg
-    for i in range(start + period, len(arr)):
+    for i in range(start + period, n):
         x = arr[i]
         if np.isnan(x):
             out[i] = avg
@@ -47,7 +62,7 @@ def _wilder_mean(series: pd.Series, period: int) -> pd.Series:
     return pd.Series(out, index=s.index)
 
 
-def add_ma(df: pd.DataFrame, periods: list = None) -> pd.DataFrame:
+def add_ma(df: pd.DataFrame, periods: list = None, _inplace: bool = False) -> pd.DataFrame:
     """添加移动均线 (MA)
 
     参数:
@@ -57,7 +72,8 @@ def add_ma(df: pd.DataFrame, periods: list = None) -> pd.DataFrame:
     """
     if periods is None:
         periods = [5, 10, 20, 60]
-    df = df.copy()
+    if not _inplace:
+        df = df.copy()
     for p in periods:
         # rolling(window=p) 计算过去p个收盘价的平均值
         # min_periods=1 确保起始数据不足时也能计算（前p-1行用已有数据）
@@ -65,7 +81,7 @@ def add_ma(df: pd.DataFrame, periods: list = None) -> pd.DataFrame:
     return df
 
 
-def add_ema(df: pd.DataFrame, periods: list = None) -> pd.DataFrame:
+def add_ema(df: pd.DataFrame, periods: list = None, _inplace: bool = False) -> pd.DataFrame:
     """添加指数移动均线 (EMA)
 
     参数:
@@ -75,7 +91,8 @@ def add_ema(df: pd.DataFrame, periods: list = None) -> pd.DataFrame:
     """
     if periods is None:
         periods = [12, 26]
-    df = df.copy()
+    if not _inplace:
+        df = df.copy()
     for p in periods:
         # ewm(span=p) 使用指数加权，adjust=False 使用递归公式
         df[f"ema{p}"] = df["close"].ewm(span=p, adjust=False).mean()
@@ -83,7 +100,7 @@ def add_ema(df: pd.DataFrame, periods: list = None) -> pd.DataFrame:
 
 
 def add_macd(df: pd.DataFrame, fast: int = 12, slow: int = 26,
-             signal: int = 9) -> pd.DataFrame:
+             signal: int = 9, _inplace: bool = False) -> pd.DataFrame:
     """添加MACD指标
 
     经典MACD公式:
@@ -93,7 +110,8 @@ def add_macd(df: pd.DataFrame, fast: int = 12, slow: int = 26,
 
     添加列: dif, dea, macd_hist
     """
-    df = df.copy()
+    if not _inplace:
+        df = df.copy()
     # 计算快慢EMA
     ema_fast = df["close"].ewm(span=fast, adjust=False).mean()
     ema_slow = df["close"].ewm(span=slow, adjust=False).mean()
@@ -103,7 +121,7 @@ def add_macd(df: pd.DataFrame, fast: int = 12, slow: int = 26,
     return df
 
 
-def add_rsi(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
+def add_rsi(df: pd.DataFrame, period: int = 14, _inplace: bool = False) -> pd.DataFrame:
     """添加RSI指标（Wilder平滑法）
 
     使用 Wilder's 平滑（alpha=1/period），与传统 RSI 公式一致。
@@ -113,7 +131,8 @@ def add_rsi(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
         period: 计算周期，默认 14
     添加列: rsi14
     """
-    df = df.copy()
+    if not _inplace:
+        df = df.copy()
     delta = df["close"].diff()                    # 每日价格变化
     gain = delta.clip(lower=0)                    # 涨幅（正值）
     loss = (-delta).clip(lower=0)                 # 跌幅（正值）
@@ -134,7 +153,7 @@ def add_rsi(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
 
 
 def add_bollinger(df: pd.DataFrame, period: int = 20,
-                  std_dev: float = 2.0) -> pd.DataFrame:
+                  std_dev: float = 2.0, _inplace: bool = False) -> pd.DataFrame:
     """添加布林带 (Bollinger Bands)
 
     公式:
@@ -147,7 +166,8 @@ def add_bollinger(df: pd.DataFrame, period: int = 20,
         std_dev: 标准差倍数，默认 2.0
     添加列: boll_mid, boll_upper, boll_lower
     """
-    df = df.copy()
+    if not _inplace:
+        df = df.copy()
     # min_periods=period: 确保前period-1行不计算（数据不足时无意义）
     df["boll_mid"] = df["close"].rolling(window=period, min_periods=period).mean()
     std = df["close"].rolling(window=period, min_periods=period).std()
@@ -157,7 +177,7 @@ def add_bollinger(df: pd.DataFrame, period: int = 20,
 
 
 def add_kdj(df: pd.DataFrame, n: int = 9, m1: int = 3,
-            m2: int = 3) -> pd.DataFrame:
+            m2: int = 3, _inplace: bool = False) -> pd.DataFrame:
     """添加KDJ随机指标
 
     公式:
@@ -175,9 +195,11 @@ def add_kdj(df: pd.DataFrame, n: int = 9, m1: int = 3,
     if not isinstance(df, pd.DataFrame):
         # 兼容回测引擎传给策略的列式只读视图（engine/bar_view.py）
         df = df.to_frame()
+        _inplace = False
     if any(c not in df.columns for c in ["high", "low", "close"]):
         return df
-    df = df.copy()
+    if not _inplace:
+        df = df.copy()
     low_n = df["low"].rolling(window=n, min_periods=1).min()    # N日内最低价
     high_n = df["high"].rolling(window=n, min_periods=1).max()  # N日内最高价
     price_range = (high_n - low_n).replace(0, np.nan)
@@ -189,7 +211,7 @@ def add_kdj(df: pd.DataFrame, n: int = 9, m1: int = 3,
     return df
 
 
-def add_volume_ma(df: pd.DataFrame, periods: list = None) -> pd.DataFrame:
+def add_volume_ma(df: pd.DataFrame, periods: list = None, _inplace: bool = False) -> pd.DataFrame:
     """添加成交量均线
 
     参数:
@@ -198,7 +220,8 @@ def add_volume_ma(df: pd.DataFrame, periods: list = None) -> pd.DataFrame:
     """
     if periods is None:
         periods = [5, 10, 20]
-    df = df.copy()
+    if not _inplace:
+        df = df.copy()
     # 兼容 volume 和 vol 两种常见列名
     vol_col = "volume" if "volume" in df.columns else ("vol" if "vol" in df.columns else None)
     if vol_col is not None:
@@ -207,7 +230,7 @@ def add_volume_ma(df: pd.DataFrame, periods: list = None) -> pd.DataFrame:
     return df
 
 
-def add_atr(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
+def add_atr(df: pd.DataFrame, period: int = 14, _inplace: bool = False) -> pd.DataFrame:
     """添加ATR (Average True Range) 平均真实波幅及 ATR%
 
     True Range = max(high-low, |high-prev_close|, |low-prev_close|)
@@ -223,7 +246,8 @@ def add_atr(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
     """
     if any(c not in df.columns for c in ["high", "low", "close"]):
         return df
-    df = df.copy()
+    if not _inplace:
+        df = df.copy()
     high = df["high"]
     low = df["low"]
     prev_close = df["close"].shift(1)             # 前一日收盘价
@@ -256,15 +280,16 @@ def apply_indicators(df: pd.DataFrame, indicators: list = None) -> pd.DataFrame:
     if df is None or df.empty or "close" not in df.columns:
         return df if df is not None else pd.DataFrame()
 
-    # 所有支持的指标及其对应的计算函数
+    # 入口一次性复制，内部各指标复用该副本，消除原本 7 次重复整表深拷贝
+    df = df.copy()
     all_indicators = {
-        "ma": lambda d: add_ma(d),
-        "macd": lambda d: add_macd(d),
-        "rsi": lambda d: add_rsi(d),
-        "boll": lambda d: add_bollinger(d),
-        "kdj": lambda d: add_kdj(d),
-        "vol_ma": lambda d: add_volume_ma(d),
-        "atr": lambda d: add_atr(d),
+        "ma": lambda d: add_ma(d, _inplace=True),
+        "macd": lambda d: add_macd(d, _inplace=True),
+        "rsi": lambda d: add_rsi(d, _inplace=True),
+        "boll": lambda d: add_bollinger(d, _inplace=True),
+        "kdj": lambda d: add_kdj(d, _inplace=True),
+        "vol_ma": lambda d: add_volume_ma(d, _inplace=True),
+        "atr": lambda d: add_atr(d, _inplace=True),
     }
 
     # 默认指标组合：覆盖最常用的技术分析指标
@@ -274,6 +299,6 @@ def apply_indicators(df: pd.DataFrame, indicators: list = None) -> pd.DataFrame:
     # 依次计算每个指标
     for name in indicators:
         if name in all_indicators:
-            df = all_indicators[name](df)  # 每个指标都是纯函数，返回新DataFrame
+            df = all_indicators[name](df)
 
     return df

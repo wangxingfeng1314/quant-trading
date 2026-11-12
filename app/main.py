@@ -264,7 +264,7 @@ st.sidebar.markdown(
     f"**系统状态**\n\n"
     f"⭐ 自选股: {watchlist_count} 只\n\n"
     f"📊 日线数据: {db_count:,} 条\n\n"
-    f"版本: **v0.4.6**"
+    f"版本: **v0.4.7**"
 )
 
 # 登出按钮（仅认证模式下显示）
@@ -302,6 +302,9 @@ if st.sidebar.button("🔄 更新自选股数据", type="primary", width="stretc
             else:
                 from scripts.init_data import run_update
                 run_update(days=14, watchlist=True, progress_callback=_on_progress)
+                from engine.backtester import clear_backtester_cache
+                st.cache_data.clear()
+                clear_backtester_cache()
                 progress_bar.empty()
                 status_text.empty()
                 st.sidebar.success(f"✅ 数据更新完成 ({datetime.now().strftime('%H:%M')})")
@@ -320,7 +323,7 @@ backup_dir = DB_PATH.parent / "backups"
 backup_dir.mkdir(exist_ok=True)
 
 if st.sidebar.button("💾 备份数据库", width="stretch"):
-    backup_name = f"quant_{datetime.now().strftime('%Y%m%d_%H%M')}.db"
+    backup_name = f"quant_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
     backup_path = backup_dir / backup_name
     try:
         backup_database(backup_path)
@@ -340,6 +343,9 @@ if backups:
         if st.button("⚠️ 恢复此备份", type="secondary", disabled=not confirm):
             try:
                 restore_database(backup_dir / selected)
+                from engine.backtester import clear_backtester_cache
+                st.cache_data.clear()
+                clear_backtester_cache()
                 st.success(f"✅ 已恢复: {selected}")
                 st.rerun()
             except Exception as e:

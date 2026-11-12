@@ -2041,6 +2041,8 @@ def _show_history():
         st.markdown("---")
 
     # 详细记录展示
+    stock_df_hist = cached_instrument_list()
+    hist_name_map = dict(zip(stock_df_hist["ts_code"], stock_df_hist["name"])) if not stock_df_hist.empty else {}
     for _, row in results_df.head(20).iterrows():
         with st.expander(
             f"#{row['id']} {format_strategy_cn(row['strategy'])} ({row['strategy']}) | {row['start_date']}~{row['end_date']} | "
@@ -2055,11 +2057,11 @@ def _show_history():
             # 交易明细
             trades_df = get_backtest_trades(row["id"])
             if not trades_df.empty:
-                stock_df = cached_instrument_list()
-                name_map = dict(zip(stock_df["ts_code"], stock_df["name"])) if not stock_df.empty else {}
                 disp_trades = trades_df[["trade_date", "ts_code", "direction",
                                         "price", "volume", "pnl", "holding_days"]].copy()
-                disp_trades["ts_code"] = disp_trades["ts_code"].apply(lambda c: format_stock_cn(c, name_map))
+                disp_trades["ts_code"] = disp_trades["ts_code"].apply(
+                    lambda c, nm=hist_name_map: format_stock_cn(c, nm)
+                )
                 disp_trades["direction"] = disp_trades["direction"].apply(format_direction_cn)
                 disp_trades = disp_trades.rename(columns={
                     "trade_date": "日期", "ts_code": "股票", "direction": "方向",

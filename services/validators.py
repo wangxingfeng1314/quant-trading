@@ -1,4 +1,5 @@
 """输入校验工具 - 统一验证股票代码、日期、金额等"""
+import math
 import re
 from core.exceptions import InvalidStockCodeError, InvalidDateError, ValidationError
 
@@ -85,8 +86,8 @@ def validate_date(date_str: str) -> str:
     # 日历与闰年合法性检查
     try:
         dt = datetime.strptime(date_str, "%Y%m%d")
-    except ValueError:
-        raise InvalidDateError(date_str)
+    except ValueError as exc:
+        raise InvalidDateError(date_str) from exc
     if not (1990 <= dt.year <= 2100):
         raise InvalidDateError(date_str)
     return date_str
@@ -120,13 +121,16 @@ def validate_capital(capital: float) -> float:
     Raises:
         ValidationError: 金额无效
     """
-    if not isinstance(capital, (int, float)):
+    if isinstance(capital, bool) or not isinstance(capital, (int, float)):
         raise ValidationError(f"资金必须是数字: {capital}", field="capital")
-    if capital < 1000:
+    val = float(capital)
+    if not math.isfinite(val):
+        raise ValidationError(f"资金不能为 NaN 或无穷大: {capital}", field="capital")
+    if val < 1000:
         raise ValidationError(f"资金不能少于 1000 元: {capital}", field="capital")
-    if capital > 1e9:
+    if val > 1e9:
         raise ValidationError(f"资金超出合理范围: {capital}", field="capital")
-    return float(capital)
+    return val
 
 
 def validate_strategy_name(name: str, registry: dict) -> str:

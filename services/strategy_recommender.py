@@ -189,13 +189,15 @@ def evaluate_stock_strategy(ts_code: str, name: str = "", industry: str = "",
 
     # 综合效用评分（仅在训练段上选策略）：
     # 评分 = 收益*1.5 + (胜率-40)*0.6 - 最大回撤*0.4
-    # 4 个策略取最大值存在多重比较偏差，按候选数做线性折扣
-    k_discount = max(0.0, 1.0 - 0.05 * (len(stats) - 1))
-    best_s, best_score = None, -99999.0
+    # 无任何平仓成交的策略给予极低哨兵值，避免与正常策略混淆
+    best_s, best_score = None, -1e12
     for s_name, m in stats.items():
-        score = -999.0 if m["trades"] == 0 else k_discount * (
-            m["total_return"] * 1.5 + (m["win_rate"] - 40.0) * 0.6 - m["mdd"] * 0.4
-        )
+        if m["sells"] == 0 and m["trades"] == 0:
+            score = -1e9
+        else:
+            score = (
+                m["total_return"] * 1.5 + (m["win_rate"] - 40.0) * 0.6 - m["mdd"] * 0.4
+            )
         if score > best_score:
             best_score, best_s = score, s_name
     if best_s is None:
@@ -209,7 +211,8 @@ def evaluate_stock_strategy(ts_code: str, name: str = "", industry: str = "",
         logger.warning(f"标的 {ts_code} 样本外回测失败: {e}")
         oos = dict(empty_stats)
 
-    if oos["trades"] >= OOS_MIN_TRADES:
+    # 胜率仅由已平仓卖单计算，因此样本外必须满足最低平仓笔数 (sells >= OOS_MIN_TRADES)
+    if oos["sells"] >= OOS_MIN_TRADES:
         if oos["win_rate"] >= 55.0:
             tag = f"{prefix} (样本外胜率{oos['win_rate']:.1f}%/{oos['total_return']:+.1f}%)"
         else:
@@ -221,7 +224,7 @@ def evaluate_stock_strategy(ts_code: str, name: str = "", industry: str = "",
         f"训练段 {train_start}~{train_end} 比较 {len(stats)} 个策略后选出该策略；"
         f"以下业绩来自从未参与选参的样本外测试段 {test_start}~{test_end}："
         f"总收益 {oos['total_return']:+.2f}%，胜率 {oos['win_rate']:.1f}%，"
-        f"最大回撤 {oos['mdd']:.2f}%，成交 {oos['trades']} 次。"
+        f"最大回撤 {oos['mdd']:.2f}%，平仓 {oos['sells']} 笔（总成交 {oos['trades']} 次）。"
         f"（details 中的分策略对比为样本内结果，不可当作业绩）"
     )
 

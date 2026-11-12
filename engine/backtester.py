@@ -454,8 +454,9 @@ class Backtester:
                     elif sig.direction == "SELL":
                         pos = portfolio.get_position(ts_code)
                         if pos and not pos.is_empty:
+                            avail_before = pos.available_shares
                             sell_vol = cap_order_volume(
-                                pos.available_shares, ref_volume, lot_size=1)
+                                avail_before, ref_volume, lot_size=1)
                             sold_trade = portfolio.sell(
                                 ts_code=ts_code,
                                 price=open_price,
@@ -471,8 +472,11 @@ class Backtester:
                                 bar_volume=ref_volume,
                                 volatility=ref_volatility,
                             )
-                            # 若因一字跌停封死导致未能卖出，顺延至下一交易日继续挂单卖出
-                            if sold_trade is None and sell_vol > 0:
+                            # 一字跌停拒单，或参与率上限导致部分成交时，顺延剩余份额至下一交易日继续卖出
+                            if sell_vol > 0 and (
+                                sold_trade is None
+                                or (sell_vol < avail_before and pos.available_shares > 0)
+                            ):
                                 deferred_sells.append(sig)
                 pending_signals = []
 
@@ -510,6 +514,11 @@ class Backtester:
                     ts_code = sig.ts_code
                     df_stock = stock_data.get(ts_code)
                     curr_idx = date_index.get(ts_code, {}).get(date)
+                    # 当日停牌（无当日行情索引）绝不允许成交：顺延卖单按昨日信号价成交会制造虚假流动性
+                    if df_stock is None or curr_idx is None:
+                        if sig.direction == "SELL":
+                            pending_deferred_sells.append(sig)
+                        continue
                     fa = fast_data.get(ts_code)
                     prev_close = fa.val("close", curr_idx - 1, 0.0) if (fa is not None and curr_idx is not None) else 0.0
                     # 收盘撮合时当日 low/high 已经确定，可安全用于封板判定
@@ -558,8 +567,9 @@ class Backtester:
                     elif sig.direction == "SELL":
                         pos = portfolio.get_position(sig.ts_code)
                         if pos and not pos.is_empty:
+                            avail_before = pos.available_shares
                             sell_vol = cap_order_volume(
-                                pos.available_shares, ref_volume, lot_size=1)
+                                avail_before, ref_volume, lot_size=1)
                             sold_trade = portfolio.sell(
                                 ts_code=sig.ts_code,
                                 price=sig.price_ref,
@@ -575,9 +585,11 @@ class Backtester:
                                 bar_volume=ref_volume,
                                 volatility=ref_volatility,
                             )
-                            # current_close 模式原先丢弃 sell() 返回值，一字跌停
-                            # 卖单失败后永久消失。这里顺延到下一交易日重新挂单。
-                            if sold_trade is None and sell_vol > 0:
+                            # 一字跌停拒单，或参与率上限导致部分成交时，顺延剩余份额到下一交易日重新挂单
+                            if sell_vol > 0 and (
+                                sold_trade is None
+                                or (sell_vol < avail_before and pos.available_shares > 0)
+                            ):
                                 pending_deferred_sells.append(sig)
 
             # 记录权益

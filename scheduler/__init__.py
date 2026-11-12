@@ -67,6 +67,7 @@ def scan_and_notify(force: bool = False):
         job_key = None
 
     # ---------- 1. 扫描自选股信号并推送 ----------
+    scan_ok = False
     try:
         watchlist = get_watchlist()
         if not watchlist.empty:
@@ -81,20 +82,24 @@ def scan_and_notify(force: bool = False):
                 logger.info(f"已推送 {len(signals)} 条信号通知")
         else:
             logger.info("自选股为空，跳过信号扫描")
+        scan_ok = True
     except Exception as e:
         logger.error(f"自选股信号扫描/推送发生异常: {e}", exc_info=True)
 
     # ---------- 2. 推送持仓盈亏日报 ----------
+    pos_ok = False
     try:
         pushed = notify_position_summary()
         if pushed:
             logger.info("持仓盈亏日报已推送")
         else:
             logger.info("本次未推送持仓日报（无持仓或推送失败）")
+        pos_ok = True
     except Exception as e:
         logger.error(f"持仓盈亏日报推送发生异常: {e}", exc_info=True)
 
-    if job_key:
+    # 仅在扫描与推送均未抛出异常时登记幂等键；否则保留重试机会，防止瞬时故障锁死当日通知
+    if job_key and scan_ok and pos_ok:
         try:
             mark_notification_sent(job_key)
         except Exception as e:

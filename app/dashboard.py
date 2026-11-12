@@ -218,15 +218,11 @@ def _show_system_status():
         fresh_label = f"严重滞后 {days_diff} 天" if days_diff != 999 else "无数据"
         fresh_color = "red"
 
-    # 数据源状态检测（轻量级）
-    ds_akshare = "🟢 正常"
-    ds_tushare = "🟡 未配置" if not TUSHARE_TOKEN else "🟢 正常"
-    try:
-        import baostock as bs
-        bs.login()
-        bs.logout()
-    except Exception:
-        pass
+    # 数据源状态检测（轻量级，不做阻塞性外网探测以免拖慢首页渲染）
+    import importlib.util
+    ds_akshare = "🟢 就绪" if importlib.util.find_spec("akshare") else "🟡 未安装"
+    ds_tushare = "🟡 未配置" if not TUSHARE_TOKEN else "🟢 就绪"
+    ds_baostock = "🟢 就绪" if importlib.util.find_spec("baostock") else "🟡 未安装"
 
     k1, k2, k3, k4, k5 = st.columns(5)
     k1.metric("📅 数据日期", latest_date or "无数据",
@@ -247,7 +243,7 @@ def _show_system_status():
             st.markdown(f"**Tushare** {ds_tushare}")
             st.caption("备用数据源（股票列表/行业）")
         with ds_cols[2]:
-            st.markdown("**Baostock** 🟢 正常")
+            st.markdown(f"**Baostock** {ds_baostock}")
             st.caption("兜底数据源（日线备用）")
         with ds_cols[3]:
             idx_status = f"🟢 {idx_latest}" if idx_latest else "🟡 未同步"
@@ -325,11 +321,14 @@ def _show_system_status():
                         st.rerun()
                 else:
                     from scripts.init_data import run_update
+                    from engine.backtester import clear_backtester_cache
                     with st.spinner("正在更新数据..."):
                         run_update(watchlist=True)
+                    st.cache_data.clear()
+                    clear_backtester_cache()
                     st.rerun()
     with col_b:
-        st.markdown(f"🏷️ 版本: v0.4.6 | 🗄️ `data/quant.db`")
+        st.markdown("🏷️ 版本: v0.4.7 | 🗄️ `data/quant.db`")
     with col_c:
         import json
         report = {

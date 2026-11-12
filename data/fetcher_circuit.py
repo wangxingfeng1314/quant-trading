@@ -35,17 +35,21 @@ class CircuitBreaker:
             cooldown: 熔断冷却时间秒数（默认用配置）
         """
         self.name = name
-        self.threshold = threshold or FETCHER_CIRCUIT_THRESHOLD
-        self.cooldown = cooldown or FETCHER_CIRCUIT_COOLDOWN
+        self.threshold = FETCHER_CIRCUIT_THRESHOLD if threshold is None else threshold
+        self.cooldown = FETCHER_CIRCUIT_COOLDOWN if cooldown is None else cooldown
         self._failures = 0
         self._open_until = 0.0
         self._lock = threading.Lock()
 
     def is_open(self) -> bool:
-        """检查熔断是否已打开（True=应跳过此数据源）"""
+        """检查熔断是否已打开（True=应跳过此数据源；冷却到期时清零历史失败计数以便探测恢复）"""
         with self._lock:
-            if self._open_until > time.time():
-                return True
+            if self._open_until > 0:
+                if time.time() < self._open_until:
+                    return True
+                # 冷却期已过：退出熔断并重置失败计数，给予数据源完整恢复窗口
+                self._open_until = 0.0
+                self._failures = 0
             return False
 
     def success(self):

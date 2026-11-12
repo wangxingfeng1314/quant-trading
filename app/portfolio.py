@@ -9,7 +9,8 @@ from data.storage import (get_watchlist, add_to_watchlist, remove_from_watchlist
                           get_stock_list, get_daily, get_signals, get_latest_date,
                           save_daily, get_positions, add_position, remove_position,
                           clear_positions, get_instrument_list, batch_get_latest,
-                          clean_non_watchlist_data)
+                          clean_non_watchlist_data, align_volume_unit,
+                          check_split_dividend_anomaly)
 from notifier.push import calc_atr_stops_and_sizing
 from data.fetcher import fetch_daily, fetch_instrument_daily
 from data.cleaner import clean_daily
@@ -94,9 +95,21 @@ def _show_watchlist():
                                 df = fetch_instrument_daily(ts_code, DATA_START_DATE, end)
                                 if not df.empty:
                                     df = clean_daily(df)
-                                    save_daily(df)
-                                    data_ready = True
-                                    st.toast(f"✅ {selected} 数据已就绪 ({len(df)} 条)", icon="📊")
+                                    if not df.empty:
+                                        df = align_volume_unit(ts_code, df)
+                                        if check_split_dividend_anomaly(ts_code, df):
+                                            from services.data_service import resync_full_history
+                                            data_ready = resync_full_history(ts_code, end)
+                                        else:
+                                            save_daily(df)
+                                            data_ready = True
+                                    if data_ready:
+                                        from engine.backtester import clear_backtester_cache
+                                        st.cache_data.clear()
+                                        clear_backtester_cache()
+                                        st.toast(f"✅ {selected} 数据已就绪 ({len(df)} 条)", icon="📊")
+                                    else:
+                                        st.warning(f"{selected} 历史数据校验未通过，保留已有数据")
                                 else:
                                     st.warning(f"{selected} 暂无可用数据，稍后可通过更新获取")
 
@@ -148,6 +161,7 @@ def _show_watchlist():
         if st.button("🎯 重新评估策略", key="btn_refresh_rec", help="重新对当前自选股进行快速全策略回测并更新推荐标签", width="stretch"):
             with st.spinner("正在智能评估自选股最佳策略..."):
                 updated_count = batch_update_watchlist_recommendations(force=True)
+                st.cache_data.clear()
                 st.toast(f"✅ 已成功更新 {updated_count} 只自选股的推荐策略", icon="🎯")
                 st.rerun()
 
