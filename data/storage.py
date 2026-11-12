@@ -14,6 +14,7 @@ import time             # 休眠
 import logging          # 日志记录
 import threading        # 线程本地存储（连接池）
 import re               # 备份文件名消毒
+import uuid             # 更新锁所有权 token
 from datetime import datetime          # 断层判定的日期间隔、备份时间戳
 from contextlib import contextmanager  # 上下文管理器装饰器
 from pathlib import Path               # 路径处理
@@ -35,41 +36,84 @@ _STALE_LOCK_TIMEOUT = 600  # 陈旧孤儿锁超时时间 (10分钟)
 logger = logging.getLogger(__name__)
 
 
+_LOCK_OWNER_META = None  # 本进程最近一次成功获取的锁元数据（释放时校验所有权）
+
+
 def _is_pid_running(pid: int) -> bool:
-    """检查指定 PID 进程是否存活"""
+    """检查指定 PID 进程是否存活。
+
+    「查不清」一律保守返回 True：宁可让孤儿锁多等一个 max_stale_seconds，
+    也不能把正在写库的有效锁误判成死锁后强删。Windows 上跨会话/受保护进程
+    的 OpenProcess 会返回 ACCESS_DENIED，此时进程其实活着。
+    """
     if pid <= 0:
         return False
     try:
         if os.name == "nt":
             import ctypes
-            kernel32 = ctypes.windll.kernel32
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
             PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-            SYNCHRONIZE = 0x00100000
-            handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, False, pid)
-            if handle:
-                exit_code = ctypes.c_ulong()
-                kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
-                kernel32.CloseHandle(handle)
-                return exit_code.value == 259  # STILL_ACTIVE
-            return False
-        else:
-            os.kill(pid, 0)
-            return True
-    except Exception:
+            # 64 位句柄必须用 c_void_p，默认 c_int 会截断句柄导致误判
+            kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_bool, ctypes.c_uint32]
+            kernel32.OpenProcess.restype = ctypes.c_void_p
+            kernel32.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
+            kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+            handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if not handle:
+                # 87 = ERROR_INVALID_PARAMETER（PID 不存在）；5 = ACCESS_DENIED（存在但不可查）
+                return ctypes.get_last_error() != 87
+            exit_code = ctypes.c_ulong()
+            kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+            kernel32.CloseHandle(handle)
+            return exit_code.value == 259  # STILL_ACTIVE
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
         return False
+    except PermissionError:
+        return True                 # EPERM：进程存在，只是无权限发信号
+    except Exception:
+        return True
 
 
-def force_release_update_lock():
-    """强制释放更新锁（清理陈旧或异常终止遗留的锁目录）"""
-    lock_path = Path(_LOCK_FILE)
+def _read_lock_meta(lock_path: Path):
+    """读取锁元数据；文件不存在或只写了一半时返回 None（绝不抛异常）"""
     try:
-        if lock_path.exists():
-            import shutil
-            if lock_path.is_dir():
-                shutil.rmtree(str(lock_path), ignore_errors=True)
-            else:
-                lock_path.unlink(missing_ok=True)
-            logger.info("强制释放更新锁成功")
+        return json.loads((lock_path / "lock_info.json").read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _write_lock_meta(lock_path: Path, meta: dict):
+    """原子写锁元数据：先写临时文件再 os.replace，避免别的进程读到半截 JSON"""
+    tmp = lock_path / f"lock_info.{os.getpid()}.tmp"
+    tmp.write_text(json.dumps(meta), encoding="utf-8")
+    os.replace(str(tmp), str(lock_path / "lock_info.json"))
+
+
+def force_release_update_lock(expected_meta: dict = None):
+    """强制释放更新锁（清理陈旧或异常终止遗留的锁目录）
+
+    expected_meta 不为空时，只有当前锁元数据与「判定陈旧时」完全一致才删除。
+    这能挡住典型的 TOCTOU 竞态：A 的锁被判陈旧 → A 恰好正常释放 → B 建了新锁
+    → C 若无脑删除就会把 B 的有效锁清掉，两个进程同时进临界区。
+    UI 上的「手动强制重置」不传该参数，保留显式强删语义。
+    """
+    lock_path = Path(_LOCK_FILE)
+    if not lock_path.exists():
+        return
+    if expected_meta is not None:
+        current = _read_lock_meta(lock_path)
+        if current != expected_meta:
+            logger.warning("更新锁已被其它进程接管，跳过本次回收（避免误删有效锁）")
+            return
+    try:
+        import shutil
+        if lock_path.is_dir():
+            shutil.rmtree(str(lock_path), ignore_errors=True)
+        else:
+            lock_path.unlink(missing_ok=True)
+        logger.info("强制释放更新锁成功")
     except Exception as e:
         logger.warning(f"强制释放更新锁异常: {e}")
 
@@ -88,6 +132,8 @@ def acquire_update_lock(timeout: int = None, max_stale_seconds: int = None) -> b
     Returns:
         True=拿到锁, False=超时未拿到
     """
+    global _LOCK_OWNER_META
+
     if timeout is None:
         timeout = _LOCK_TIMEOUT
     if max_stale_seconds is None:
@@ -99,53 +145,57 @@ def acquire_update_lock(timeout: int = None, max_stale_seconds: int = None) -> b
     while time.time() < deadline:
         try:
             os.mkdir(str(lock_path))  # 原子操作：目录不存在则创建成功
-            # 记录当前进程与时间戳信息
+            meta = {
+                "pid": os.getpid(),
+                "created_at": time.time(),
+                "created_str": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "owner_token": uuid.uuid4().hex,
+            }
             try:
-                info_file = lock_path / "lock_info.json"
-                info_data = {
-                    "pid": os.getpid(),
-                    "created_at": time.time(),
-                    "created_str": time.strftime("%Y-%m-%d %H:%M:%S"),
-                }
-                info_file.write_text(json.dumps(info_data), encoding="utf-8")
-            except Exception:
-                pass
+                _write_lock_meta(lock_path, meta)
+            except Exception as e:
+                # 身份信息写不进去的锁无法被安全释放，主动放弃本次获取
+                logger.warning(f"更新锁元数据写入失败，放弃本次获取: {e}")
+                force_release_update_lock()
+                return False
+            _LOCK_OWNER_META = meta
             logger.debug("获取更新锁成功")
             return True
         except FileExistsError:
             # 检查现有锁是否是陈旧死锁
             is_stale = False
-            info_file = lock_path / "lock_info.json"
-            if info_file.exists():
-                try:
-                    meta = json.loads(info_file.read_text(encoding="utf-8"))
-                    holder_pid = meta.get("pid", 0)
-                    created_at = meta.get("created_at", 0)
-                    age = time.time() - created_at
-                    # 1. 持有者进程已不存在；或 2. 存活时间超过 max_stale_seconds
-                    if (holder_pid and not _is_pid_running(holder_pid)) or (age > max_stale_seconds):
-                        logger.warning(
-                            f"检测到陈旧更新锁: PID={holder_pid} (存活={_is_pid_running(holder_pid)}), "
-                            f"已持有 {age:.0f}s (阈值 {max_stale_seconds}s)，正在执行自动回收..."
-                        )
-                        is_stale = True
-                except Exception:
+            stale_meta = None
+            meta = _read_lock_meta(lock_path)
+            if meta is not None:
+                holder_pid = meta.get("pid", 0)
+                created_at = meta.get("created_at", 0)
+                age = time.time() - created_at
+                # 1. 持有者进程已不存在；或 2. 存活时间超过 max_stale_seconds
+                if (holder_pid and not _is_pid_running(holder_pid)) or (age > max_stale_seconds):
+                    logger.warning(
+                        f"检测到陈旧更新锁: PID={holder_pid}, 已持有 {age:.0f}s "
+                        f"(阈值 {max_stale_seconds}s)，正在执行自动回收..."
+                    )
                     is_stale = True
+                    stale_meta = meta
             else:
-                # 兼容旧版本无 info 文件的锁目录
+                # 元数据缺失或正在被写入（半截 JSON）**绝不能**据此判定陈旧：
+                # 原实现在这里直接强删，会误杀刚建好目录、还没写完元数据的持有者。
+                # 只有整个锁目录存活超阈值才回收，并兼容旧版本无 info 文件的锁。
                 try:
                     mtime = os.path.getmtime(str(lock_path))
                     age = time.time() - mtime
                     if age > max_stale_seconds:
                         logger.warning(
-                            f"检测到旧版无元数据更新锁: 已存在 {age:.0f}s (阈值 {max_stale_seconds}s)，正在执行自动回收..."
+                            f"检测到无有效元数据的更新锁: 已存在 {age:.0f}s "
+                            f"(阈值 {max_stale_seconds}s)，正在执行自动回收..."
                         )
                         is_stale = True
                 except Exception:
                     pass
 
             if is_stale:
-                force_release_update_lock()
+                force_release_update_lock(stale_meta)
                 continue
 
             time.sleep(1)
@@ -155,8 +205,16 @@ def acquire_update_lock(timeout: int = None, max_stale_seconds: int = None) -> b
 
 
 def release_update_lock():
-    """释放更新锁"""
-    force_release_update_lock()
+    """只释放本进程自己持有的锁（按 owner_token 元数据校验所有权）"""
+    global _LOCK_OWNER_META
+    meta = _LOCK_OWNER_META
+    if meta is None:
+        # 兼容「外部直接调用 / 旧版无元数据锁」的路径
+        logger.warning("未记录更新锁所有权，执行无校验释放")
+        force_release_update_lock()
+    else:
+        force_release_update_lock(meta)
+    _LOCK_OWNER_META = None
 
 
 @contextmanager
@@ -293,43 +351,76 @@ def _set_db_version(conn, version: int):
     conn.execute(f"PRAGMA user_version = {version}")
 
 
-def _run_migrations(conn):
-    """执行版本化数据库迁移
+def _column_exists(conn, table: str, column: str) -> bool:
+    """判断表中是否已有某列（让 DDL 迁移可重入，不再靠吞异常）"""
+    try:
+        return any(row[1] == column for row in conn.execute(f"PRAGMA table_info({table})").fetchall())
+    except sqlite3.Error:
+        return False
 
-    迁移脚本按版本号顺序执行，每个版本只执行一次。
-    新增迁移时在 MIGRATIONS 列表追加即可。
+
+# 声明式迁移：(版本号, [(表, 列, 类型声明), ...], [DDL 语句, ...])
+# 每个版本独立提交；只有全部成功才推进 user_version。
+_MIGRATIONS = (
+    (1, [], []),  # 初始版本，表结构由 init_db 创建
+    (2, [("backtest_result", "calmar_ratio", "REAL"),
+         ("backtest_result", "sell_count", "INTEGER")], []),
+    (3, [("backtest_trade", "context_snapshot", "TEXT")], []),
+    (4, [("watchlist", "recommended_strategy", "TEXT DEFAULT ''"),
+         ("watchlist", "group_name", "TEXT DEFAULT ''")], []),
+    (5, [], ["CREATE TABLE IF NOT EXISTS notify_log ("
+             "job_key TEXT PRIMARY KEY, created_at TEXT)"]),
+)
+
+
+def _run_migrations(conn):
+    """执行版本化数据库迁移（逐版本事务，失败即中止启动）
+
+    旧实现有两个致命问题：
+      1. executescript 在 `with get_conn()` 内隐式提交，破坏外层事务边界；
+      2. DDL 抛异常只打 warning，却仍无条件推进 user_version —— 迁移一旦失败
+         永远不会重试，schema 永久缺列且后续查询静默失败。
+    现在改为：先查 PRAGMA table_info 保证幂等 → 单条 execute → 全部成功才
+    COMMIT + 推进版本；任一失败即 ROLLBACK 并抛错，让启动显式失败。
     """
     current = _get_db_version(conn)
-
-    # 迁移定义：每个元素为 (版本号, SQL脚本)
-    MIGRATIONS = [
-        # v1: 初始版本（表结构由 init_db 的 executescript 创建）
-        (1, ""),
-        # v2: 为 backtest_result 表添加 calmar_ratio 和 sell_count 列
-        (2, """
-            ALTER TABLE backtest_result ADD COLUMN calmar_ratio REAL;
-            ALTER TABLE backtest_result ADD COLUMN sell_count INTEGER;
-        """),
-        # v3: 为 backtest_trade 表添加 context_snapshot 列（决策与风控快照）
-        (3, """
-            ALTER TABLE backtest_trade ADD COLUMN context_snapshot TEXT;
-        """),
-        # v4: 为 watchlist 表添加 recommended_strategy 列（AI推荐适配策略）
-        (4, """
-            ALTER TABLE watchlist ADD COLUMN recommended_strategy TEXT DEFAULT '';
-        """),
-    ]
-
-    for version, sql in MIGRATIONS:
-        if current < version:
-            if sql.strip():
-                try:
-                    conn.executescript(sql)
-                    logger.info(f"数据库迁移: v{current} -> v{version}")
-                except Exception as e:
-                    logger.warning(f"数据库迁移警告 (v{version}): {e}")
+    for version, columns, statements in _MIGRATIONS:
+        if current >= version:
+            continue
+        try:
+            for table, column, decl in columns:
+                if not _column_exists(conn, table, column):
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+            for stmt in statements:
+                conn.execute(stmt)
             _set_db_version(conn, version)
-            current = version
+            conn.commit()
+            logger.info(f"数据库迁移完成: -> v{version}")
+        except Exception as e:
+            conn.rollback()
+            raise RuntimeError(
+                f"数据库迁移 v{version} 失败，已回滚且未推进 user_version: {e}"
+            ) from e
+        current = version
+
+
+def notification_already_sent(job_key: str) -> bool:
+    """查询当日去重键是否已推送（定时任务双入口幂等）"""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM notify_log WHERE job_key = ?", (job_key,)
+        ).fetchone()
+        return row is not None
+
+
+def mark_notification_sent(job_key: str) -> None:
+    """登记已推送的去重键（主键冲突时视为已推送，天然幂等）"""
+    from datetime import datetime as _dt
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO notify_log (job_key, created_at) VALUES (?, ?)",
+            (job_key, _dt.now().isoformat()),
+        )
 
 
 def init_db():
@@ -478,14 +569,16 @@ def init_db():
                 created_at  TEXT,                   -- 创建时间
                 updated_at  TEXT                    -- 更新时间
             );
-        """)
-        # 兼容旧数据库：ALTER TABLE 在列已存在时报错，单独处理
-        try:
-            conn.execute("ALTER TABLE watchlist ADD COLUMN group_name TEXT DEFAULT ''")
-        except Exception:
-            pass
 
-        # 执行版本化迁移
+            -- 推送幂等表（定时任务双入口：同一天同一任务只推一次）
+            CREATE TABLE IF NOT EXISTS notify_log (
+                job_key     TEXT PRIMARY KEY,      -- 如 'signals:20261112'
+                created_at  TEXT
+            );
+        """)
+
+        # 执行版本化迁移（新增列已全部由 _MIGRATIONS 声明式覆盖，
+        # 这里不再保留会吞掉所有异常的裸 ALTER TABLE）
         _run_migrations(conn)
 
 
@@ -598,27 +691,65 @@ def get_instrument_name(ts_code: str) -> str:
     return get_etf_name(ts_code)
 
 
+_INSTRUMENT_META_COLS = ["industry", "is_st", "list_date", "delist_date"]
+
+
 def get_instrument_list() -> pd.DataFrame:
     """获取可交易标的总列表（股票 + ETF，含 type 标记）
 
-    用于页面搜索：把 A股 与 ETF 合并为统一列表。
-    返回列: ts_code, symbol, name, market, type（"股票"/"ETF"）
+    用于页面搜索、ST 判定与行业特征匹配。这里**必须**把 stock_basic 的行业、
+    ST、上市/退市日期一并带出：旧实现只投影 4 列，导致
+    ``engine.backtester.get_st_lookup()`` 的 is_st 分支永远走不到、
+    ``services.strategy_recommender`` 的行业启发式也恒为空。
+    返回列: ts_code, symbol, name, market, type, industry, is_st, list_date, delist_date
     """
     parts = []
     stocks = get_stock_list()
     if not stocks.empty:
-        s = stocks[["ts_code", "symbol", "name", "market"]].copy()
+        keep = ["ts_code", "symbol", "name", "market"] + [
+            c for c in _INSTRUMENT_META_COLS if c in stocks.columns
+        ]
+        s = stocks[keep].copy()
         s["type"] = "股票"
         parts.append(s)
     etfs = get_etf_list()
     if not etfs.empty:
         e = etfs[["ts_code", "symbol", "name", "market"]].copy()
+        for c in _INSTRUMENT_META_COLS:
+            e[c] = 0 if c == "is_st" else ""
         e["type"] = "ETF"
         parts.append(e)
     if not parts:
-        return pd.DataFrame(columns=["ts_code", "symbol", "name", "market", "type"])
-    return (pd.concat(parts, ignore_index=True)
-            .sort_values("ts_code").reset_index(drop=True))
+        return pd.DataFrame(
+            columns=["ts_code", "symbol", "name", "market", "type"] + _INSTRUMENT_META_COLS
+        )
+    out = pd.concat(parts, ignore_index=True)
+    for c in _INSTRUMENT_META_COLS:
+        if c not in out.columns:
+            out[c] = 0 if c == "is_st" else ""
+    return out.sort_values("ts_code").reset_index(drop=True)
+
+
+def get_point_in_time_universe(as_of: str) -> list:
+    """返回 as_of 当日实际存在的股票池（point-in-time，缓解幸存者偏差）
+
+    过滤规则：list_date <= as_of 且（未退市或 delist_date >= as_of）。
+    当前库尚未回填退市股时本函数等价于现有股票池；一旦 stock_basic 收录
+    退市/暂停上市标的及其 delist_date，历史回测/扫描就会自动按当时口径取池，
+    不再用「今天还活着」的股票去回测多年前。日期支持 YYYYMMDD / YYYY-MM-DD。
+    """
+    d = str(as_of or "").replace("-", "").replace("/", "").strip()
+    if not d:
+        d = "99991231"
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT ts_code FROM stock_basic "
+            "WHERE (list_date IS NULL OR TRIM(list_date) = '' OR REPLACE(list_date, '-', '') <= ?) "
+            "  AND (delist_date IS NULL OR TRIM(delist_date) = '' OR REPLACE(delist_date, '-', '') >= ?) "
+            "ORDER BY ts_code",
+            (d, d),
+        ).fetchall()
+    return [r[0] for r in rows]
 
 
 # ============================================================

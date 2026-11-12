@@ -580,11 +580,18 @@ def _fetch_daily_tushare(ts_code: str, start_date: str,
                     start_date=start_date,
                     end_date=end_date
                 )
-                if adj_df is not None and not adj_df.empty:
-                    adj_map = dict(zip(adj_df["trade_date"], adj_df["adj_factor"]))  # 日期→因子映射
-                    df["adj_factor"] = df["trade_date"].map(adj_map).fillna(1.0)     # 填充到日线
-                else:
-                    df["adj_factor"] = 1.0                # 无复权因子则默认1
+                # 接口返回空 / 缺列 / 覆盖率不足都必须放弃此源：
+                # 旧实现在「接口正常但返回空」时把 adj_factor 全填 1.0，
+                # 未复权行情会被当作前复权写入，且不会降级到 Baostock。
+                if adj_df is None or adj_df.empty or "adj_factor" not in adj_df.columns:
+                    logger.warning(f"{ts_code} Tushare复权因子为空，放弃该源（禁止未复权价混入）")
+                    return pd.DataFrame()
+                adj_map = dict(zip(adj_df["trade_date"], adj_df["adj_factor"]))
+                factors = pd.to_numeric(df["trade_date"].map(adj_map), errors="coerce")
+                if factors.isna().any() or (factors <= 0).any():
+                    logger.warning(f"{ts_code} Tushare复权因子覆盖率不足，放弃该源")
+                    return pd.DataFrame()
+                df["adj_factor"] = factors
             except Exception:
                 # 限频导致拿不到复权因子 → 放弃此数据源
                 # （宁可降级到 Baostock，也不用未复权价格）

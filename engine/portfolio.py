@@ -87,7 +87,8 @@ class Portfolio:
             is_st: bool = False, is_cy: bool = False, is_bj: bool = False,
             slippage: bool = True,
             context_snapshot: dict = None,
-            bar_low: float = None, bar_high: float = None) -> Optional[Trade]:
+            bar_low: float = None, bar_high: float = None,
+            bar_volume: float = 0, volatility: float = 0.0) -> Optional[Trade]:
         """买入股票
 
         Args:
@@ -95,23 +96,24 @@ class Portfolio:
                 真正的**一字板**条件（当日最低价也在涨停价上）；不传则退化为
                 「委托价触及涨停价即拒单」，会把「盘中打开过涨停」的正常交易日
                 误杀。
+            bar_volume: 信号日成交量（股），用于平方根冲击成本。
+            volatility: 日波动率（小数），用于冲击成本。
 
         Returns:
             Trade对象，如果失败（如涨停封板无法买入、资金不足）返回None
         """
-        # A股涨停封板不可买入检查（检验原始委托/市场价是否已封死涨停）
-        if prev_close > 0 and is_limit_up_locked(
-                price, prev_close, is_st=is_st, is_cy=is_cy, is_bj=is_bj,
-                low_price=bar_low):
-            return None
-
-        # 滑点调整
+        # 先算出最终成交价（滑点 + 涨跌停裁剪），再判封板。
+        # 旧实现在滑点之前判定：委托价略低于涨停价时会被滑点上浮、再被裁到
+        # 涨停价成交，从而绕过一字板拒单。
         if slippage:
-            price = apply_slippage(price, "BUY")
-
-        # 涨跌停限制
+            price = apply_slippage(price, "BUY", volume=volume,
+                                   bar_volume=bar_volume, volatility=volatility)
         if prev_close > 0:
             price = adjust_price(price, prev_close, is_st, is_cy, is_bj)
+            if is_limit_up_locked(
+                    price, prev_close, is_st=is_st, is_cy=is_cy, is_bj=is_bj,
+                    low_price=bar_low):
+                return None
 
         # 取整手
         volume = round_lot(volume, "BUY")
@@ -164,12 +166,15 @@ class Portfolio:
              is_st: bool = False, is_cy: bool = False, is_bj: bool = False,
              slippage: bool = True,
              context_snapshot: dict = None,
-             bar_low: float = None, bar_high: float = None) -> Optional[Trade]:
+             bar_low: float = None, bar_high: float = None,
+             bar_volume: float = 0, volatility: float = 0.0) -> Optional[Trade]:
         """卖出股票
 
         Args:
             bar_low / bar_high: 当日最低/最高价，用于区分「一字跌停」与
                 「触及跌停但盘中打开」。
+            bar_volume: 信号日成交量（股），用于平方根冲击成本与参与率上限。
+            volatility: 日波动率（小数）。
 
         Returns:
             Trade对象，如果失败返回None
@@ -182,19 +187,16 @@ class Portfolio:
         if not pos.can_sell(trade_date, volume=1):
             return None
 
-        # A股跌停封板不可卖出检查（检验原始委托/市场价是否已封死跌停）
-        if prev_close > 0 and is_limit_down_locked(
-                price, prev_close, is_st=is_st, is_cy=is_cy, is_bj=is_bj,
-                high_price=bar_high):
-            return None
-
-        # 滑点调整
+        # 先算出最终成交价，再判封板（与 buy 对称，堵住「滑点后裁到跌停价」的绕过）
         if slippage:
-            price = apply_slippage(price, "SELL")
-
-        # 涨跌停限制
+            price = apply_slippage(price, "SELL", volume=volume,
+                                   bar_volume=bar_volume, volatility=volatility)
         if prev_close > 0:
             price = adjust_price(price, prev_close, is_st, is_cy, is_bj)
+            if is_limit_down_locked(
+                    price, prev_close, is_st=is_st, is_cy=is_cy, is_bj=is_bj,
+                    high_price=bar_high):
+                return None
 
         # 不能卖出超过可用持仓
         max_sell = pos.available_shares if pos.buy_date else (pos.available_shares if pos.available_shares > 0 else pos.shares)

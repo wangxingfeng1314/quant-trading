@@ -26,6 +26,7 @@ import random           # 随机数（请求间隔抖动）
 import logging          # 日志
 import logging.handlers # 日志轮转处理器
 from pathlib import Path  # 路径处理
+import pandas as pd      # Step 2.5 合并股票/ETF 列表需要（ruff F821 发现的真实 NameError）
 
 # ---------- 项目路径设置 ----------
 # 当前文件路径: scripts/init_data.py

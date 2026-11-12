@@ -1,7 +1,11 @@
 """A股交易费用模型 + 滑点模型"""
+import math
 from decimal import Decimal, ROUND_HALF_UP
 
-from core.config import COMMISSION_RATE, MIN_COMMISSION, STAMP_TAX_RATE, TRANSFER_FEE_RATE, SLIPPAGE_RATE
+from core.config import (
+    COMMISSION_RATE, MIN_COMMISSION, STAMP_TAX_RATE, TRANSFER_FEE_RATE,
+    SLIPPAGE_RATE, MAX_PARTICIPATION_RATE, SLIPPAGE_IMPACT_K, MAX_IMPACT_PCT,
+)
 
 
 def _exchange_round(value) -> float:
@@ -66,26 +70,55 @@ def calc_cost(price: float, volume: int, direction: str,
     }
 
 
-def apply_slippage(price: float, direction: str, slippage_rate: float = None) -> float:
+def apply_slippage(price: float, direction: str, slippage_rate: float = None,
+                   volume: int = 0, bar_volume: float = 0,
+                   volatility: float = 0.0) -> float:
     """应用滑点：买入按更高价成交，卖出按更低价成交
 
     Args:
         price: 信号触发价
         direction: 'BUY' 或 'SELL'
-        slippage_rate: 滑点比率，默认从配置读取
+        slippage_rate: 基础滑点比率，默认从配置读取
+        volume: 本单股数（用于计算市场冲击）
+        bar_volume: 参考成交量（信号日成交量/ADV，禁止用执行日的未来数据）
+        volatility: 日波动率（小数，如 0.02 表示 2%）
 
-    Returns:
-        滑点调整后的实际成交价
+    额外冲击成本（默认关闭，SLIPPAGE_IMPACT_K=0 时与旧行为完全一致）：
+        impact = k * sigma * sqrt(volume / bar_volume)，并受 MAX_IMPACT_PCT 封顶。
     """
-    if slippage_rate is None:
-        slippage_rate = SLIPPAGE_RATE
+    rate = float(SLIPPAGE_RATE if slippage_rate is None else slippage_rate)
+    if SLIPPAGE_IMPACT_K > 0 and volume > 0 and bar_volume > 0:
+        participation = min(float(volume) / float(bar_volume), 1.0)
+        sigma = float(volatility) if volatility and volatility > 0 else 0.02
+        impact = SLIPPAGE_IMPACT_K * sigma * math.sqrt(participation)
+        rate += min(impact, max(0.0, MAX_IMPACT_PCT))
 
     if direction == "BUY":
         # 买入：实际成交价 = 触发价 * (1 + 滑点率)
-        return _exchange_round(price * (1 + slippage_rate))
+        return _exchange_round(price * (1 + rate))
     else:
         # 卖出：实际成交价 = 触发价 * (1 - 滑点率)
-        return _exchange_round(price * (1 - slippage_rate))
+        return _exchange_round(price * (1 - rate))
+
+
+def cap_order_volume(volume: int, bar_volume, lot_size: int = 100,
+                     max_participation_rate: float = None) -> int:
+    """按「参与率上限」截断下单量，避免成交量不足时凭空成交。
+
+    MAX_PARTICIPATION_RATE <= 0（默认）时不限制，保持既有回测基线；
+    bar_volume 缺失或为 0 时也不拦截（停牌/缺数由其它逻辑处理）。
+    """
+    rate = MAX_PARTICIPATION_RATE if max_participation_rate is None else max_participation_rate
+    if volume <= 0 or rate is None or rate <= 0 or bar_volume is None:
+        return volume
+    try:
+        bv = float(bar_volume)
+    except (TypeError, ValueError):
+        return volume
+    if not math.isfinite(bv) or bv <= 0:
+        return volume
+    cap = int(bv * rate) // int(lot_size) * int(lot_size)
+    return max(0, min(volume, cap))
 
 
 def get_price_limits(prev_close: float, is_st: bool = False,

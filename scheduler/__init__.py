@@ -30,22 +30,41 @@ logger = logging.getLogger(__name__)
 
 # 全局调度器（单例）
 _scheduler: BackgroundScheduler | None = None
+_LOG_HANDLER: logging.handlers.RotatingFileHandler | None = None
 
 
-def scan_and_notify():
+def scan_and_notify(force: bool = False):
     """扫描自选股信号并推送通知（数据更新完成后调用）
 
     供 APScheduler（update_data_job）与 Windows 计划任务
     （run_scheduled_update.py）两个入口复用，保证闭环一致。
 
+    Windows 计划任务与 APScheduler 是两套独立调度，文件锁只串行化写入、
+    不去重推送，双入口同时部署会把信号日报与持仓日报各推两遍。这里用
+    notify_log 表的「日期 + 任务」主键做当日幂等，重复调度直接跳过。
+
     流程:
       1. 扫描自选股信号（写入数据库）
       2. 有信号则推送信号通知
       3. 推送持仓盈亏日报
+      4. 登记当日已推送标记
     """
-    from data.storage import get_watchlist
+    from data.storage import get_watchlist, notification_already_sent, mark_notification_sent
     from engine.scanner import scan_signals
     from notifier.push import notify_signals, notify_position_summary
+
+    job_key = f"scan_and_notify:{datetime.now().strftime('%Y%m%d')}"
+    if not force:
+        try:
+            if notification_already_sent(job_key):
+                logger.info(f"当日扫描推送已执行过（{job_key}），跳过重复调度")
+                return
+        except Exception as e:
+            # notify_log 表尚未建立（旧库未迁移）时降级为「不去重」，不能阻断推送
+            logger.warning(f"推送幂等检查不可用，降级为单次执行: {e}")
+            job_key = None
+    else:
+        job_key = None
 
     # ---------- 1. 扫描自选股信号并推送 ----------
     try:
@@ -74,6 +93,12 @@ def scan_and_notify():
             logger.info("本次未推送持仓日报（无持仓或推送失败）")
     except Exception as e:
         logger.error(f"持仓盈亏日报推送发生异常: {e}", exc_info=True)
+
+    if job_key:
+        try:
+            mark_notification_sent(job_key)
+        except Exception as e:
+            logger.warning(f"登记推送幂等标记失败（不影响本次推送）: {e}")
 
 
 def update_data_job():
@@ -112,7 +137,7 @@ def update_data_job():
 
 def start():
     """启动后台定时调度器"""
-    global _scheduler
+    global _scheduler, _LOG_HANDLER
 
     if not SCHEDULER_ENABLED:
         logger.info("定时任务已禁用 (SCHEDULER_ENABLED=false)")
@@ -122,15 +147,18 @@ def start():
         logger.warning("调度器已在运行中，跳过重复启动")
         return
 
-    # 配置日志
-    log_file = LOG_DIR / "scheduler.log"
-    fh = logging.handlers.RotatingFileHandler(
-        log_file, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
-    )
-    fh.setFormatter(logging.Formatter(
-        "%(asctime)s [%(levelname)s] %(message)s"
-    ))
-    logging.getLogger().addHandler(fh)
+    # 配置日志：start()/stop() 可反复调用，handler 必须去重，否则同一条日志
+    # 会被写多份，文件句柄也会随热重载不断累积
+    if _LOG_HANDLER is None:
+        log_file = LOG_DIR / "scheduler.log"
+        fh = logging.handlers.RotatingFileHandler(
+            log_file, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
+        )
+        fh.setFormatter(logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(message)s"
+        ))
+        logging.getLogger().addHandler(fh)
+        _LOG_HANDLER = fh
 
     # 创建后台调度器
     _scheduler = BackgroundScheduler(
@@ -174,12 +202,16 @@ def start():
 
 
 def stop():
-    """停止调度器"""
-    global _scheduler
+    """停止调度器并移除本模块挂载的日志 handler"""
+    global _scheduler, _LOG_HANDLER
     if _scheduler and _scheduler.running:
         _scheduler.shutdown(wait=False)
         _scheduler = None
         logger.info("定时调度器已停止")
+    if _LOG_HANDLER is not None:
+        logging.getLogger().removeHandler(_LOG_HANDLER)
+        _LOG_HANDLER.close()
+        _LOG_HANDLER = None
 
 
 def get_status() -> dict:

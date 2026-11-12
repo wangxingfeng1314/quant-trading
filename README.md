@@ -15,9 +15,9 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-v0.4.5-blue" alt="version" />
+  <img src="https://img.shields.io/badge/version-v0.4.6-blue" alt="version" />
   <img src="https://img.shields.io/badge/python-3.11-green" alt="python" />
-  <img src="https://img.shields.io/badge/tests-278%20passed-brightgreen" alt="tests" />
+  <img src="https://img.shields.io/badge/tests-297%20passed-brightgreen" alt="tests" />
   <img src="https://img.shields.io/badge/streamlit-1.58-red" alt="streamlit" />
 </p>
 
@@ -356,7 +356,7 @@ print(report.summary())
 
 ## 🧪 测试与CI/CD
 
-### 单元测试（278个全部通过）
+### 单元测试（297个全部通过）
 
 ```bash
 # 运行全部测试
@@ -391,7 +391,7 @@ py -m pytest tests/test_tier_optimizations.py -v
 
 ```
 ✅ 语法检查（py_compile 全量扫描 50+ 文件）
-✅ pytest 全部 278 个测试
+✅ pytest 全部 297 个测试
 ✅ 关键模块 import 一致性验证
 ```
 
@@ -469,7 +469,7 @@ quant-trading/
 ├── scripts/                  # 运维脚本（init_data 断层保护 / ETF 列表同步 / 成交量单位修复）
 ├── scheduler/                # APScheduler 定时调度（更新→扫描→推送闭环）
 ├── notifier/                 # 消息推送（5通道：Server酱/PushPlus/企微/钉钉/飞书）
-├── tests/                    # 278 个单元与回归测试（18个测试模块 100% 通过）
+├── tests/                    # 297 个单元与回归测试（19个测试模块 100% 通过）
 ├── .github/workflows/        # CI/CD
 ├── CHANGELOG.md              # 更新日志
 └── requirements.txt          # 版本锁定
@@ -518,6 +518,19 @@ class MyStrategy(BaseStrategy):
 ## 📜 Changelog
 
 详见 [CHANGELOG.md](./CHANGELOG.md)
+
+### v0.4.6 关键更新（2026-11-12）
+
+- 🧪 **策略推荐去除选择偏差** — `strategy_recommender` 改为训练段 70% 选策略、测试段 30% 冻结策略单独回测；界面标签与推荐理由只引用样本外业绩，新增 `is_oos` / `train_window` / `test_window` / `oos_*` 字段，样本外成交 <3 次时不展示业绩标签
+- 📐 **Wilder 指标口径修正** — RSI / ATR 改标准 Wilder（前 N 个 delta 的 SMA 作种子后递推），预热期输出 NaN 而非短窗均值或中性 50；旧 `ewm(alpha=1/n)` 首值可差 13 个 RSI 点
+- 🚦 **撮合真实性** — 封板判定改用「滑点 + 涨跌停裁剪后」的最终成交价，堵住略低于涨停价的委托绕过一字板拒单；`current_close` 模式下一字跌停未成交卖单跨日重试；新增参与率上限 `MAX_PARTICIPATION_RATE` 与平方根冲击成本 `SLIPPAGE_IMPACT_K`（**默认关闭**，保持既有回测基线，开启后需重跑基线）
+- 🛡️ **数据与迁移安全** — 迁移改为声明式逐版本事务，DDL 失败即回滚且不推进 `user_version`（v5 新增 `notify_log` 推送幂等表）；更新锁元数据原子写、所有权 token 校验、半截 JSON 不再误判孤儿锁、Win64 句柄修正；Tushare 复权因子为空或覆盖率不足一律放弃该源；`get_instrument_list()` 补回 `industry/is_st/list_date/delist_date`，修复 ST 判定与行业启发式恒失效；新增 `get_point_in_time_universe()` 为历史股票池回填预留接口
+- 🔒 **安全加固** — 移除硬编码默认口令 `quant123`（开启认证必须设 ≥8 位密码或 PBKDF2 哈希），恒定时间比较 + 会话 8 小时过期 + 失败退避；Webhook 强制 https + 官方域名白名单 + 禁私网 IP + 禁重定向，日志对 URL/token 正则脱敏，响应体只记状态码
+- ⏱️ **调度幂等** — Windows 计划任务与 APScheduler 双入口当日只推一次（`notify_log` 去重键），日志 handler 去重并在 `stop()` 时移除
+- 🔧 **工程规范** — 新增 `pyproject.toml`（ruff / mypy / pytest）与 `requirements-dev.txt`；CI 增加 ruff F821 零容忍门禁与全量报告，import 冒烟检查失败即让 CI 失败；ruff 首次扫描发现并修复 `scripts/init_data.py` 中 `pd` 未导入导致的 NameError
+- 🧪 **297 项测试全量通过** — 新增 `test_p2_hardening_fixes.py`(19)
+
+> **已知限制（本轮未处理）**：幸存者偏差需要回填退市股历史行情（本地数据源暂无），`get_point_in_time_universe()` 目前仅在 `stock_basic.delist_date` 有数据时生效；组合层行业/相关性约束、`app/backtest.py`(2144 行) 拆分与熔断器状态持久化待排期。
 
 ### v0.4.5 关键更新（2026-11-12）
 
@@ -589,5 +602,5 @@ class MyStrategy(BaseStrategy):
 ---
 
 <p align="center">
-  Made with ❤️ for A股量化 | v0.4.5
+  Made with ❤️ for A股量化 | v0.4.6
 </p>

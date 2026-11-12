@@ -2,9 +2,9 @@
 
 ## 项目概况
 - **路径**: `E:\wxf\claude\quant-trading\`
-- **版本**: v0.4.5（2026-11-12 数据止血 + 撮合正确性）
+- **版本**: v0.4.6（2026-11-12 第四批：策略样本外、指标口径、锁/迁移/推送安全、工程规范）
 - **技术栈**: Streamlit + 自研 pandas 回测引擎 + 多数据源 + SQLite + Plotly
-- **测试**: 278 项全通过（18 个模块，套件 45s）
+- **测试**: 297 项全通过（19 个模块，套件 ~31s）
 - **Skill 位置**: 3 处已同步更新
   - `项目/.atomcode.md` — atomcode 项目指令（最详细）
   - `~/.claude/skills/quant-trading-system/SKILL.md` — atomcode 全局 skill
@@ -59,6 +59,21 @@
 - **样本外验证是必需环节**：网格搜索第一名是纯样本内最优，不得当作业绩展示
 - **蒙特卡洛必须双口径**：重排只测路径风险（求和不变），亏损概率必须取自助重采样
 - **参数稳定性**：邻居均值/最优值 <0.5 视为孤立尖峰
+
+## v0.4.6 口径与约定（勿退回）
+- **策略推荐必须样本外**：训练段 70% 选策略、测试段 30% 冻结并单独回测；`tag`/`reason` 只用 `oos_*`，`details` 是样本内。不得退回全样本 argmax 展示业绩
+- **RSI/ATR 是标准 Wilder**：前 N 个 delta 取 SMA 作种子后递推，预热期 NaN；`ewm(alpha=1/N, adjust=False)` 不是 Wilder，首值可差 13 点
+- **封板判定用最终成交价**：先滑点 + `adjust_price` 再判一字板；`current_close` 跌停卖单经 `pending_deferred_sells` 跨日重试（next_open 仍当日合并）
+- **流动性与冲击成本默认关闭**：`MAX_PARTICIPATION_RATE=0`、`SLIPPAGE_IMPACT_K=0` 保持基线；开启后历史收益下降需重跑。next_open 取 `decision_idx` 的 volume/atr_pct，禁止用执行日数据
+- **迁移失败绝不推进 user_version**：`_MIGRATIONS` 声明式、逐版本 COMMIT、失败 ROLLBACK + 抛错；v5 新增 `notify_log` 表
+- **更新锁所有权**：lock_info.json 原子写、半截 JSON 不判陈旧、release 校验 owner_token、Windows 句柄用 `c_void_p`
+- **`get_instrument_list()` 必须带 industry/is_st/list_date/delist_date**：丢列会让 ST 判定与行业启发式静默失效
+- **认证无默认口令**：`APP_AUTH_ENABLED=true` 必须配 ≥8 位密码或 PBKDF2 哈希；Webhook 只收 https + 官方域名 + 禁私网/重定向
+- **CI 门禁**：`ruff check --select F821` 零容忍（已修 `scripts/init_data.py` 的 `pd` NameError）；全量 ruff 报告暂不阻断
+
+## 未做（需排期）
+- 幸存者偏差：需回填退市股历史行情；`get_point_in_time_universe()` 已就绪但库内 `delist_date` 全空
+- 组合层行业/相关性约束、熔断器状态持久化、`app/backtest.py`(2144 行) 拆分
 
 ## 注意事项
 - 启动命令: `cd E:\wxf\claude\quant-trading && py run.py`

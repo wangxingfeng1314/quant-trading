@@ -84,6 +84,19 @@ SLIPPAGE_RATE = float(os.getenv("SLIPPAGE_RATE", "0.001"))
 # 滑点比率（按成交金额的千分之一）
 # 买入时价格上浮，卖出时价格下浮
 
+# --- 流动性约束与冲击成本（默认关闭，保持既有回测基线） ---
+MAX_PARTICIPATION_RATE = float(os.getenv("MAX_PARTICIPATION_RATE", "0"))
+# 单笔下单量上限占「信号日成交量」的比例（0 = 不限制）。
+# 设为 0.1 即单笔最多吃当日成交量的 10%，可避免小盘股上「10万本金买2万股、
+# 日成交仅5千股」这种必然无法成交的假回测。开启后历史收益会下降，需重跑基线。
+
+SLIPPAGE_IMPACT_K = float(os.getenv("SLIPPAGE_IMPACT_K", "0"))
+# 平方根冲击成本系数：额外滑点 = k * 日波动率 * sqrt(下单量/ADV)。
+# 默认 0 表示只用固定千 1 滑点；建议从 0.5~1.0 开始灰度。
+
+MAX_IMPACT_PCT = float(os.getenv("MAX_IMPACT_PCT", "0.02"))
+# 冲击成本带来的额外滑点上限（默认 2%），防止极端参与率下成本失控。
+
 # ============================================================
 # 默认回测参数
 # ============================================================
@@ -182,7 +195,18 @@ APP_AUTH_ENABLED = os.getenv("APP_AUTH_ENABLED", "false").lower() == "true"
 # 是否启用 Streamlit 应用登录认证（默认关闭，部署到公网时建议开启）
 
 APP_AUTH_PASSWORD = os.getenv("APP_AUTH_PASSWORD", "")
-# 应用登录密码（为空且 AUTH_ENABLED=true 时使用默认密码 "quant123"）
+# 应用登录密码（至少 8 位）。AUTH_ENABLED=true 时**必须**显式设置，
+# 不再提供任何硬编码默认口令；留空将拒绝启动。
+
+APP_AUTH_PASSWORD_HASH = os.getenv("APP_AUTH_PASSWORD_HASH", "")
+# 可选：PBKDF2-HMAC-SHA256 哈希口令，格式 iterations$salt_hex$hash_hex。
+# 配置后优先使用哈希比对，避免明文口令落盘；不配置则回退 APP_AUTH_PASSWORD。
+
+APP_AUTH_SESSION_TTL = int(os.getenv("APP_AUTH_SESSION_TTL", "28800"))
+# 登录会话有效期（秒，默认 8 小时），超时需重新输入密码。
+
+APP_AUTH_MAX_FAILS = int(os.getenv("APP_AUTH_MAX_FAILS", "5"))
+# 连续失败次数达到该值后启用指数退避锁定。
 
 # ============================================================
 # 流动性与停牌风控配置（原 scanner.py 扩展）

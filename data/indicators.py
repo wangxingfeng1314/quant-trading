@@ -15,6 +15,38 @@ import pandas as pd     # 数据处理
 import numpy as np      # 数值计算
 
 
+def _wilder_mean(series: pd.Series, period: int) -> pd.Series:
+    """标准 Wilder 平滑（RSI / ATR 用）。
+
+    ``ewm(alpha=1/n, adjust=False)`` 是**以序列第一个值为种子**的指数递推，
+    并不是 Wilder：标准做法是先取前 n 个有效值的简单平均作种子，再执行
+    ``avg = (avg*(n-1) + x)/n``。两者在同一段波动序列上首值可差 13 个 RSI 点，
+    且偏差要很久才衰减，会直接改变 rsi>68 / rsi<45 之类的策略判定。
+
+    同时保证预热期（不足 n 个有效值）输出 NaN，不用短窗均值冒充长周期指标。
+    """
+    s = pd.to_numeric(series, errors="coerce")
+    arr = s.to_numpy(dtype=float)
+    out = np.full(len(arr), np.nan)
+    valid = np.flatnonzero(~np.isnan(arr))
+    if len(valid) < period:
+        return pd.Series(out, index=s.index)
+    start = int(valid[0])
+    seed = arr[start:start + period]
+    if np.isnan(seed).any():
+        return pd.Series(out, index=s.index)
+    avg = float(seed.mean())
+    out[start + period - 1] = avg
+    for i in range(start + period, len(arr)):
+        x = arr[i]
+        if np.isnan(x):
+            out[i] = avg
+            continue
+        avg = (avg * (period - 1) + x) / period
+        out[i] = avg
+    return pd.Series(out, index=s.index)
+
+
 def add_ma(df: pd.DataFrame, periods: list = None) -> pd.DataFrame:
     """添加移动均线 (MA)
 
@@ -85,15 +117,18 @@ def add_rsi(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
     delta = df["close"].diff()                    # 每日价格变化
     gain = delta.clip(lower=0)                    # 涨幅（正值）
     loss = (-delta).clip(lower=0)                 # 跌幅（正值）
-    # Wilder平滑: alpha = 1/period
-    avg_gain = gain.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    # 标准 Wilder：前 period 个 delta 的 SMA 作种子，之后递推（见 _wilder_mean）
+    avg_gain = _wilder_mean(gain, period)
+    avg_loss = _wilder_mean(loss, period)
     rs = avg_gain / avg_loss.replace(0, np.nan)   # 相对强弱比（避免除0）
     rsi = 100 - (100 / (1 + rs))                  # RSI公式
-    # 极端边界处理：全涨(avg_loss==0)为100，全跌(avg_gain==0)为0，无波动为50
-    if not rsi.empty:
-        rsi = rsi.where(avg_loss > 0, np.where(avg_gain > 0, 100.0, 50.0))
-        rsi = rsi.where(avg_gain > 0, np.where(avg_loss > 0, 0.0, 50.0))
+    # 极端边界处理：全涨(avg_loss==0)为100，全跌(avg_gain==0)为0，无波动为50。
+    # 旧实现用 where(avg_loss > 0, ...) 会把预热期的 NaN 一并填成中性 50，
+    # 让指标在数据不足时也能触发策略；这里显式保留 NaN 直到指标真正就绪。
+    rsi = rsi.mask((avg_loss == 0) & (avg_gain > 0), 100.0)
+    rsi = rsi.mask((avg_gain == 0) & (avg_loss > 0), 0.0)
+    rsi = rsi.mask((avg_gain == 0) & (avg_loss == 0), 50.0)
+    rsi = rsi.where(avg_gain.notna() & avg_loss.notna())
     df[f"rsi{period}"] = rsi
     return df
 
@@ -176,8 +211,11 @@ def add_atr(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
     """添加ATR (Average True Range) 平均真实波幅及 ATR%
 
     True Range = max(high-low, |high-prev_close|, |low-prev_close|)
-    ATR = MA(TR, period)
+    ATR = Wilder(TR, period)   （前 period 个 TR 的 SMA 作种子后递推）
     ATR% = ATR / Close * 100
+
+    注意：旧实现用 rolling(..., min_periods=1).mean()，第 0 根就有「ATR」，
+    前 13 根是短窗均值、系统性偏小，会被 ATR 风险定仓放大成超配。
 
     参数:
         period: 计算周期，默认 14
@@ -194,7 +232,7 @@ def add_atr(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
         (high - prev_close).abs(),                 # 最高到前收的绝对偏差
         (low - prev_close).abs()                   # 最低到前收的绝对偏差
     ], axis=1).max(axis=1)                         # 取三者的最大值
-    atr_series = tr.rolling(window=period, min_periods=1).mean()
+    atr_series = _wilder_mean(tr, period)           # 标准 Wilder + 完整预热
     df[f"atr{period}"] = atr_series
     df["atr_pct"] = (atr_series / df["close"]) * 100
     return df

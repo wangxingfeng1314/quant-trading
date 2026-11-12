@@ -1115,7 +1115,8 @@ def test_push_wecom_and_dingtalk_truncation(monkeypatch):
         def json(self):
             return {"errcode": 0}
 
-    def mock_post(url, json=None, timeout=None):
+    def mock_post(url, json=None, timeout=None, **kwargs):
+        # _post_webhook 统一附加 allow_redirects=False（防 SSRF）
         sent_payload["json"] = json
         return MockResponse()
 
@@ -1291,6 +1292,9 @@ def test_scheduler_scan_and_notify_isolated_exceptions(monkeypatch):
     # mock notify_position_summary 正常执行
     mock_pos_summary = MagicMock(return_value=True)
     monkeypatch.setattr("notifier.push.notify_position_summary", mock_pos_summary)
+    # 本用例验证异常隔离，屏蔽当日推送幂等标记（幂等行为另有专项测试）
+    monkeypatch.setattr("data.storage.notification_already_sent", lambda key: False)
+    monkeypatch.setattr("data.storage.mark_notification_sent", lambda key: None)
 
     # 执行 scan_and_notify，应当捕获信号扫描的异常，并不中断持仓日报的推送
     scheduler.scan_and_notify()

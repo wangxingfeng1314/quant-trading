@@ -225,5 +225,7 @@ def test_indicators_atr_pct():
     res = add_atr(df, period=3)
     assert "atr3" in res.columns
     assert "atr_pct" in res.columns
-    assert not res["atr_pct"].isna().all()
-    assert (res["atr_pct"] > 0).all()
+    # Wilder 预热：不足 period 根不输出短窗均值（ATR 定仓不再被前几根偏小值放大）
+    assert res["atr3"].isna().sum() == 2
+    valid = res["atr_pct"].dropna()
+    assert len(valid) == 3 and (valid > 0).all()

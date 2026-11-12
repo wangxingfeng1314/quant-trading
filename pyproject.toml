@@ -1,0 +1,28 @@
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+exclude = [
+    "data/backups",
+    "logs",
+    ".workbuddy",
+    "venv",
+    ".venv",
+    "__pycache__",
+]
+
+[tool.ruff.lint]
+# E/W: pycodestyle, F: PyFlakes(未定义名/未用导入), I: import 排序,
+# B: bugbear 常见陷阱, UP: 过时语法
+select = ["E", "F", "W", "I", "B", "UP"]
+# 项目含大量中文注释与长文案，暂不强制行宽；其余规则照常执行
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+files = ["core", "engine"]
+check_untyped_defs = false
+warn_unused_ignores = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

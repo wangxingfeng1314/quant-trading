@@ -16,12 +16,53 @@ from app.theme import inject_theme_css, inject_page_transition_js
 # ============================================================
 # 登录认证（可选，通过 APP_AUTH_ENABLED 环境变量启用）
 # ============================================================
-from core.config import APP_AUTH_ENABLED, APP_AUTH_PASSWORD
+import hmac
+import time
+import logging
+from core.config import (
+    APP_AUTH_ENABLED, APP_AUTH_PASSWORD, APP_AUTH_PASSWORD_HASH,
+    APP_AUTH_SESSION_TTL, APP_AUTH_MAX_FAILS,
+)
+
+_auth_logger = logging.getLogger(__name__)
+
+
+def _verify_password(pwd: str) -> bool:
+    """恒定时间比较；配置了 PBKDF2 哈希时优先用哈希，避免明文口令落盘。"""
+    pwd = pwd or ""
+    if APP_AUTH_PASSWORD_HASH:
+        try:
+            import hashlib
+            iters, salt_hex, digest_hex = APP_AUTH_PASSWORD_HASH.split("$", 2)
+            dk = hashlib.pbkdf2_hmac(
+                "sha256", pwd.encode("utf-8"), bytes.fromhex(salt_hex), int(iters)
+            )
+            return hmac.compare_digest(dk.hex(), digest_hex)
+        except Exception:
+            _auth_logger.warning("APP_AUTH_PASSWORD_HASH 格式不合法，本次登录拒绝")
+            return False
+    return hmac.compare_digest(pwd, APP_AUTH_PASSWORD)
+
 
 if APP_AUTH_ENABLED:
-    # 检查是否已登录
+    # 开启认证却没有可用口令（或口令过短）时拒绝启动，绝不使用公开默认密码
+    _has_usable_password = bool(APP_AUTH_PASSWORD_HASH) or len(APP_AUTH_PASSWORD) >= 8
+    if not _has_usable_password:
+        inject_theme_css()
+        st.error(
+            "🔒 已启用登录认证，但未配置有效密码。请在 .env 中设置 "
+            "APP_AUTH_PASSWORD（至少 8 位）或 APP_AUTH_PASSWORD_HASH 后重启应用。"
+        )
+        st.stop()
+
     if "authenticated" not in st.session_state:
         st.session_state["authenticated"] = False
+
+    # 会话过期：登录状态不再永久有效
+    if st.session_state["authenticated"]:
+        if time.time() - float(st.session_state.get("auth_ts", 0)) > APP_AUTH_SESSION_TTL:
+            st.session_state["authenticated"] = False
+            st.session_state["auth_failed"] = 0
 
     if not st.session_state["authenticated"]:
         inject_theme_css()
@@ -32,13 +73,27 @@ if APP_AUTH_ENABLED:
         with col2:
             password = st.text_input("请输入密码", type="password", key="auth_pwd")
             if st.button("登录", type="primary", width="stretch"):
-                expected = APP_AUTH_PASSWORD or "quant123"
-                if password == expected:
+                now = time.time()
+                lock_until = float(st.session_state.get("auth_lock_until", 0))
+                if now < lock_until:
+                    st.error(f"❌ 尝试过于频繁，请 {int(lock_until - now) + 1} 秒后重试")
+                elif _verify_password(password):
                     st.session_state["authenticated"] = True
+                    st.session_state["auth_ts"] = now
+                    st.session_state["auth_failed"] = 0
+                    st.session_state["auth_lock_until"] = 0
                     st.rerun()
                 else:
+                    failed = int(st.session_state.get("auth_failed", 0)) + 1
+                    st.session_state["auth_failed"] = failed
+                    # 连续失败达到阈值后指数退避，最长锁定 60 秒（按 session 计数）
+                    if failed >= APP_AUTH_MAX_FAILS:
+                        st.session_state["auth_lock_until"] = now + min(
+                            2 ** min(failed - APP_AUTH_MAX_FAILS + 1, 6), 60
+                        )
+                    _auth_logger.warning("应用登录失败（连续第 %d 次）", failed)
                     st.error("❌ 密码错误")
-            st.caption("💡 默认密码: quant123（请在 .env 中设置 APP_AUTH_PASSWORD 修改）")
+            st.caption("🔒 密码由部署者在 .env 中设置，系统不提供默认口令")
         st.stop()
 
 # 启动时确保数据库表结构是最新的（进程单例，切页无需反复执行 DDL）
@@ -209,7 +264,7 @@ st.sidebar.markdown(
     f"**系统状态**\n\n"
     f"⭐ 自选股: {watchlist_count} 只\n\n"
     f"📊 日线数据: {db_count:,} 条\n\n"
-    f"版本: **v0.4.5**"
+    f"版本: **v0.4.6**"
 )
 
 # 登出按钮（仅认证模式下显示）

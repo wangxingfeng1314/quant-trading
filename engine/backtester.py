@@ -9,6 +9,7 @@ import itertools
 import concurrent.futures
 
 from engine.portfolio import Portfolio
+from engine.commission import cap_order_volume
 from engine.bar_view import BarFrame, FrameStore
 from data.storage import get_daily, save_backtest_result, save_backtest_trades
 from data.indicators import apply_indicators
@@ -56,6 +57,19 @@ def _options_kwargs(backtest_options: dict) -> dict:
     if not backtest_options:
         return {}
     return {k: v for k, v in backtest_options.items() if k in BACKTEST_OPTION_KEYS}
+
+
+def _liquidity_context(fa, idx):
+    """取 (参考成交量, 日波动率) 供参与率上限与冲击成本使用。
+
+    idx 必须是撮合时点已经收盘的那一行：next_open 用信号日（curr_idx - 1），
+    current_close 可用当日。绝不能读执行日尚未收盘的 volume / atr_pct。
+    """
+    if fa is None or idx is None or idx < 0:
+        return 0.0, 0.0
+    vol = fa.val("volume", idx, 0.0) or 0.0
+    atr_pct = fa.val("atr_pct", idx, 0.0) or 0.0
+    return float(vol), float(atr_pct) / 100.0
 
 
 # ============================================================
@@ -152,7 +166,8 @@ class _StockArrays:
 
     # 主循环与快照所需的列
     FAST_COLS = ("open", "close", "high", "low", "ma5", "ma20", "ma60",
-                 "rsi14", "dif", "dea", "kdj_k", "atr14")
+                 "rsi14", "dif", "dea", "kdj_k", "atr14",
+                 "volume", "atr_pct")  # 流动性约束与冲击成本所需的列
 
     def __init__(self, ts_code: str, df: pd.DataFrame, st_lookup: dict,
                  store: FrameStore = None):
@@ -344,6 +359,9 @@ class Backtester:
                 logger.warning(f"大盘牛熊择时网关初始化失败: {e}")
 
         # 4. 逐日迭代
+        # current_close 模式下一字跌停卖单失败后需要跨日重试；next_open 仍保持
+        # 「当日合并进 signals、次日开盘重试」的原有节奏，两者不能共用同一队列。
+        pending_deferred_sells = []
         for date in trade_dates:
             # 每日开盘前触发持仓日结（T+1结转）
             portfolio.on_new_day(date)
@@ -369,7 +387,10 @@ class Backtester:
                 continue
 
             # next_open 模式：次日开盘时撮合前一交易日生成的 pending_signals
-            deferred_sells = []
+            # deferred_sells 是「昨日遗留、今天要重新挂出」的卖单；
+            # pending_deferred_sells 收集「今天失败、明天再试」的卖单。
+            deferred_sells = list(pending_deferred_sells)
+            pending_deferred_sells = []
             if self.execution_mode == "next_open" and pending_signals:
                 # 横截面排序：卖出优先，买入按 score 降序
                 pending_signals.sort(key=lambda s: (0 if s.direction == "SELL" else 1, -s.score))
@@ -391,6 +412,8 @@ class Backtester:
                     # ATR14 含当日 high-low、close 更是收盘价，用执行日的这两列
                     # 定仓位属于未来函数，必须回退一行。
                     decision_idx = curr_idx - 1 if curr_idx and curr_idx > 0 else None
+                    # 开盘撮合时只能用信号日已收盘的成交量/波动率
+                    ref_volume, ref_volatility = _liquidity_context(fa, decision_idx)
                     is_st, is_cy, is_bj = fa.is_st, fa.is_cy, fa.is_bj
                     snapshot = self._build_snapshot(sig, df_stock, curr_idx, fast=fa)
 
@@ -410,7 +433,8 @@ class Backtester:
                         budget = self._calc_buy_budget(
                             portfolio, sig, df_stock=df_stock,
                             curr_idx=decision_idx, fast=fa)
-                        volume = int(budget / open_price) // 100 * 100
+                        volume = cap_order_volume(
+                            int(budget / open_price) // 100 * 100, ref_volume)
                         if volume > 0:
                             portfolio.buy(
                                 ts_code=ts_code,
@@ -424,11 +448,14 @@ class Backtester:
                                 context_snapshot=snapshot,
                                 bar_low=bar_low,
                                 bar_high=bar_high,
+                                bar_volume=ref_volume,
+                                volatility=ref_volatility,
                             )
                     elif sig.direction == "SELL":
                         pos = portfolio.get_position(ts_code)
                         if pos and not pos.is_empty:
-                            sell_vol = pos.available_shares
+                            sell_vol = cap_order_volume(
+                                pos.available_shares, ref_volume, lot_size=1)
                             sold_trade = portfolio.sell(
                                 ts_code=ts_code,
                                 price=open_price,
@@ -441,6 +468,8 @@ class Backtester:
                                 context_snapshot=snapshot,
                                 bar_low=bar_low,
                                 bar_high=bar_high,
+                                bar_volume=ref_volume,
+                                volatility=ref_volatility,
                             )
                             # 若因一字跌停封死导致未能卖出，顺延至下一交易日继续挂单卖出
                             if sold_trade is None and sell_vol > 0:
@@ -490,6 +519,8 @@ class Backtester:
                     is_cy = fa.is_cy if fa is not None else ts_code.startswith(("300", "301", "688"))
                     is_bj = fa.is_bj if fa is not None else (
                         ts_code.startswith(("43", "83", "87", "92")) or ts_code.endswith(".BJ"))
+                    # 收盘撮合时当日成交量已确定，可用于流动性约束
+                    ref_volume, ref_volatility = _liquidity_context(fa, curr_idx)
                     snapshot = self._build_snapshot(sig, df_stock, curr_idx, fast=fa)
 
                     if sig.direction == "BUY":
@@ -506,7 +537,8 @@ class Backtester:
                         if sig.price_ref <= 0:
                             continue
                         budget = self._calc_buy_budget(portfolio, sig, df_stock=df_stock, curr_idx=curr_idx, fast=fa)
-                        volume = int(budget / sig.price_ref) // 100 * 100
+                        volume = cap_order_volume(
+                            int(budget / sig.price_ref) // 100 * 100, ref_volume)
                         if volume > 0:
                             portfolio.buy(
                                 ts_code=sig.ts_code,
@@ -520,12 +552,15 @@ class Backtester:
                                 context_snapshot=snapshot,
                                 bar_low=bar_low,
                                 bar_high=bar_high,
+                                bar_volume=ref_volume,
+                                volatility=ref_volatility,
                             )
                     elif sig.direction == "SELL":
                         pos = portfolio.get_position(sig.ts_code)
                         if pos and not pos.is_empty:
-                            sell_vol = pos.available_shares
-                            portfolio.sell(
+                            sell_vol = cap_order_volume(
+                                pos.available_shares, ref_volume, lot_size=1)
+                            sold_trade = portfolio.sell(
                                 ts_code=sig.ts_code,
                                 price=sig.price_ref,
                                 volume=sell_vol,
@@ -537,7 +572,13 @@ class Backtester:
                                 context_snapshot=snapshot,
                                 bar_low=bar_low,
                                 bar_high=bar_high,
+                                bar_volume=ref_volume,
+                                volatility=ref_volatility,
                             )
+                            # current_close 模式原先丢弃 sell() 返回值，一字跌停
+                            # 卖单失败后永久消失。这里顺延到下一交易日重新挂单。
+                            if sold_trade is None and sell_vol > 0:
+                                pending_deferred_sells.append(sig)
 
             # 记录权益
             portfolio.record_equity(date, prices)

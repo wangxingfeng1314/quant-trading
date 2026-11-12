@@ -1,5 +1,54 @@
 # Changelog
 
+## [v0.4.6] - 2026-11-12
+
+### 🧪 方法论：策略推荐不再用「同一段数据既择优又展示业绩」
+
+`services/strategy_recommender.py` 原先让 4 个策略在 `[2023-01-01, 今天]` 全样本上回测取 argmax，并把这段样本内最优的收益/胜率写进自选股标签与推荐理由，叠加了选择偏差与多重比较偏差。项目里已有 `walk_forward()` 却没接线。
+
+- 改为按交易日切 70% 训练 / 30% 测试：训练段只负责「选哪个策略」，测试段冻结该策略后单独回测。
+- `tag` / `reason` 只引用测试段指标；新增 `is_oos`、`train_window`、`test_window`、`oos_total_return` / `oos_win_rate` / `oos_trades`；`details` 明确标注为样本内对比。
+- 样本外成交 < 3 次时只给策略名 +「样本外交易不足」，不给业绩标签；4 策略择优按候选数做线性折扣（每多一个候选 -5%）。
+- 批量入口新增统一 `start_date` / `end_date`，避免每只股票各自取「今天」导致窗口不可比。
+
+### 📐 指标口径：标准 Wilder 与完整预热
+
+- `data/indicators.py` 新增 `_wilder_mean()`：前 N 个有效 delta 取 SMA 作种子，之后 `avg = (avg*(N-1)+x)/N`。旧的 `ewm(alpha=1/N, adjust=False)` 以第一个值为种子，同一波动序列首个 RSI 相差 13.23 点且衰减很慢，会改变 `rsi>68` / `rsi<45` 等策略判定。
+- RSI 预热期保持 NaN（旧实现用 `where` 把 NaN 填成中性 50，数据不足也会触发信号）；ATR 由 `rolling(min_periods=1).mean()` 改为 Wilder + `min_periods=N`，消除前 13 根偏小的 ATR 被 ATR 风险定仓放大成超配。
+- 回测主循环已有 180 天 warmup，正式区间不受预热影响；`scanner` / 自定义周期路径的指示值更保守。
+
+### 🚦 撮合真实性
+
+- **封板判定改用最终成交价**：旧实现先判封板、再滑点、再 `adjust_price`，委托价略低于涨停价时会被裁到涨停价成交，绕过一字板拒单。现在先算出最终价再判，一字板判定退化为「bar_low >= upper」/「bar_high <= lower」。
+- **current_close 跌停卖单顺延**：旧实现丢弃 `portfolio.sell()` 返回值且 `deferred_sells` 只在 next_open 分支构建，一字跌停当日卖单永久消失。新增跨日 `pending_deferred_sells`，保持 next_open 原有「当日合并、次日开盘重试」节奏不变。
+- **流动性与冲击成本（默认关闭，零基线漂移）**：`MAX_PARTICIPATION_RATE` 截断单笔下单量不超过信号日成交量 × 比例；`apply_slippage()` 扩展 `volume/bar_volume/volatility`，按 `k * sigma * sqrt(参与率)` 加平方根冲击并受 `MAX_IMPACT_PCT` 封顶。next_open 一律用 `decision_idx`（信号日）取成交量/ATR%，避免未来函数。开启后历史收益会下降，需重跑基线。
+
+### 🛡️ 数据、迁移与更新锁
+
+- `_run_migrations()` 改声明式：先 `PRAGMA table_info` 保证幂等、逐条 `execute`、每版本独立 COMMIT；任一 DDL 失败即 ROLLBACK + 抛错启动失败，**绝不再无条件推进 `user_version`**（旧行为会让失败迁移永不重试、schema 永久缺列）。删除 `init_db()` 尾部吞异常的裸 `ALTER TABLE`。新增 v5 `notify_log` 表。
+- 更新锁：元数据改「临时文件 + `os.replace`」原子写；半截 JSON 不再被判为孤儿锁（旧实现会让两个进程同时进临界区）；`release` 按 owner_token 校验所有权、`force_release(expected_meta)` 做 TOCTOU 二次校验；`_is_pid_running` 在权限不足时保守视为存活，Win64 句柄改 `c_void_p` 防截断。
+- `_fetch_daily_tushare()`：复权因子接口返回空、缺列或覆盖率不足时一律放弃该源，不再把未复权价全填 `adj_factor=1.0` 后当作前复权写入。
+- `get_instrument_list()` 补回 `industry/is_st/list_date/delist_date`（旧实现只投影 4 列，导致 `get_st_lookup()` 的 is_st 分支与推荐器行业启发式恒失效），ETF 侧补齐同名空列。
+- 新增 `get_point_in_time_universe(as_of)`，按 `list_date <= as_of <= delist_date` 过滤，为退市股历史回填预留 point-in-time 股票池接口。
+
+### 🔒 安全与调度
+
+- 移除硬编码默认口令 `quant123`：`APP_AUTH_ENABLED=true` 时必须配置 ≥8 位 `APP_AUTH_PASSWORD` 或 `APP_AUTH_PASSWORD_HASH`（PBKDF2-HMAC-SHA256，`迭代$salt_hex$hash_hex`），否则拒绝启动；`hmac.compare_digest` 恒定时间比较、会话 8 小时过期、连续失败达阈值后指数退避。
+- Webhook 加载时校验 https + 官方域名白名单（可由 `WEBHOOK_ALLOW_CUSTOM_HOST` 显式放宽）+ 禁私网/环回/元数据 IP；统一 `_post_webhook()` 出口 `allow_redirects=False`；`_safe_log()` 改正则脱敏保留诊断信息，响应体只记 `errcode/code/msg` 不再整包打日志。
+- `scan_and_notify()` 用 `notify_log` 的「日期 + 任务」主键去重，解决 Windows 计划任务与 APScheduler 双入口重复推送；`start()/stop()` 对日志 handler 去重并在停止时移除关闭。
+- `scripts/init_data.py` 补齐 `import pandas as pd`（ruff F821 发现的真实 NameError，Step 2.5 合并股票/ETF 列表必崩）。
+
+### 🔧 工程规范
+
+- 新增 `pyproject.toml`（ruff E/F/W/I/B/UP + mypy + pytest）与 `requirements-dev.txt`。
+- CI：新增 ruff 安装、`ruff check --select F821` 零容忍阻断门禁、全量 ruff 报告（暂不阻断）；import 冒烟检查由「只打 ⚠」改为 `assert not failed` 真正失败。
+
+### 🧪 测试
+
+新增 `tests/test_p2_hardening_fixes.py`（19 项）；调整 2 处既有测试预期（Wilder 预热、推送幂等隔离）与 1 处 mock 签名（`allow_redirects`）。全量 **297 项通过**（30.9s）。
+
+> 本轮未处理：退市股历史行情回填（决定幸存者偏差能否真正消除）、组合层行业/相关性约束、`app/backtest.py`(2144 行) 拆分、熔断状态持久化。
+
 ## [v0.4.5] - 2026-11-12
 
 ### 🩹 P0：两处已造成实际损害的数据缺陷

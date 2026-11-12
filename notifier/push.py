@@ -1,8 +1,11 @@
 """消息推送模块 - Server酱 / PushPlus / 企业微信 / 钉钉 / 飞书 通知"""
 import json
 import logging
+import re
+import ipaddress
 from typing import List
 from datetime import datetime
+from urllib.parse import urlparse
 
 import requests
 
@@ -20,13 +23,97 @@ def _mask_url(url: str) -> str:
     return url[:30] + "***"
 
 
+_SECRET_RE = re.compile(
+    r"(?i)((?:access_token|sendkey|secret|token|key|sign|password|webhook)[\"']?\s*[:=]\s*[\"']?)[^\s,}&\"']+"
+)
+_URL_RE = re.compile(r"https?://[^\s\"'<>]+")
+
+
+def _redact(text) -> str:
+    """正则脱敏异常/响应体里的 URL 与密钥，保留其余诊断信息。
+
+    旧实现只要异常消息含 "http" 就把整段替换成「请求异常（URL已脱敏）」，
+    既丢光了诊断信息，又漏掉了不含 http 但含 token/secret 的错误。
+    """
+    s = str(text)
+    s = _URL_RE.sub(lambda m: _mask_url(m.group(0)), s)
+    return _SECRET_RE.sub(lambda m: m.group(1) + "***", s)
+
+
 def _safe_log(channel: str, error: Exception):
-    """记录推送异常，脱敏可能包含 URL 的错误信息"""
-    err_str = str(error)
-    # 如果异常消息中包含 http，做脱敏处理
-    if "http" in err_str.lower():
-        err_str = "请求异常（URL已脱敏）"
-    logger.error(f"{channel}推送异常: {err_str}")
+    """记录推送异常（URL / 密钥脱敏后保留可读的错误类型与消息）"""
+    logger.error(f"{channel}推送异常: {type(error).__name__}: {_redact(error)}")
+
+
+def _log_failed_response(channel: str, data):
+    """只记录响应里的状态码与简短消息，绝不把整个响应体打进日志。
+
+    官方接口的错误响应体有机会回显 token / Webhook 片段，
+    旧实现 5 个通道都是 `logger.error(f"...: {data}")` 全量打印。
+    """
+    if isinstance(data, dict):
+        brief = {k: _redact(data[k])[:120] for k in
+                 ("errcode", "code", "errmsg", "msg", "message") if k in data}
+    else:
+        brief = _redact(data)[:120]
+    logger.error(f"{channel}推送失败: {brief or '响应无状态字段'}")
+
+
+# 官方 Webhook 域名白名单：防止 .env 被污染成内网地址后发起任意内网 POST
+_WEBHOOK_ALLOWED_HOSTS = {
+    "wecom": {"qyapi.weixin.qq.com"},
+    "dingtalk": {"oapi.dingtalk.com"},
+    "feishu": {"open.feishu.cn", "open.larksuite.com"},
+}
+
+
+def _validate_webhook_config(url: str, channel: str, allow_custom_host: bool = False) -> str:
+    """加载时校验 Webhook 配置，不合法直接禁用该通道（返回空字符串）。
+
+    校验项：仅 https、无 URL 内嵌凭据、host 命中官方白名单（可显式放宽）、
+    host 为 IP 字面量时拒绝私网/环回/链路本地/保留地址（含云元数据 169.254.169.254）。
+    """
+    if not url:
+        return ""
+    try:
+        p = urlparse(url)
+        host = (p.hostname or "").lower()
+        if p.scheme != "https" or not host or p.username or p.password:
+            raise ValueError("必须使用 https 且不得在 URL 内嵌账号密码")
+        if not allow_custom_host and host not in _WEBHOOK_ALLOWED_HOSTS.get(channel, set()):
+            raise ValueError(f"域名 {host} 不在 {channel} 官方白名单内")
+        try:
+            ip = ipaddress.ip_address(host)
+        except ValueError:
+            ip = None                       # 普通域名，白名单已约束
+        if ip is not None and (ip.is_private or ip.is_loopback or ip.is_link_local
+                               or ip.is_reserved or ip.is_multicast):
+            raise ValueError("禁止使用私网/环回/元数据地址")
+        return url
+    except Exception as e:
+        logger.warning(f"{channel} Webhook 配置不合法，已禁用该通道: {_mask_url(url)} ({e})")
+        return ""
+
+
+def _post_webhook(url: str, channel: str, payload: dict = None, form: dict = None):
+    """统一 POST 出口：禁止自动跟随重定向（防止白名单域名 302 到内网）"""
+    p = urlparse(url or "")
+    if p.scheme != "https" or not p.netloc or p.username or p.password:
+        logger.warning(f"{channel} Webhook URL 不合法，已拒绝请求: {_mask_url(url)}")
+        return None
+    try:
+        ip = ipaddress.ip_address(p.hostname or "")
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+            logger.warning(f"{channel} Webhook 指向内网地址，已拒绝请求: {_mask_url(url)}")
+            return None
+    except ValueError:
+        pass  # 普通域名，加载时的白名单已校验
+    kwargs = {"timeout": 10, "allow_redirects": False}
+    if payload is not None:
+        kwargs["json"] = payload
+    if form is not None:
+        kwargs["data"] = form
+    return requests.post(url, **kwargs)
 
 
 # 尝试从 .env 读取推送配置
@@ -36,10 +123,14 @@ load_dotenv(PROJECT_ROOT / ".env")
 
 SERVER_CHAN_KEY = os.getenv("SERVER_CHAN_KEY", "").strip()
 PUSHPLUS_TOKEN = os.getenv("PUSHPLUS_TOKEN", "").strip()
-WECOM_WEBHOOK = os.getenv("WECOM_WEBHOOK", "").strip()      # 企业微信机器人 Webhook URL
-DINGTALK_WEBHOOK = os.getenv("DINGTALK_WEBHOOK", "").strip()  # 钉钉机器人 Webhook URL
 DINGTALK_SECRET = os.getenv("DINGTALK_SECRET", "").strip()    # 钉钉加签密钥（可选）
-FEISHU_WEBHOOK = os.getenv("FEISHU_WEBHOOK", "").strip()      # 飞书机器人 Webhook URL
+
+# 自建代理/网关场景可设 WEBHOOK_ALLOW_CUSTOM_HOST=true 放宽域名白名单，
+# 但 https、无内嵌凭据、禁私网 IP、禁重定向这几条始终强制。
+_ALLOW_CUSTOM_HOST = os.getenv("WEBHOOK_ALLOW_CUSTOM_HOST", "false").lower() == "true"
+WECOM_WEBHOOK = _validate_webhook_config(os.getenv("WECOM_WEBHOOK", "").strip(), "wecom", _ALLOW_CUSTOM_HOST)
+DINGTALK_WEBHOOK = _validate_webhook_config(os.getenv("DINGTALK_WEBHOOK", "").strip(), "dingtalk", _ALLOW_CUSTOM_HOST)
+FEISHU_WEBHOOK = _validate_webhook_config(os.getenv("FEISHU_WEBHOOK", "").strip(), "feishu", _ALLOW_CUSTOM_HOST)
 
 
 def send_notification(title: str, content: str, msg_type: str = "markdown") -> bool:
@@ -87,16 +178,18 @@ def _send_server_chan(title: str, content: str, msg_type: str = "markdown") -> b
     """通过 Server酱 推送（https://sct.ftqq.com）"""
     try:
         url = f"https://sctapi.ftqq.com/{SERVER_CHAN_KEY}.send"
-        resp = requests.post(url, data={
+        resp = _post_webhook(url, "Server酱", form={
             "title": title,
             "desp": content,
-        }, timeout=10)
+        })
+        if resp is None:
+            return False
         data = resp.json()
         if data.get("code") == 0:
             logger.info(f"Server酱推送成功: {title}")
             return True
         else:
-            logger.error(f"Server酱推送失败: {data}")
+            _log_failed_response("Server酱", data)
             return False
     except Exception as e:
         _safe_log("Server酱", e)
@@ -107,18 +200,20 @@ def _send_pushplus(title: str, content: str, msg_type: str = "markdown") -> bool
     """通过 PushPlus 推送（https://www.pushplus.plus）"""
     try:
         url = "https://www.pushplus.plus/send"
-        resp = requests.post(url, json={
+        resp = _post_webhook(url, "PushPlus", payload={
             "token": PUSHPLUS_TOKEN,
             "title": title,
             "content": content,
             "template": msg_type,
-        }, timeout=10)
+        })
+        if resp is None:
+            return False
         data = resp.json()
         if data.get("code") == 200:
             logger.info(f"PushPlus推送成功: {title}")
             return True
         else:
-            logger.error(f"PushPlus推送失败: {data}")
+            _log_failed_response("PushPlus", data)
             return False
     except Exception as e:
         _safe_log("PushPlus", e)
@@ -147,13 +242,15 @@ def _send_wecom(title: str, content: str) -> bool:
             "msgtype": "markdown",
             "markdown": {"content": md_content},
         }
-        resp = requests.post(WECOM_WEBHOOK, json=payload, timeout=10)
+        resp = _post_webhook(WECOM_WEBHOOK, "企业微信", payload=payload)
+        if resp is None:
+            return False
         data = resp.json()
         if data.get("errcode") == 0:
             logger.info(f"企业微信推送成功: {title}")
             return True
         else:
-            logger.error(f"企业微信推送失败: {data}")
+            _log_failed_response("企业微信", data)
             return False
     except Exception as e:
         _safe_log("企业微信", e)
@@ -204,13 +301,15 @@ def _send_dingtalk(title: str, content: str) -> bool:
             signature = urllib.parse.quote_plus(base64.b64encode(hmac_code).decode("utf-8"))
             url = f"{url}&timestamp={timestamp}&sign={signature}"
 
-        resp = requests.post(url, json=payload, timeout=10)
+        resp = _post_webhook(url, "钉钉", payload=payload)
+        if resp is None:
+            return False
         data = resp.json()
         if data.get("errcode") == 0:
             logger.info(f"钉钉推送成功: {title}")
             return True
         else:
-            logger.error(f"钉钉推送失败: {data}")
+            _log_failed_response("钉钉", data)
             return False
     except Exception as e:
         _safe_log("钉钉", e)
@@ -260,13 +359,15 @@ def _send_feishu(title: str, content: str) -> bool:
                 ],
             },
         }
-        resp = requests.post(FEISHU_WEBHOOK, json=payload, timeout=10)
+        resp = _post_webhook(FEISHU_WEBHOOK, "飞书", payload=payload)
+        if resp is None:
+            return False
         data = resp.json()
         if data.get("code") == 0:
             logger.info(f"飞书推送成功: {title}")
             return True
         else:
-            logger.error(f"飞书推送失败: {data}")
+            _log_failed_response("飞书", data)
             return False
     except Exception as e:
         _safe_log("飞书", e)
