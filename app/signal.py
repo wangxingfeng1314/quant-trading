@@ -14,6 +14,7 @@ from app.st_utils import (
 )
 from strategies import STRATEGY_REGISTRY
 from notifier.push import notify_signals
+from core.config import SCANNER_MIN_BUY_SCORE
 
 
 def show():
@@ -68,10 +69,14 @@ def _show_scan():
         scan_date = chinese_date_picker("扫描日期", default_val=date.today(), key="scan_date")
         scan_date_str = scan_date
 
-    with st.expander("🛡️ 流动性与停牌守卫设置 (实盘风控)", expanded=False):
+    with st.expander("🛡️ 流动性、大盘择时与防洗盘守卫设置 (实盘风控)", expanded=False):
         fcol1, fcol2 = st.columns(2)
         with fcol1:
             filter_suspended = st.checkbox("过滤最新交易日停牌/无成交量标的", value=True)
+            filter_bear_trend = st.checkbox(
+                "大盘空头期硬拦截趋势追涨买入 (与回测择时对齐)", value=True,
+                help="当沪深300处于空头防守期时，直接拦截多因子共振/双均线等趋势买单，不再推送低分弱信号",
+            )
         with fcol2:
             amt_option = st.selectbox(
                 "近5日最低日均成交额门槛",
@@ -80,6 +85,14 @@ def _show_scan():
             )
             amt_map = {"不限制": 0.0, "2000 万元": 20000000.0, "3000 万元 (推荐)": 30000000.0, "5000 万元": 50000000.0}
             min_daily_amt = amt_map.get(amt_option, 0.0)
+            match_wl_strategy = st.checkbox(
+                "自选股优先按各自适配策略过滤 (防错配策略乱推)", value=True,
+                help="仅保留命中该股样本外适配策略或 >=2 策略共振的信号，避免用低胜率错配策略乱发指令",
+            )
+        enable_anti_whipsaw = st.checkbox(
+            "启用跨日防洗盘冷却 (防昨日卖今日高价追回 + 防高位卖后次日再补刀)", value=True,
+            help="若近3日刚发出卖出信号，拦截单策略高价追买；高位卖出后跌下来不再重复提示低位割肉",
+        )
 
     # 股票范围
     stocks_with_data = cached_get_stocks_with_data(min_days=60)
@@ -193,13 +206,16 @@ def _show_scan():
             min_daily_amount=min_daily_amt,
             filter_suspended=filter_suspended,
             force_refresh=True,
+            respect_market_regime=filter_bear_trend,
+            respect_watchlist_strategy=match_wl_strategy,
+            anti_whipsaw=enable_anti_whipsaw,
         )
 
         progress_bar.empty()
         status_text.empty()
 
         if not signals:
-            st.info("今日无交易信号（或均已被流动性/停牌风控拦截）")
+            st.info("今日无交易信号（或均已被大盘择时/适配策略/防洗盘/流动性风控拦截）")
             return
 
         st.success(f"扫描完成，发现 {len(signals)} 条有效交易信号")
@@ -250,11 +266,13 @@ def _show_scan():
 def build_deduplicated_broker_orders(signals: list, capital: float = 100000.0,
                                      max_pos_pct: float = 20.0, price_offset_pct: float = 0.0,
                                      stop_loss_pct: float = 0.0, stock_map: dict = None,
-                                     held_map: dict = None) -> tuple:
+                                     held_map: dict = None,
+                                     min_buy_score: float = 0.0) -> tuple:
     """将原始信号列表去重聚合为安全的单股单笔券商委托单（剔除同股多空冲突与同向重复下单）
 
     Args:
         stop_loss_pct: 若 <= 0 则自动启用 ATR14 动态止损，否则使用固定百分比
+        min_buy_score: 买入委托最低评分门槛（默认 0.0 兼容全量生成，实盘建议 >= 0.60）
     Returns:
         (order_rows, txt_lines)
     """
@@ -273,10 +291,12 @@ def build_deduplicated_broker_orders(signals: list, capital: float = 100000.0,
             buy_by_code.setdefault(sig.ts_code, []).append(sig)
 
     merged_signals = []
-    # 处理买入：剔除同日存在同级或更强卖出信号的冲突标的，同股多策略合并为1笔委托
+    # 处理买入：剔除同日存在同级或更强卖出信号的冲突标的，同股多策略合并为1笔委托并应用最低评分门槛
     for code, b_list in buy_by_code.items():
         s_list = sell_by_code.get(code, [])
         best_buy = max(b_list, key=lambda x: x.score)
+        if best_buy.score < float(min_buy_score):
+            continue
         if s_list and max(x.score for x in s_list) >= best_buy.score - 0.05:
             continue
         strat_str = "+".join(dict.fromkeys(format_strategy_cn(x.strategy) for x in b_list))
@@ -361,7 +381,12 @@ def _render_broker_order_sheet(signals: list, scan_date_str: str, stock_map: dic
             stop_loss_pct=float(stop_loss_pct),
             stock_map=stock_map,
             held_map=held_map,
+            min_buy_score=SCANNER_MIN_BUY_SCORE,
         )
+
+        if not order_rows:
+            st.info(f"🛡️ 当前无满足买入置信度门槛（≥{SCANNER_MIN_BUY_SCORE:.2f}）或卖出条件的实盘委托单")
+            return
 
         order_df = pd.DataFrame(order_rows)
         chinese_dataframe(order_df)

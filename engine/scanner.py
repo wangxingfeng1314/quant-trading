@@ -2,13 +2,13 @@
 import logging
 import concurrent.futures
 from typing import List, Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 import pandas as pd
 
 
 from data.storage import (
     get_daily, get_instrument_list, save_signal, save_signals_batch,
-    get_signals, get_conn,
+    get_signals, get_conn, get_watchlist,
 )
 from data.indicators import apply_indicators
 from data.cleaner import clean_daily
@@ -17,6 +17,8 @@ from core.models import Signal
 from core.config import (
     SCANNER_CACHE_THRESHOLD, SCANNER_MIN_DATA_DAYS, SCANNER_PARALLEL_WORKERS,
     SCANNER_MIN_DAILY_AMOUNT, SCANNER_FILTER_SUSPENDED,
+    SCANNER_MIN_BUY_SCORE, SCANNER_WHIPSAW_COOLDOWN_DAYS,
+    SCANNER_SELL_DEDUP_DAYS, SCANNER_BEAR_BLOCK_TREND_BUY,
 )
 
 logger = logging.getLogger(__name__)
@@ -175,13 +177,199 @@ def _scan_single_stock(
     return raw_signals
 
 
+def _filter_by_watchlist_strategy(signals: list) -> list:
+    """自选股按各自适配策略过滤（防错配策略低胜率乱推）。
+
+    规则：
+      - 若标的不在自选股推荐映射表中（或暂无有效推荐策略），原样放行；
+      - 若在映射表中：仅保留命中该股适配策略（附 ``[⭐适配]`` 标记）的信号，
+        或当日同向有 ``>= 2`` 个独立策略同时触发的强共振信号。
+    """
+    if not signals:
+        return signals
+    try:
+        wl = get_watchlist()
+    except Exception as e:
+        logger.debug(f"读取自选股适配策略跳过: {e}")
+        return signals
+    if wl is None or wl.empty or "recommended_strategy" not in wl.columns:
+        return signals
+
+    from services.strategy_recommender import parse_recommended_strategy_key
+
+    rec_map = {}
+    for _, row in wl.iterrows():
+        key = parse_recommended_strategy_key(row.get("recommended_strategy", ""))
+        if key:
+            rec_map[str(row["ts_code"])] = key
+    if not rec_map:
+        return signals
+
+    grouped = {}
+    for s in signals:
+        grouped.setdefault((s.ts_code, s.direction), []).append(s)
+
+    kept = []
+    for (code, _direction), grp in grouped.items():
+        rec_key = rec_map.get(code)
+        if not rec_key:
+            kept.extend(grp)
+            continue
+
+        distinct_strats = {s.strategy for s in grp}
+        if len(distinct_strats) >= 2:
+            kept.extend(grp)
+            continue
+
+        for s in grp:
+            if s.strategy == rec_key:
+                if "[⭐适配]" not in (s.reason or "") and "策略共振" not in (s.reason or ""):
+                    s.reason = f"[⭐适配] {s.reason}"
+                kept.append(s)
+            else:
+                logger.info(
+                    f"过滤非适配策略信号: {code} {s.direction} {s.strategy} "
+                    f"(该股适配策略为 {rec_key})"
+                )
+    return kept
+
+
+def _min_guard_date(prior_dates: list, sig_date: str, n_days: int) -> str:
+    """按精确交易日序列计算冷却边界日期，历史不足时按日历天数回退。"""
+    if n_days <= 0:
+        return "99991231"
+    if len(prior_dates) >= n_days:
+        return prior_dates[n_days - 1]
+    try:
+        dt = datetime.strptime(sig_date, "%Y%m%d")
+        cal_days = max(n_days * 2 + 1, 7 if n_days >= 3 else 5)
+        return (dt - timedelta(days=cal_days)).strftime("%Y%m%d")
+    except ValueError:
+        return "00000000"
+
+
+def _apply_cross_day_whipsaw_guard(
+    signals: list,
+    cooldown_days: int = None,
+    sell_dedup_days: int = None,
+) -> list:
+    """跨日反手冷却与滞后重复卖出过滤（防昨日刚卖、今日反弹即高价追回）。
+
+    规则：
+      1. 防低卖高买：若同标的在过去 ``cooldown_days`` 个交易日内产生过 SELL 信号
+         (参考卖出价 ``prev_price``)，则拦截当日单策略追高 BUY 信号
+         （除非多策略共振 ``>= 2``，或股价相对前期卖出价深跌超 5% 形成更低吸点）。
+      2. 防高位卖完再补刀：对超买/超卖短线策略（kdj_cross / bollinger_reversal），
+         若过去 ``sell_dedup_days`` 个交易日内已在更高价格（``prev_price > price_ref * 1.01``）
+         提示过 SELL 且今日评分未显著增强（``score <= prev_score + 0.05``），抑制重复 SELL。
+    """
+    if not signals:
+        return signals
+    if cooldown_days is None:
+        cooldown_days = SCANNER_WHIPSAW_COOLDOWN_DAYS
+    if sell_dedup_days is None:
+        sell_dedup_days = SCANNER_SELL_DEDUP_DAYS
+    cooldown_days = max(0, int(cooldown_days))
+    sell_dedup_days = max(0, int(sell_dedup_days))
+    if cooldown_days <= 0 and sell_dedup_days <= 0:
+        return signals
+
+    # 统计当日同股同向多策略 BUY 共振数量
+    buy_strats_by_code = {}
+    for s in signals:
+        if s.direction == "BUY":
+            buy_strats_by_code.setdefault(s.ts_code, set()).add(s.strategy)
+
+    lookback = max(cooldown_days, sell_dedup_days)
+    kept = []
+    try:
+        with get_conn() as conn:
+            date_cache = {}
+            sell_cache = {}
+            for sig in signals:
+                code = sig.ts_code
+                sig_date = str(sig.trade_date or "").strip()
+                if not sig_date:
+                    kept.append(sig)
+                    continue
+
+                cache_key = (code, sig_date)
+                if cache_key not in date_cache:
+                    rows = conn.execute(
+                        "SELECT trade_date FROM daily_price "
+                        "WHERE ts_code = ? AND trade_date < ? "
+                        "ORDER BY trade_date DESC LIMIT ?",
+                        (code, sig_date, lookback),
+                    ).fetchall()
+                    prior_dates = [str(r[0]) for r in rows]
+
+                    min_buy_dt = _min_guard_date(prior_dates, sig_date, cooldown_days)
+                    min_sell_dt = _min_guard_date(prior_dates, sig_date, sell_dedup_days)
+                    date_cache[cache_key] = (min_buy_dt, min_sell_dt)
+
+                    earliest_q = min(min_buy_dt, min_sell_dt)
+                    sell_rows = conn.execute(
+                        "SELECT trade_date, strategy, score, price_ref FROM signal "
+                        "WHERE ts_code = ? AND direction = 'SELL' "
+                        "AND trade_date >= ? AND trade_date < ? "
+                        "ORDER BY trade_date DESC, id DESC",
+                        (code, earliest_q, sig_date),
+                    ).fetchall()
+                    sell_cache[cache_key] = sell_rows
+
+                min_buy_dt, min_sell_dt = date_cache[cache_key]
+                prev_sells = sell_cache[cache_key]
+
+                if sig.direction == "BUY" and cooldown_days > 0:
+                    recent_buys_block = [r for r in prev_sells if str(r[0]) >= min_buy_dt]
+                    if recent_buys_block and len(buy_strats_by_code.get(code, set())) < 2:
+                        prev_date, prev_strat, _prev_score, prev_price = recent_buys_block[0]
+                        prev_px = float(prev_price or 0.0)
+                        curr_px = float(sig.price_ref or 0.0)
+                        if prev_px <= 0 or curr_px <= 0 or curr_px >= prev_px * 0.95:
+                            logger.info(
+                                f"反手冷却拦截低卖高买: {code} ({sig_date}) {sig.strategy} "
+                                f"BUY ¥{curr_px:.2f}（{prev_date} {prev_strat} 刚SELL于 ¥{prev_px:.2f}）"
+                            )
+                            continue
+
+                if (
+                    sig.direction == "SELL"
+                    and sell_dedup_days > 0
+                    and sig.strategy in {"kdj_cross", "bollinger_reversal"}
+                ):
+                    recent_sells = [r for r in prev_sells if str(r[0]) >= min_sell_dt]
+                    valid_prev = [r for r in recent_sells if float(r[3] or 0.0) > 0]
+                    if valid_prev:
+                        max_prev_px = max(float(r[3]) for r in valid_prev)
+                        max_prev_score = max(float(r[2] or 0.0) for r in valid_prev)
+                        curr_px = float(sig.price_ref or 0.0)
+                        if curr_px > 0 and max_prev_px > curr_px * 1.01 and sig.score <= max_prev_score + 0.05:
+                            logger.info(
+                                f"抑制滞后重复卖出: {code} ({sig_date}) {sig.strategy} "
+                                f"SELL ¥{curr_px:.2f} (score={sig.score:.2f}，"
+                                f"近{sell_dedup_days}日内已于高位 ¥{max_prev_px:.2f} 提示卖出)"
+                            )
+                            continue
+
+                kept.append(sig)
+    except Exception as e:
+        logger.debug(f"跨日防洗盘检查降级放行: {e}")
+        return signals
+
+    return kept
+
+
 def scan_signals(universe: list = None, strategy_names: list = None,
                  end_date: str = "", save: bool = True,
                  progress_callback: Callable = None,
                  parallel: bool = True,
                   min_daily_amount: float = None,
                   filter_suspended: bool = None,
-                  force_refresh: bool = False) -> List[Signal]:
+                  force_refresh: bool = False,
+                  respect_market_regime: bool = None,
+                  respect_watchlist_strategy: bool = False,
+                  anti_whipsaw: bool = True) -> List[Signal]:
 
     """扫描全市场信号
 
@@ -195,12 +383,17 @@ def scan_signals(universe: list = None, strategy_names: list = None,
         min_daily_amount: 最小日均成交额
         filter_suspended: 是否过滤停牌
         force_refresh: 是否强制全量重扫（忽略缓存）
+        respect_market_regime: 空头防守期是否与回测一致，硬拦截趋势追涨买入（None=读取配置）
+        respect_watchlist_strategy: 自选股是否按各自适配策略过滤（多策略共振仍放行）
+        anti_whipsaw: 是否启用跨日反手冷却与滞后重复卖出抑制
 
     Returns:
         Signal列表，按score降序排列
     """
     if not end_date:
         end_date = datetime.now().strftime("%Y%m%d")
+    if respect_market_regime is None:
+        respect_market_regime = SCANNER_BEAR_BLOCK_TREND_BUY
 
     if strategy_names is None:
         strategy_names = list(STRATEGY_REGISTRY.keys())
@@ -214,7 +407,7 @@ def scan_signals(universe: list = None, strategy_names: list = None,
         universe = stock_df["ts_code"].tolist()
 
     # ---------- 缓存检查：针对小规模自选股，当天已扫描过的直接返回 ----------
-    if not force_refresh and len(universe) <= 20:
+    if not force_refresh and len(universe) <= 20 and not respect_watchlist_strategy:
         cached = get_signals(trade_date=end_date)
         if not cached.empty:
             cached = cached[cached["ts_code"].isin(universe)]
@@ -233,7 +426,8 @@ def scan_signals(universe: list = None, strategy_names: list = None,
                 signals_list.sort(key=lambda s: s.score, reverse=True)
                 return signals_list
 
-    # 预过滤：只扫描有数据且数据量足够的股票
+    # 预过滤：只扫描有数据且数据量足够的股票，同时记录各自截至 end_date 的最新交易日
+    db_latest_map = {}
     with get_conn() as conn:
         valid = set()
         cur = conn.execute(
@@ -242,6 +436,17 @@ def scan_signals(universe: list = None, strategy_names: list = None,
         )
         for row in cur.fetchall():
             valid.add(row[0])
+        if universe:
+            for i in range(0, len(universe), 500):
+                chunk = universe[i:i + 500]
+                ph = ",".join("?" * len(chunk))
+                for code, max_dt in conn.execute(
+                    f"SELECT ts_code, MAX(trade_date) FROM daily_price "
+                    f"WHERE ts_code IN ({ph}) AND trade_date <= ? GROUP BY ts_code",
+                    list(chunk) + [end_date],
+                ).fetchall():
+                    if max_dt:
+                        db_latest_map[str(code)] = str(max_dt)
     universe = [c for c in universe if c in valid]
 
     logger.info(f"扫描 {len(universe)} 只股票(预过滤), "
@@ -296,43 +501,86 @@ def scan_signals(universe: list = None, strategy_names: list = None,
             if progress_callback:
                 progress_callback(i + 1, len(universe))
 
-    # 大盘环境感知调权（空头环境自动压降激进追涨信号，多头环境小幅鼓励顺势突破）
+    # 1. 过滤滞后交易日过期信号（例如单只股票数据源延迟停在昨日，避免把昨日信号当作今日重推）
+    sig_dates = {s.trade_date for s in all_signals if s.trade_date}
+    db_dates = {db_latest_map[c] for c in universe if c in db_latest_map}
+    latest_bar_date = max(sig_dates | db_dates) if (sig_dates or db_dates) else ""
+    if len(universe) > 1 and latest_bar_date and all_signals:
+        fresh_signals = []
+        for s in all_signals:
+            if s.trade_date and s.trade_date < latest_bar_date:
+                logger.info(
+                    f"跳过行情滞后标的的过期信号: {s.ts_code} ({s.trade_date} < {latest_bar_date})"
+                )
+                continue
+            fresh_signals.append(s)
+        all_signals = fresh_signals
+
+    # 2. 大盘环境风控（空头防守期与回测引擎保持一致：硬拦截趋势追涨买入；多头小幅鼓励）
     if all_signals:
         try:
             from services.signal_service import get_market_regime
             regime_info = get_market_regime(end_date)
             regime = regime_info.get("regime", "RANGE")
-            aggressive_strats = {"turtle", "donchian_breakout", "volume_price_breakout", "signal_combo", "kdj_cross"}
+            bear_blocked_buy_strats = {
+                "ma_cross", "signal_combo", "ma_bullish", "ma60_breakout",
+                "volume_price_breakout", "turtle", "donchian_breakout",
+            }
+            oversold_strats = {"kdj_cross", "bollinger_reversal"}
             trend_strats = {"ma_bullish", "ma60_breakout", "ma_cross", "volume_price_breakout", "macd_cross"}
+            after_regime = []
             for sig in all_signals:
-                if sig.direction == "BUY":
-                    if regime == "BEAR" and sig.strategy in aggressive_strats:
+                if sig.direction == "BUY" and regime == "BEAR":
+                    if respect_market_regime and sig.strategy in bear_blocked_buy_strats:
+                        logger.info(
+                            f"大盘空头防守拦截趋势买单: {sig.ts_code} {sig.strategy} "
+                            f"(score={sig.score:.2f})"
+                        )
+                        continue
+                    if sig.strategy in oversold_strats:
+                        sig.score = round(max(sig.score - 0.05, 0.10), 2)
+                    elif not respect_market_regime and sig.strategy in (bear_blocked_buy_strats | oversold_strats):
                         sig.score = round(max(sig.score - 0.08, 0.10), 2)
-                    elif regime == "BULL" and sig.strategy in trend_strats:
-                        sig.score = round(min(sig.score + 0.03, 0.99), 2)
+                elif sig.direction == "BUY" and regime == "BULL" and sig.strategy in trend_strats:
+                    sig.score = round(min(sig.score + 0.03, 0.99), 2)
+                after_regime.append(sig)
+            all_signals = after_regime
         except Exception as e:
             logger.debug(f"大盘环境调权跳过: {e}")
+
+    # 3. 自选股个股适配策略过滤
+    if respect_watchlist_strategy and all_signals:
+        all_signals = _filter_by_watchlist_strategy(all_signals)
+
+    # 4. 跨日反手冷却 & 滞后重复卖出抑制
+    if anti_whipsaw and all_signals:
+        all_signals = _apply_cross_day_whipsaw_guard(all_signals)
 
     # 按 score 降序排列
     all_signals.sort(key=lambda s: s.score, reverse=True)
 
-    # 批量保存（先清理本次扫描标集合在对应交易日的旧信号，防止过期的伪信号残留）
-    if save and all_signals:
+    # 批量保存：仅按实际保留信号的 (trade_date, ts_code) 与最新交易日当日在库标的精准对口清理，
+    # 绝不拿滞后股票的旧日期去误删其余股票昨天的历史信号。
+    if save:
         try:
-            bar_dates = sorted({s.trade_date for s in all_signals if s.trade_date})
-            if bar_dates and universe and strategy_names:
+            clean_pairs = {(s.trade_date, s.ts_code) for s in all_signals if s.trade_date and s.ts_code}
+            if latest_bar_date:
+                for code in universe:
+                    if db_latest_map.get(code) == latest_bar_date:
+                        clean_pairs.add((latest_bar_date, code))
+            if clean_pairs and strategy_names:
                 with get_conn() as conn:
-                    for b_dt in bar_dates:
-                        u_ph = ",".join("?" * len(universe))
-                        s_ph = ",".join("?" * len(strategy_names))
+                    s_ph = ",".join("?" * len(strategy_names))
+                    for b_dt, code in sorted(clean_pairs):
                         conn.execute(
-                            f"DELETE FROM signal WHERE trade_date = ? AND ts_code IN ({u_ph}) AND strategy IN ({s_ph})",
-                            [b_dt] + list(universe) + list(strategy_names),
+                            f"DELETE FROM signal WHERE trade_date = ? AND ts_code = ? AND strategy IN ({s_ph})",
+                            [b_dt, code] + list(strategy_names),
                         )
         except Exception as e:
             logger.debug(f"清理同日旧信号跳过: {e}")
-        save_signals_batch(all_signals)
-        logger.info(f"已批量保存 {len(all_signals)} 条信号")
+        if all_signals:
+            save_signals_batch(all_signals)
+            logger.info(f"已批量保存 {len(all_signals)} 条信号")
 
     logger.info(f"扫描完成，共 {len(all_signals)} 条信号")
     return all_signals

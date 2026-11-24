@@ -73,13 +73,22 @@ def scan_and_notify(force: bool = False):
         if not watchlist.empty:
             stocks = watchlist["ts_code"].tolist()
             logger.info(f"开始扫描 {len(stocks)} 只自选股信号...")
-            signals = scan_signals(universe=stocks, save=True)
+            signals = scan_signals(
+                universe=stocks,
+                save=True,
+                force_refresh=True,
+                respect_market_regime=True,
+                respect_watchlist_strategy=True,
+                anti_whipsaw=True,
+            )
             logger.info(f"信号扫描完成：共 {len(signals)} 条信号")
 
             # 推送信号通知
             if signals:
                 notify_signals(signals)
                 logger.info(f"已推送 {len(signals)} 条信号通知")
+            else:
+                logger.info("当日经大盘择时/适配策略/防洗盘过滤后无有效交易信号")
         else:
             logger.info("自选股为空，跳过信号扫描")
         scan_ok = True

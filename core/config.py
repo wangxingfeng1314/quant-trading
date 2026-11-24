@@ -217,6 +217,18 @@ SCANNER_MIN_DAILY_AMOUNT = float(os.getenv("SCANNER_MIN_DAILY_AMOUNT", "0"))
 SCANNER_FILTER_SUSPENDED = os.getenv("SCANNER_FILTER_SUSPENDED", "true").lower() == "true"
 # 是否过滤最新交易日停牌/无成交量标的
 
+SCANNER_MIN_BUY_SCORE = float(os.getenv("SCANNER_MIN_BUY_SCORE", "0.60"))
+# 推送与实盘委托单买入最低可信度评分门槛（过滤空头下被降权后的弱鸡买入信号）
+
+SCANNER_WHIPSAW_COOLDOWN_DAYS = int(os.getenv("SCANNER_WHIPSAW_COOLDOWN_DAYS", "3"))
+# 同股跨日反手冷却交易日数（近 N 个交易日内刚触发过卖出，拦截单策略高价追回买单）
+
+SCANNER_SELL_DEDUP_DAYS = int(os.getenv("SCANNER_SELL_DEDUP_DAYS", "2"))
+# 同股滞后重复卖出冷却交易日数（高位落袋卖出后次日跌下来不再重复高分轰炸）
+
+SCANNER_BEAR_BLOCK_TREND_BUY = os.getenv("SCANNER_BEAR_BLOCK_TREND_BUY", "true").lower() not in ("0", "false", "no")
+# 大盘空头防守期是否与回测保持一致，硬拦截趋势追涨类买入信号（双均线/信号共振等）
+
 # ============================================================
 # 生产级日志分级轮转（Log Rotation）
 # ============================================================

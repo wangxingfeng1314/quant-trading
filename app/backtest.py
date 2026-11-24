@@ -425,19 +425,13 @@ def _show_run_backtest():
 
                 if 'wl_eval_mode' in locals() and wl_eval_mode.startswith("⭐"):
                     # 智能自适应匹配模式
+                    from services.strategy_recommender import (
+                        evaluate_stock_strategy, parse_recommended_strategy_key,
+                    )
                     rec_str = wl_dict.get(ts_code, "")
-                    matched_key = None
-                    if "布林" in rec_str or "bollinger" in rec_str:
-                        matched_key = "bollinger_reversal"
-                    elif "双均线" in rec_str or "ma_cross" in rec_str:
-                        matched_key = "ma_cross"
-                    elif "KDJ" in rec_str or "kdj" in rec_str:
-                        matched_key = "kdj_cross"
-                    elif "多因子" in rec_str or "combo" in rec_str:
-                        matched_key = "signal_combo"
+                    matched_key = parse_recommended_strategy_key(rec_str) or None
 
                     if not matched_key:
-                        from services.strategy_recommender import evaluate_stock_strategy
                         inst_df = cached_instrument_list()
                         nm = ""
                         ind = ""

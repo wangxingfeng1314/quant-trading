@@ -433,18 +433,39 @@ def calc_atr_stops_and_sizing(ts_code: str, price: float, score: float = 0.7,
     }
 
 
-def notify_signals(signals, strategy_names: list = None) -> bool:
+_STRATEGY_CN_MAP = {
+    "kdj_cross": "KDJ短线",
+    "bollinger_reversal": "布林反转",
+    "ma_cross": "双均线",
+    "signal_combo": "多因子共振",
+}
+
+
+def _fmt_strategy_cn(name: str) -> str:
+    return _STRATEGY_CN_MAP.get(name, name or "")
+
+
+def notify_signals(signals, strategy_names: list = None, min_buy_score: float = None) -> bool:
     """推送信号摘要
 
     Args:
         signals: Signal对象列表
         strategy_names: 策略名称列表（用于标题）
+        min_buy_score: 买入推荐最低评分门槛（None=读取 SCANNER_MIN_BUY_SCORE，默认 0.60）
 
     Returns:
         是否推送成功
     """
     if not signals:
         return False
+
+    try:
+        from core.config import DEFAULT_CAPITAL, SCANNER_MIN_BUY_SCORE
+        base_capital = float(DEFAULT_CAPITAL)
+        min_score = float(SCANNER_MIN_BUY_SCORE) if min_buy_score is None else float(min_buy_score)
+    except Exception:
+        base_capital = 100000.0
+        min_score = 0.60 if min_buy_score is None else float(min_buy_score)
 
     buy_count = sum(1 for s in signals if s.direction == "BUY")
     sell_count = sum(1 for s in signals if s.direction == "SELL")
@@ -460,13 +481,6 @@ def notify_signals(signals, strategy_names: list = None) -> bool:
         return f"{name}({sig.ts_code})"
 
     title = f"📊 量化信号日报 - {today}"
-
-    # 获取基准资金
-    try:
-        from core.config import DEFAULT_CAPITAL
-        base_capital = float(DEFAULT_CAPITAL)
-    except Exception:
-        base_capital = 100000.0
 
     # 获取大盘风控环境
     regime_line = ""
@@ -485,8 +499,6 @@ def notify_signals(signals, strategy_names: list = None) -> bool:
 ---
 
 ### 🟢 买入信号 TOP5（量化行动指引）
-| 股票 | 评分 | 参考价 | 建议股数 | 预估金额 | 建议止损 | 目标止盈 | 触发原因 |
-|------|------|--------|----------|----------|----------|----------|----------|
 """
 
     # 冲突拦截与同股去重聚合：若同日某股有 SELL 信号且非买方压倒性占优，不进买入推荐；多策略同时买入同一标的时合并展示
@@ -507,6 +519,7 @@ def notify_signals(signals, strategy_names: list = None) -> bool:
     for code, b_list in buy_grouped.items():
         b_list.sort(key=lambda x: x.score, reverse=True)
         best = b_list[0]
+        strat_cn = "+".join(dict.fromkeys(_fmt_strategy_cn(x.strategy) for x in b_list))
         if len(b_list) > 1 and "策略共振" not in (best.reason or ""):
             strat_names = "+".join(dict.fromkeys(x.strategy for x in b_list))
             merged_reason = f"[{len(b_list)}策略共振:{strat_names}] {best.reason}"
@@ -517,36 +530,57 @@ def notify_signals(signals, strategy_names: list = None) -> bool:
                 score=round(min(best.score + 0.05 * (len(b_list) - 1), 0.99), 2),
                 reason=merged_reason, price_ref=best.price_ref,
             )
-        dedup_buys.append(best)
+        dedup_buys.append((best, strat_cn))
 
-    buy_signals = sorted(dedup_buys, key=lambda s: s.score, reverse=True)[:5]
-    for sig in buy_signals:
-        price = max(sig.price_ref, 0.01)
-        plan = calc_atr_stops_and_sizing(sig.ts_code, price, sig.score, base_capital)
-        shares = plan["shares"]
-        est_cost = plan["est_cost"]
-        stop_loss = plan["stop_loss"]
-        take_profit = plan["take_profit"]
-        sl_pct = plan["sl_pct"]
-        tp_pct = plan["tp_pct"]
-        shares_text = f"{shares}股" if shares > 0 else "资金不足1手"
-        cost_text = f"¥{est_cost:,.0f}" if shares > 0 else "-"
-        safe_reason = (sig.reason or "").replace("|", "/")
+    high_buys = [(s, sc) for s, sc in dedup_buys if s.score >= min_score]
+    filtered_low_buy_count = len(dedup_buys) - len(high_buys)
+    buy_signals = sorted(high_buys, key=lambda item: item[0].score, reverse=True)[:5]
+
+    if buy_signals:
         content += (
-            f"| {_label(sig)} | {sig.score:.2f} | ¥{price:.2f} | {shares_text} | {cost_text} "
-            f"| ¥{stop_loss:.2f} (-{sl_pct:g}%) | ¥{take_profit:.2f} (+{tp_pct:g}%) | {safe_reason} |\n"
+            "| 股票 | 策略 | 评分 | 参考价 | 建议股数 | 预估金额 | 建议止损 | 目标止盈 | 触发原因 |\n"
+            "|------|------|------|--------|----------|----------|----------|----------|----------|\n"
         )
+        for sig, strat_cn in buy_signals:
+            price = max(sig.price_ref, 0.01)
+            plan = calc_atr_stops_and_sizing(sig.ts_code, price, sig.score, base_capital)
+            shares = plan["shares"]
+            est_cost = plan["est_cost"]
+            stop_loss = plan["stop_loss"]
+            take_profit = plan["take_profit"]
+            sl_pct = plan["sl_pct"]
+            tp_pct = plan["tp_pct"]
+            shares_text = f"{shares}股" if shares > 0 else "资金不足1手"
+            cost_text = f"¥{est_cost:,.0f}" if shares > 0 else "-"
+            safe_reason = (sig.reason or "").replace("|", "/")
+            content += (
+                f"| {_label(sig)} | {strat_cn} | {sig.score:.2f} | ¥{price:.2f} | {shares_text} | {cost_text} "
+                f"| ¥{stop_loss:.2f} (-{sl_pct:g}%) | ¥{take_profit:.2f} (+{tp_pct:g}%) | {safe_reason} |\n"
+            )
+    else:
+        extra_msg = f"，已自动拦截 {filtered_low_buy_count} 条低分弱信号" if filtered_low_buy_count > 0 else ""
+        content += f"> 🛡️ 今日无满足高置信度门槛（≥{min_score:.2f}）的买入信号{extra_msg}，建议观望。\n"
 
-    content += """
-### 🔴 卖出信号 TOP5
-| 股票 | 评分 | 参考价 | 操作建议 | 触发原因 |
-|------|------|--------|----------|----------|
-"""
-    sell_signals = sorted([s for s in signals if s.direction == "SELL"],
-                          key=lambda s: s.score, reverse=True)[:5]
-    for sig in sell_signals:
-        safe_reason = (sig.reason or "").replace("|", "/")
-        content += f"| {_label(sig)} | {sig.score:.2f} | ¥{sig.price_ref:.2f} | 建议平仓/减半 | {safe_reason} |\n"
+    # 卖出区域按标的去重聚合，避免同股多策略卖出刷屏重复两行
+    dedup_sells = []
+    for code, s_list in sell_by_code.items():
+        s_list.sort(key=lambda x: x.score, reverse=True)
+        best_sell = s_list[0]
+        strat_cn = "+".join(dict.fromkeys(_fmt_strategy_cn(x.strategy) for x in s_list))
+        dedup_sells.append((best_sell, strat_cn))
+    dedup_sells.sort(key=lambda item: item[0].score, reverse=True)
+
+    content += "\n### 🔴 卖出信号 TOP5\n"
+    if dedup_sells:
+        content += (
+            "| 股票 | 策略 | 评分 | 参考价 | 操作建议 | 触发原因 |\n"
+            "|------|------|------|--------|----------|----------|\n"
+        )
+        for sig, strat_cn in dedup_sells[:5]:
+            safe_reason = (sig.reason or "").replace("|", "/")
+            content += f"| {_label(sig)} | {strat_cn} | {sig.score:.2f} | ¥{sig.price_ref:.2f} | 建议平仓/减半 | {safe_reason} |\n"
+    else:
+        content += "> 暂无卖出信号。\n"
 
     content += f"""
 ---

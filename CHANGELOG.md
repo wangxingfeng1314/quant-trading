@@ -1,5 +1,18 @@
 # Changelog
 
+## [v0.4.9] - 2026-11-24
+
+### 🛡️ 实盘信号推送、大盘择时对齐与防洗盘机制重构
+
+彻底定位并修复实盘信号扫描与推送链路导致「昨日割肉、今日追买」及低分噪音信号推送的 5 类系统性问题：
+
+- **空头防守期与回测规则对齐 (`engine/scanner.py`)**：在 `BEAR` 环境下硬拦截 `signal_combo`、`ma_cross` 等趋势追涨买单（由 `SCANNER_BEAR_BLOCK_TREND_BUY` 控制，默认开启），与回测引擎 `market_regime_filter=True` 口径一致；对超卖反转买单保留温和扣分。
+- **自选股按适配策略精准过滤 (`services/strategy_recommender.py`, `engine/scanner.py`)**：抽离共用 `parse_recommended_strategy_key()` 解析自选股样本外适配标签；开启 `respect_watchlist_strategy` 后，自选股仅保留命中各自适配策略或 `≥2` 策略同向共振信号，避免用低胜率错配策略乱发指令。
+- **跨日防洗盘与滞后卖单去重 (`engine/scanner.py`)**：新增 `_apply_cross_day_whipsaw_guard()`，近 3 个交易日（`SCANNER_WHIPSAW_COOLDOWN_DAYS`）内刚发过 `SELL` 信号的标的，拦截非强共振的高价追买（仅放行较前卖价深跌超 5% 的低吸机会）；近 2 个交易日（`SCANNER_SELL_DEDUP_DAYS`）已在高位提示过 `kdj_cross`/`bollinger_reversal` 卖出时，跌下来不再重复滞后补刀提示。
+- **修复滞后行情重推与跨日期误删历史信号 Bug (`engine/scanner.py`)**：多标的扫描自动剔除落后于全池最新交易日的过期信号（如单只标的滞留在昨日），保存前仅按实际 `(trade_date, ts_code)` 对口清理当日记录，彻底杜绝因个别标的数据滞后而误删其余标的昨日历史信号。
+- **推送与委托单设立最低评分门槛 (`notifier/push.py`, `app/signal.py`, `scheduler/__init__.py`)**：设置 `SCANNER_MIN_BUY_SCORE=0.60`，低于门槛的买单不进入推送买入指引与实盘批量委托单并明确提示观望；买卖表格新增策略列并合并同股多策略卖单；定时任务与「信号中心」默认开启全套实盘风控守卫。
+- **测试验证**：新增 [tests/test_signal_whipsaw_guard.py](tests/test_signal_whipsaw_guard.py)（6 项回归测试），全量 **313 项测试全部通过**。
+
 ## [v0.4.8] - 2026-11-12
 
 ### 🎯 策略深度调优（样本外盲测验证驱动）

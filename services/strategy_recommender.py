@@ -26,6 +26,28 @@ PREFIX_MAP = {
     "signal_combo": "🧩 多因子共振",
 }
 
+
+def parse_recommended_strategy_key(rec_tag: str) -> str:
+    """从自选股推荐标签（中文展示文本或策略键名）解析出规范策略键名。
+
+    若标签为空或无法识别任何内置策略，返回空字符串 ``""``。
+    """
+    if rec_tag is None:
+        return ""
+    text = str(rec_tag).strip()
+    if not text or text.lower() in ("nan", "none"):
+        return ""
+    lower = text.lower()
+    if "布林" in text or "bollinger" in lower:
+        return "bollinger_reversal"
+    if "双均线" in text or "ma_cross" in lower:
+        return "ma_cross"
+    if "kdj" in lower:
+        return "kdj_cross"
+    if "多因子" in text or "共振" in text or "signal_combo" in lower or "combo" in lower:
+        return "signal_combo"
+    return ""
+
 # 样本外切分参数：训练段选策略，测试段冻结策略后评估并展示业绩。
 # 旧实现让 4 个策略在同一段全样本上取 argmax，还把这段「样本内最优」
 # 的收益/胜率当作推荐依据展示，属于典型的选择偏差 + 多重比较偏差。
