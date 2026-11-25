@@ -19,9 +19,12 @@ def _isolate_backtester_cache():
     前一用例的结果会泄漏到后一用例，造成顺序相关的假通过/假失败。
     """
     from engine.backtester import clear_backtester_cache
+    from data.fetcher import reset_bs_session
     clear_backtester_cache()
+    reset_bs_session()
     yield
     clear_backtester_cache()
+    reset_bs_session()
 
 
 @pytest.fixture

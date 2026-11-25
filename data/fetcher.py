@@ -16,10 +16,12 @@
 """
 import time          # 休眠等待，用于API限速控制
 import random        # 随机数，用于请求间隔抖动(避免集中触发限流)
-import threading     # 线程锁（令牌桶线程安全）
+import socket        # 网络请求超时保护
+import threading     # 线程锁（令牌桶与Baostock共享会话线程安全）
 import logging       # 日志记录
 import requests      # HTTP请求库（备用）
 import io            # 字节流处理（备用）
+from contextlib import contextmanager
 import pandas as pd  # 数据处理核心库
 
 # 从配置模块加载 Tushare Token（用于访问 Tushare Pro API）
@@ -354,17 +356,54 @@ def fetch_etf_list() -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def fetch_etf_daily(ts_code: str, start_date: str = "",
-                    end_date: str = "") -> pd.DataFrame:
-    """获取单只 ETF 日线数据（TickFlow，前复权）
+def _fetch_etf_daily_akshare(ts_code: str, start_date: str,
+                             end_date: str) -> pd.DataFrame:
+    """AKShare 获取场内 ETF 前复权日线（fund_etf_hist_em）。"""
+    try:
+        import akshare as ak
+        symbol = ts_code.split(".")[0]
+        df = ak.fund_etf_hist_em(
+            symbol=symbol,
+            period="daily",
+            start_date=start_date,
+            end_date=end_date,
+            adjust="qfq",
+        )
+        if df is None or df.empty:
+            return pd.DataFrame()
+        df = df.rename(columns={
+            "日期": "trade_date", "开盘": "open", "最高": "high",
+            "最低": "low", "收盘": "close", "成交量": "volume",
+            "成交额": "amount", "涨跌幅": "pct_chg", "换手率": "turnover",
+        })
+        df["ts_code"] = ts_code
+        df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.strftime("%Y%m%d")
+        df["adj_factor"] = 1.0
+        for col in ("open", "high", "low", "close", "volume", "amount", "pct_chg", "turnover"):
+            if col not in df.columns:
+                df[col] = 0.0
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+        df = df[df["close"] > 0]
+        if df.empty:
+            return pd.DataFrame()
+        logger.info(f"{ts_code} AKShare-ETF ✓ ({len(df)}条)")
+        return df[DAILY_COLUMNS].sort_values("trade_date").reset_index(drop=True)
+    except Exception as e:
+        logger.debug(f"{ts_code} AKShare-ETF 失败: {e}")
+        return pd.DataFrame()
 
-    ETF 无需多源级联（AKShare/Tushare 股票接口不支持 ETF），
-    直接走 TickFlow klines，失败返回空。
+
+def fetch_etf_daily(ts_code: str, start_date: str = "",
+                    end_date: str = "", skip_tickflow: bool = False) -> pd.DataFrame:
+    """获取单只 ETF 日线数据（前复权），三源级联兜底：
+
+    TickFlow klines → Baostock (adjustflag=2) → AKShare (fund_etf_hist_em)
 
     参数:
         ts_code:    ETF代码 e.g. "510300.SH"
         start_date: 起始日期 "YYYYMMDD"（空=默认数据起始日）
         end_date:   结束日期 "YYYYMMDD"（空=今天）
+        skip_tickflow: 是否跳过 TickFlow 直接走备用源（用于滞后/失败回补）
 
     返回:
         DAILY_COLUMNS 列结构的 DataFrame
@@ -375,17 +414,35 @@ def fetch_etf_daily(ts_code: str, start_date: str = "",
         start_date = DATA_START_DATE
     if not end_date:
         end_date = datetime.now().strftime("%Y%m%d")
-    return _fetch_daily_tickflow(ts_code, start_date, end_date)
+
+    if not skip_tickflow:
+        df = _fetch_daily_tickflow(ts_code, start_date, end_date)
+        if not df.empty:
+            return df
+
+    df = _fetch_daily_baostock(ts_code, start_date, end_date)
+    if not df.empty:
+        return df
+
+    if not _is_akshare_circuit_open():
+        df = _fetch_etf_daily_akshare(ts_code, start_date, end_date)
+        if not df.empty:
+            _akshare_success()
+            return df
+        _akshare_failure()
+
+    return pd.DataFrame()
 
 
 def fetch_instrument_daily(ts_code: str, start_date: str,
-                           end_date: str) -> pd.DataFrame:
-    """按标类型拉取日线：ETF 走 TickFlow/AKShare，股票走多源级联
+                           end_date: str, skip_tickflow: bool = False) -> pd.DataFrame:
+    """按标类型拉取日线：ETF 走 TickFlow/Baostock/AKShare，股票走多源级联
 
     参数:
-        ts_code:    标的代码 e.g. "510300.SH"(ETF) 或 "000001.SZ"(股票)
-        start_date: 起始日期 "YYYYMMDD"
-        end_date:   结束日期 "YYYYMMDD"
+        ts_code:       标的代码 e.g. "510300.SH"(ETF) 或 "000001.SZ"(股票)
+        start_date:    起始日期 "YYYYMMDD"
+        end_date:      结束日期 "YYYYMMDD"
+        skip_tickflow: 是否跳过 TickFlow（用于收盘滞后时的备用源回补）
 
     返回:
         DAILY_COLUMNS 列结构的 DataFrame
@@ -394,10 +451,10 @@ def fetch_instrument_daily(ts_code: str, start_date: str,
     etf_df = get_etf_list()
     is_etf = (not etf_df.empty and ts_code in set(etf_df["ts_code"])) or ts_code.startswith(("51", "58", "56", "15", "16"))
     if is_etf:
-        res = fetch_etf_daily(ts_code, start_date, end_date)
+        res = fetch_etf_daily(ts_code, start_date, end_date, skip_tickflow=skip_tickflow)
         if not res.empty:
             return res
-    return fetch_daily(ts_code, start_date, end_date)
+    return fetch_daily(ts_code, start_date, end_date, skip_tickflow=skip_tickflow)
 
 
 # ============================================================
@@ -408,7 +465,8 @@ def fetch_instrument_daily(ts_code: str, start_date: str,
 #   _fetch_daily_baostock()          — 最后兜底
 # ============================================================
 
-def fetch_daily(ts_code: str, start_date: str, end_date: str) -> pd.DataFrame:
+def fetch_daily(ts_code: str, start_date: str, end_date: str,
+                skip_tickflow: bool = False) -> pd.DataFrame:
     """获取单只股票日线数据，多源级联兜底
 
     参数:
@@ -429,9 +487,10 @@ def fetch_daily(ts_code: str, start_date: str, end_date: str) -> pd.DataFrame:
     """
     # ---------- 方案1: TickFlow（主力数据源）----------
     # 优势: 稳定易用的 RESTful API，直接返回前复权，需 API Key
-    df = _fetch_daily_tickflow(ts_code, start_date, end_date)
-    if not df.empty:
-        return df
+    if not skip_tickflow:
+        df = _fetch_daily_tickflow(ts_code, start_date, end_date)
+        if not df.empty:
+            return df
 
     # ---------- 方案2: AKShare（备用数据源）----------
     # 优势: 免费、直接返回前复权、数据更新及时
@@ -716,86 +775,170 @@ def _fetch_daily_tickflow(ts_code: str, start_date: str,
 
 
 # ============================================================
-# Baostock 连接池管理
-#   - Baostock 的 login() 是全局状态，只需登录一次
-#   - 复用连接避免每次请求都 login/logout，大幅提升效率
+# Baostock 线程安全会话池管理
+#   - Baostock 的 login() 是进程级全局 socket 状态，必须加锁序列化访问
+#   - 共享会话不主动 logout()，防止估值通道与日线拉取通道互相踢下线
+#   - 支持错误码 10001001 自动重登恢复与 socket 超时保护
 # ============================================================
 
+_BS_LOCK = threading.RLock()
 _bs_logged_in = False  # 全局登录状态标记
 
 
+def reset_bs_session():
+    """重置 Baostock 全局登录态（用于掉线重登或测试隔离）。"""
+    global _bs_logged_in
+    with _BS_LOCK:
+        _bs_logged_in = False
+
+
 def _ensure_bs_login():
-    """确保 Baostock 已登录（复用连接，避免每次 login/logout）"""
+    """确保 Baostock 已登录（线程安全复用连接，避免反复 login/logout 互踢）"""
     global _bs_logged_in                               # 声明使用全局状态
-    if not _bs_logged_in:                              # 未登录时才执行登录
-        import baostock as bs                          # 延迟导入
-        lg = bs.login()                                # 登录 Baostock
-        if lg.error_code == "0":                       # 登录成功
-            _bs_logged_in = True
-            logger.info("Baostock 登录成功")
-        else:
-            raise ConnectionError(f"Baostock 登录失败: {lg.error_msg}")  # 登录失败直接抛异常
-    return _bs_logged_in                                # 返回登录状态
+    with _BS_LOCK:
+        if not _bs_logged_in:                              # 未登录时才执行登录
+            import baostock as bs                          # 延迟导入
+            lg = bs.login()                                # 登录 Baostock
+            if getattr(lg, "error_code", "") == "0":       # 登录成功
+                _bs_logged_in = True
+                logger.info("Baostock 登录成功")
+            else:
+                raise ConnectionError(f"Baostock 登录失败: {getattr(lg, 'error_msg', '')}")
+        return _bs_logged_in                               # 返回登录状态
+
+
+@contextmanager
+def baostock_session(timeout: float = 25.0):
+    """串行化访问共享 Baostock 会话，设置并恢复默认 socket 超时；异常时重置登录态防脏连接残留。"""
+    with _BS_LOCK:
+        prev_timeout = socket.getdefaulttimeout()
+        if timeout is not None and timeout > 0:
+            socket.setdefaulttimeout(float(timeout))
+        try:
+            _ensure_bs_login()
+            yield
+        except Exception:
+            try:
+                import baostock as bs
+                bs.logout()
+            except Exception:
+                pass
+            reset_bs_session()
+            raise
+        finally:
+            socket.setdefaulttimeout(prev_timeout)
+
+
+def bs_query_rows(
+    bs_code: str,
+    fields: str,
+    start_date: str,
+    end_date: str,
+    frequency: str = "d",
+    adjustflag: str = None,
+) -> tuple[list, list]:
+    """统一 Baostock 历史查询封装（自动重登恢复 + socket 脏连接自愈）。"""
+    import baostock as bs
+
+    def _call():
+        if adjustflag is not None:
+            return bs.query_history_k_data_plus(
+                bs_code, fields, start_date=start_date, end_date=end_date,
+                frequency=frequency, adjustflag=adjustflag,
+            )
+        return bs.query_history_k_data_plus(
+            bs_code, fields, start_date=start_date, end_date=end_date,
+            frequency=frequency,
+        )
+
+    rs = _call()
+    err = str(getattr(rs, "error_code", "") or "")
+    if err != "0":
+        if not err.startswith("1000"):
+            try:
+                bs.logout()
+            except Exception:
+                pass
+        reset_bs_session()
+        _ensure_bs_login()
+        rs = _call()
+        err = str(getattr(rs, "error_code", "") or "")
+    if err != "0":
+        return [], []
+
+    rs_fields = list(getattr(rs, "fields", []) or [])
+    rows = []
+    while getattr(rs, "error_code", "") == "0" and rs.next():
+        rows.append(rs.get_row_data())
+    if str(getattr(rs, "error_code", "") or "") != "0":
+        try:
+            bs.logout()
+        except Exception:
+            pass
+        reset_bs_session()
+    return rs_fields, rows
 
 
 def _fetch_daily_baostock(ts_code: str, start_date: str,
                           end_date: str) -> pd.DataFrame:
-    """Baostock获取日线数据（前复权）- 最后兜底
+    """Baostock获取日线数据（前复权）- 兜底与ETF全覆盖渠道
 
     使用场景：
-      - AKShare 和 Tushare 都失败时降级到此方案
-      - 完全免费、无限频，数据来源为证券宝
-      - 复用已缓存的登录连接（见 _ensure_bs_login）
+      - 股票在 TickFlow / AKShare / Tushare 失败时的兜底方案
+      - ETF（51*/15*/56*/58*）在 TickFlow 缺失时的主力免费兜底
+      - 线程安全复用共享登录连接，断线/超时自动重登恢复
 
     注意：
       - 数据更新可能比 AKShare 慢半天（T+1）
       - Baostock 的 adjustflag=2 返回前复权
+      - 场内 ETF 净值最小变动单位 0.001 元，价格保留 3 位小数；股票保留 2 位
     """
     try:
-        import baostock as bs                          # 延迟导入
-        _ensure_bs_login()                             # 确保已登录（复用连接）
-
         # ---------- 转换代码格式 ----------
         # AKShare/Tushare 格式: "000001.SZ"
         # Baostock 格式: "sz.000001"
         symbol = ts_code.split(".")[0]                 # 提取数字部分: "000001"
         market = ts_code.split(".")[1].lower()         # 提取市场并转小写: "sz"
         bs_code = f"{market}.{symbol}"                 # 拼接 Baostock 格式: "sz.000001"
+        is_etf = ts_code.upper().startswith(("51", "56", "58", "15", "16"))
 
         # ---------- 日期格式转换 ----------
         # "20250101" → "2025-01-01"（Baostock 要求的格式）
         start = f"{start_date[:4]}-{start_date[4:6]}-{start_date[6:8]}"
         end = f"{end_date[:4]}-{end_date[4:6]}-{end_date[6:8]}"
 
-        # ---------- 调用 Baostock API ----------
-        rs = bs.query_history_k_data_plus(
-            bs_code,                                   # Baostock 格式代码
-            "date,open,high,low,close,volume,amount,turn,pctChg",  # 需要的字段
-            start_date=start,                          # 起始日期
-            end_date=end,                              # 结束日期
-            frequency="d",                             # d=日线, w=周, m=月
-            adjustflag="2"                             # 2=前复权, 1=后复权, 3=不复权
-        )
-
-        # ---------- 逐行读取查询结果 ----------
-        rows = []
-        while rs.error_code == "0" and rs.next():      # 游标遍历
-            rows.append(rs.get_row_data())
+        with baostock_session(timeout=25.0):
+            fields, rows = bs_query_rows(
+                bs_code,
+                "date,open,high,low,close,volume,amount,turn,pctChg",
+                start_date=start,
+                end_date=end,
+                frequency="d",
+                adjustflag="2",
+            )
 
         if not rows:
             return pd.DataFrame()                      # 无数据则返回空
 
         # ---------- 数据清洗 ----------
-        df = pd.DataFrame(rows, columns=rs.fields)     # DataFrame化
+        cols = fields if len(fields) == len(rows[0]) else [
+            "date", "open", "high", "low", "close", "volume", "amount", "turn", "pctChg"
+        ]
+        df = pd.DataFrame(rows, columns=cols)          # DataFrame化
         for col in ["open", "high", "low", "close", "volume", "amount", "turn", "pctChg"]:
             df[col] = pd.to_numeric(df[col], errors="coerce")  # 字符串→数值（无效值变NaN）
         df = df.dropna(subset=["close"])               # 去除收盘价为空的记录
         df = df[df["close"] > 0]                       # 去除收盘价≤0的记录
+        if df.empty:
+            return pd.DataFrame()
+        for col in ["volume", "amount", "turn", "pctChg"]:
+            df[col] = df[col].fillna(0.0)
 
         # ---------- 价格精度标准化 ----------
-        # Baostock 可能返回多位小数，统一 rounding 到2位
+        # 场内 ETF 按元/份报价需保留 3 位小数（如 1.255），A 股保留 2 位
+        px_decimals = 3 if is_etf else 2
         for col in ["open", "high", "low", "close"]:
-            df[col] = df[col].round(2)
+            df[col] = df[col].round(px_decimals)
 
         # ---------- 列名统一 ----------
         df["ts_code"] = ts_code                        # 标记股票代码
@@ -1057,11 +1200,68 @@ def _fetch_index_daily_tickflow(index_code: str, start_date: str = "",
         return pd.DataFrame()
 
 
+def _fetch_index_daily_baostock(index_code: str, start_date: str = "",
+                                end_date: str = "") -> pd.DataFrame:
+    """Baostock 获取大盘指数日线数据（第三级免费无限频兜底）。"""
+    try:
+        import baostock as bs
+        parts = index_code.split(".")
+        if len(parts) != 2:
+            return pd.DataFrame()
+        symbol, market = parts[0], parts[1].lower()
+        bs_code = f"{market}.{symbol}"
+        start_s = start_date or "20210101"
+        end_s = end_date or pd.Timestamp.now().strftime("%Y%m%d")
+        start_fmt = f"{start_s[:4]}-{start_s[4:6]}-{start_s[6:8]}"
+        end_fmt = f"{end_s[:4]}-{end_s[4:6]}-{end_s[6:8]}"
+
+        with baostock_session(timeout=25.0):
+            fields, rows = bs_query_rows(
+                bs_code,
+                "date,open,high,low,close,volume,pctChg",
+                start_date=start_fmt,
+                end_date=end_fmt,
+                frequency="d",
+                adjustflag="3",
+            )
+
+        if not rows:
+            return pd.DataFrame()
+
+        cols = fields if len(fields) == len(rows[0]) else [
+            "date", "open", "high", "low", "close", "volume", "pctChg"
+        ]
+        df = pd.DataFrame(rows, columns=cols)
+        for col in ("open", "high", "low", "close", "volume", "pctChg"):
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        df = df.dropna(subset=["close"])
+        df = df[df["close"] > 0]
+        if df.empty:
+            return pd.DataFrame()
+        df["volume"] = df["volume"].fillna(0.0)
+        df["pct_chg"] = df["pctChg"].fillna(0.0)
+        df["trade_date"] = df["date"].astype(str).str.replace("-", "", regex=False)
+        df["ts_code"] = index_code
+        if start_date:
+            df = df[df["trade_date"] >= start_date]
+        if end_date:
+            df = df[df["trade_date"] <= end_date]
+        if df.empty:
+            return pd.DataFrame()
+
+        idx_cols = ["ts_code", "trade_date", "open", "high", "low", "close", "volume", "pct_chg"]
+        logger.info(f"指数 {index_code} Baostock ✓ ({len(df)}条)")
+        return df[idx_cols].sort_values("trade_date").reset_index(drop=True)
+    except Exception as e:
+        logger.debug(f"指数 {index_code} Baostock 失败: {e}")
+        return pd.DataFrame()
+
+
 def fetch_index_daily(index_code: str, start_date: str = "",
                       end_date: str = "") -> pd.DataFrame:
     """获取大盘指数日线数据，多源级联
 
-    优先级: TickFlow → AKShare
+    优先级: TickFlow → AKShare → Baostock
     内置重试（AKShare 路径保留 2 次重试）。
 
     参数:
@@ -1082,40 +1282,34 @@ def fetch_index_daily(index_code: str, start_date: str = "",
     for attempt in range(1, MAX_INDEX_RETRIES + 1):
         try:
             import akshare as ak
-            # ---------- 代码格式转换 ----------
-            # "000001.SH" → "sh000001"（AKShare 格式）
             parts = index_code.split(".")
-            market = parts[1].lower()                            # "SH" → "sh"
-            symbol = parts[0]                                    # "000001"
-            ak_code = f"{market}{symbol}"                        # "sh000001"
+            market = parts[1].lower()
+            symbol = parts[0]
+            ak_code = f"{market}{symbol}"
 
             if attempt > 1:
                 wait = 2.0 + random.uniform(0, 2)
                 logger.debug(f"指数 {index_code} 第{attempt}次重试，等待{wait:.1f}s")
                 time.sleep(wait)
 
-            # ---------- 调用 AKShare 指数接口 ----------
             df = ak.stock_zh_index_daily(symbol=ak_code)
             if df is None or df.empty:
                 if attempt < MAX_INDEX_RETRIES:
                     continue
-                return pd.DataFrame()
+                break
 
-            # ---------- 列名翻译：中文→英文 ----------
             df = df.rename(columns={
                 "date": "trade_date", "open": "open", "high": "high",
                 "low": "low", "close": "close", "volume": "volume",
             })
-            df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.strftime("%Y%m%d")  # 统一日期格式
-            df["ts_code"] = index_code                           # 标记指数代码
-            df["pct_chg"] = (df["close"].pct_change() * 100).fillna(0.0)  # 计算涨跌幅（百分比）
+            df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.strftime("%Y%m%d")
+            df["ts_code"] = index_code
+            df["pct_chg"] = (df["close"].pct_change() * 100).fillna(0.0)
 
-            # 按标准列序整理
             cols = ["ts_code", "trade_date", "open", "high", "low", "close",
                     "volume", "pct_chg"]
             df = df[cols].sort_values("trade_date").reset_index(drop=True)
 
-            # 按日期范围过滤
             if start_date:
                 df = df[df["trade_date"] >= start_date]
             if end_date:
@@ -1127,8 +1321,13 @@ def fetch_index_daily(index_code: str, start_date: str = "",
             logger.warning(f"获取指数 {index_code} 第{attempt}次失败: {e}")
             if attempt < MAX_INDEX_RETRIES:
                 continue
-            logger.error(f"指数 {index_code} 所有重试均失败")
-            return pd.DataFrame()
+
+    # ---------- 方案3: Baostock（兜底）----------
+    df_bs = _fetch_index_daily_baostock(index_code, start_date, end_date)
+    if not df_bs.empty:
+        return df_bs
+
+    logger.error(f"指数 {index_code} 所有数据源均失败 (TickFlow→AKShare→Baostock)")
     return pd.DataFrame()
 
 

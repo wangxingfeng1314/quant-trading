@@ -47,7 +47,7 @@ def _to_baostock_code(ts_code: str) -> str:
 
 
 def _fetch_valuations_baostock(stock_codes: list[str], now_iso: str) -> dict[str, dict]:
-    """通过 Baostock 单股日频指标通道毫秒级拉取 PE-TTM 与 PB-MRQ（避开 59 页全市场爬虫）。"""
+    """通过 Baostock 单股日频指标通道拉取 PE-TTM、PB-MRQ 及 3 年历史 PE 分位。"""
     out: dict[str, dict] = {}
     targets = [(c, _to_baostock_code(c)) for c in stock_codes]
     targets = [(c, b) for c, b in targets if b]
@@ -55,60 +55,54 @@ def _fetch_valuations_baostock(stock_codes: list[str], now_iso: str) -> dict[str
         return out
 
     try:
-        import baostock as bs
+        from data.fetcher import baostock_session, bs_query_rows
     except Exception as e:
-        logger.debug(f"Baostock 未安装，跳过估值抓取: {e}")
+        logger.debug(f"Baostock 未就绪，跳过估值抓取: {e}")
         return out
 
-    start_str = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+    start_str = (datetime.now() - timedelta(days=1095)).strftime("%Y-%m-%d")
     end_str = datetime.now().strftime("%Y-%m-%d")
-    lg = None
     try:
-        lg = bs.login()
-        if getattr(lg, "error_code", "") != "0":
-            logger.debug(f"Baostock 登录失败: {getattr(lg, 'error_msg', '')}")
-            return out
-        for ts_code, bs_code in targets:
-            try:
-                rs = bs.query_history_k_data_plus(
-                    bs_code,
-                    "date,close,peTTM,pbMRQ,psTTM",
-                    start_date=start_str,
-                    end_date=end_str,
-                    frequency="d",
-                )
-                if getattr(rs, "error_code", "") != "0":
-                    continue
-                last_valid = None
-                while rs.next():
-                    row = rs.get_row_data()
-                    if row and len(row) >= 4:
-                        pe_v = _to_float(row[2])
-                        pb_v = _to_float(row[3])
-                        if pe_v is not None or pb_v is not None:
-                            last_valid = (pe_v, pb_v)
-                if last_valid is not None:
-                    out[ts_code] = {
-                        "ts_code": ts_code,
-                        "pe_ttm": round(last_valid[0], 2) if last_valid[0] is not None else None,
-                        "pb": round(last_valid[1], 2) if last_valid[1] is not None else None,
-                        "dividend_yield": None,
-                        "roe": None,
-                        "market_cap_yi": None,
-                        "pe_percentile": None,
-                        "next_report_date": "",
-                        "updated_at": now_iso,
-                    }
-            except Exception as e_item:
-                logger.debug(f"Baostock 估值获取跳过 {ts_code}: {e_item}")
+        with baostock_session(timeout=25.0):
+            for ts_code, bs_code in targets:
+                try:
+                    _, rows = bs_query_rows(
+                        bs_code,
+                        "date,close,peTTM,pbMRQ,psTTM",
+                        start_date=start_str,
+                        end_date=end_str,
+                        frequency="d",
+                    )
+                    last_valid = None
+                    pos_pes: list[float] = []
+                    for row in rows:
+                        if row and len(row) >= 4:
+                            pe_v = _to_float(row[2])
+                            pb_v = _to_float(row[3])
+                            if pe_v is not None and pe_v > 0:
+                                pos_pes.append(pe_v)
+                            if pe_v is not None or pb_v is not None:
+                                last_valid = (pe_v, pb_v)
+                    if last_valid is not None:
+                        cur_pe, cur_pb = last_valid
+                        pe_pct = None
+                        if cur_pe is not None and cur_pe > 0 and len(pos_pes) >= 20:
+                            pe_pct = round(sum(1 for x in pos_pes if x <= cur_pe) / len(pos_pes) * 100.0, 1)
+                        out[ts_code] = {
+                            "ts_code": ts_code,
+                            "pe_ttm": round(cur_pe, 2) if cur_pe is not None else None,
+                            "pb": round(cur_pb, 2) if cur_pb is not None else None,
+                            "dividend_yield": None,
+                            "roe": None,
+                            "market_cap_yi": None,
+                            "pe_percentile": pe_pct,
+                            "next_report_date": "",
+                            "updated_at": now_iso,
+                        }
+                except Exception as e_item:
+                    logger.debug(f"Baostock 估值获取跳过 {ts_code}: {e_item}")
     except Exception as e:
         logger.debug(f"Baostock 估值会话异常: {e}")
-    finally:
-        try:
-            if lg is not None and getattr(lg, "error_code", "") == "0":
-                bs.logout()
-        except Exception:
-            pass
     return out
 
 
@@ -224,11 +218,14 @@ def refresh_watchlist_valuations_if_stale(
         return {}
 
     existing = get_valuation_map(stock_codes)
-    cutoff = datetime.now() - timedelta(days=max(1, int(max_age_days)))
+    cutoff = datetime.now() - timedelta(days=max(0, int(max_age_days)))
     need_refresh = []
     for code in stock_codes:
         info = existing.get(code)
         if not info or not info.get("updated_at"):
+            need_refresh.append(code)
+            continue
+        if (info.get("pe_ttm") or 0) > 0 and info.get("pe_percentile") is None:
             need_refresh.append(code)
             continue
         try:
@@ -296,13 +293,16 @@ def evaluate_valuation_guard(
         score_adj = -0.10
         badge = "⚠️亏损(负PE)"
         detail = f"PE(TTM)={pe:.1f}<0，基本面亏损，不宜盲目左侧抄底"
-    elif (pe is not None and pe > 60.0) or (pe_pct is not None and pe_pct >= 85.0):
+    elif (pe is not None and pe > 60.0 and (pe_pct is None or pe_pct >= 50.0)) or (
+        pe_pct is not None and pe_pct >= 85.0
+    ):
         zone = "估值偏高"
         allow_left_buy = False
         score_adj = -0.08
         badge = "⚠️高估值"
-        pe_txt = f"PE={pe:.1f}" if pe is not None else f"PE分位={pe_pct:.0f}%"
-        detail = f"{pe_txt}，处于高估值拥挤区间，左侧接盘风险大"
+        pe_txt = f"PE={pe:.1f}" if pe is not None else ""
+        pct_txt = f"3年分位={pe_pct:.0f}%" if pe_pct is not None else ""
+        detail = f"{' / '.join(x for x in (pe_txt, pct_txt) if x)}，处于高估值拥挤区间，左侧接盘风险大"
     elif ((pe is not None and 0 < pe <= 15.0)
           or (div_y is not None and div_y >= 3.5)
           or (pe_pct is not None and 0 < pe_pct <= 30.0)):
@@ -313,6 +313,8 @@ def evaluate_valuation_guard(
         parts = []
         if pe is not None and pe > 0:
             parts.append(f"PE={pe:.1f}")
+        if pe_pct is not None:
+            parts.append(f"PE分位={pe_pct:.0f}%")
         if div_y is not None and div_y > 0:
             parts.append(f"股息率={div_y:.2f}%")
         detail = "安全边际充足" + (f"（{'，'.join(parts)}）" if parts else "")
@@ -326,6 +328,8 @@ def evaluate_valuation_guard(
             parts.append(f"PE={pe:.1f}")
         if pb is not None:
             parts.append(f"PB={pb:.2f}")
+        if pe_pct is not None:
+            parts.append(f"PE分位={pe_pct:.0f}%")
         detail = "，".join(parts)
 
     if earnings_warning:

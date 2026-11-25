@@ -14,7 +14,7 @@ from engine.bar_view import BarFrame, FrameStore
 from data.storage import get_daily, save_backtest_result, save_backtest_trades
 from data.indicators import apply_indicators
 from data.cleaner import clean_daily
-from core.models import BacktestResult
+from core.models import BacktestResult, Trade
 from core.config import (
     BACKTEST_MIN_POSITION_PCT, BACKTEST_POSITION_STEP,
     BACKTEST_ST_CACHE_TTL, BACKTEST_BENCHMARK_CACHE_SIZE,
@@ -1573,3 +1573,175 @@ def run_rolling_adaptive_backtest(
         progress_callback(total_segs + 1, total_segs + 1)
 
     return {"result": res, "periods": period_rows}
+
+
+def run_dual_sleeve_backtest(
+    stock_universe: list,
+    etf_universe: list,
+    start_date: str,
+    end_date: str,
+    stock_weight: float = 0.6,
+    rebalance_months: int = 12,
+    train_lookback_years: int = 3,
+    etf_lookback: int = 20,
+    etf_rebalance_days: int = 10,
+    etf_top_k: int = 2,
+    initial_capital: float = 100000.0,
+    progress_callback: Callable = None,
+    **bt_kwargs,
+) -> dict:
+    """双舱位核心-卫星组合回测（个股零前视滚动路由 + 多资产 ETF 动量轮动）。
+
+    解决单股反转等待期长期 ~70% 现金闲置问题：按比例分配至双独立子账户并按真实交易日历合并净值与成交归因。
+    """
+    from strategies.momentum_rotation import MomentumRotationStrategy
+
+    w_stock = min(0.9, max(0.1, float(stock_weight)))
+    w_etf = round(1.0 - w_stock, 6)
+    cap_total = float(initial_capital)
+    cap_stock = round(cap_total * w_stock, 2)
+    cap_etf = round(cap_total - cap_stock, 2)
+
+    start_s = str(start_date).replace("-", "").replace("/", "").strip()[:8]
+    end_s = str(end_date).replace("-", "").replace("/", "").strip()[:8]
+    clean_stocks = list(dict.fromkeys(str(c).strip() for c in (stock_universe or []) if str(c).strip()))
+    clean_etfs = list(dict.fromkeys(str(c).strip() for c in (etf_universe or []) if str(c).strip()))
+
+    def _on_stock_prog(done_s, tot_s):
+        if progress_callback:
+            progress_callback(done_s, max(1, tot_s) + 1)
+
+    stock_out = run_rolling_adaptive_backtest(
+        universe=clean_stocks,
+        start_date=start_s,
+        end_date=end_s,
+        rebalance_months=int(rebalance_months),
+        train_lookback_years=int(train_lookback_years),
+        initial_capital=cap_stock,
+        progress_callback=_on_stock_prog,
+        **bt_kwargs,
+    )
+    stock_res = stock_out["result"]
+    stock_periods = stock_out["periods"]
+
+    exec_mode = bt_kwargs.get("execution_mode", "next_open")
+    cash_yield = float(bt_kwargs.get("cash_yield_annual", 0.0) or 0.0)
+    etf_preloaded = bt_kwargs.get("etf_preloaded_data")
+    if clean_etfs:
+        bt_etf = Backtester(
+            strategy_cls=MomentumRotationStrategy,
+            params={
+                "lookback": int(etf_lookback),
+                "rebalance_days": int(etf_rebalance_days),
+                "top_k": int(etf_top_k),
+                "ma_filter_period": 20,
+            },
+            universe=clean_etfs,
+            start_date=start_s,
+            end_date=end_s,
+            initial_capital=cap_etf,
+            execution_mode=exec_mode,
+            risk_manager=None,
+            max_active_positions=int(etf_top_k),
+            position_sizing="score",
+            market_regime_filter=False,
+            preloaded_data=etf_preloaded,
+            cash_yield_annual=cash_yield,
+        )
+        etf_res = bt_etf.run(save=False)
+    else:
+        etf_res = BacktestResult(
+            strategy="momentum_rotation", params="{}",
+            start_date=start_s, end_date=end_s,
+            initial_capital=cap_etf, final_capital=cap_etf,
+        )
+
+    s_curve = {str(pt["date"]): pt for pt in (stock_res.equity_curve or []) if "date" in pt}
+    e_curve = {str(pt["date"]): pt for pt in (etf_res.equity_curve or []) if "date" in pt}
+    all_dates = sorted(set(s_curve.keys()) | set(e_curve.keys()))
+
+    combined_curve = []
+    last_s = {"equity": cap_stock, "cash": cap_stock}
+    last_e = {"equity": cap_etf, "cash": cap_etf}
+    for dt in all_dates:
+        if dt in s_curve:
+            last_s = s_curve[dt]
+        if dt in e_curve:
+            last_e = e_curve[dt]
+        tot_eq = round(float(last_s.get("equity", 0.0)) + float(last_e.get("equity", 0.0)), 2)
+        tot_cash = round(float(last_s.get("cash", 0.0)) + float(last_e.get("cash", 0.0)), 2)
+        combined_curve.append({"date": dt, "equity": tot_eq, "cash": tot_cash})
+
+    merged_trades = []
+    for sleeve_label, tr_list in (("个股滚动", stock_res.trades or []), ("ETF轮动", etf_res.trades or [])):
+        for t in tr_list:
+            snap = dict(getattr(t, "context_snapshot", None) or {})
+            snap.setdefault("sleeve", sleeve_label)
+            if not snap.get("entry_strategy"):
+                snap["entry_strategy"] = str(snap.get("strategy", "") or "")
+            merged_trades.append(Trade(
+                ts_code=t.ts_code,
+                direction=t.direction,
+                trade_date=t.trade_date,
+                price=t.price,
+                volume=t.volume,
+                commission=t.commission,
+                tax=t.tax,
+                pnl=t.pnl,
+                holding_days=t.holding_days,
+                context_snapshot=snap,
+            ))
+    merged_trades.sort(key=lambda tr: (str(tr.trade_date), 0 if tr.direction == "SELL" else 1))
+
+    pf = Portfolio(cap_total)
+    pf.equity_curve = combined_curve
+    pf.trades = merged_trades
+    if combined_curve:
+        pf.cash = float(combined_curve[-1]["cash"])
+    metrics = pf.calc_metrics(
+        benchmark_returns=get_benchmark_returns(start_s, end_s) or None
+    ) if combined_curve else {}
+
+    combined_res = BacktestResult(
+        strategy="dual_sleeve_core_satellite",
+        params=json.dumps({
+            "stock_weight": round(w_stock, 2),
+            "etf_weight": round(w_etf, 2),
+            "rebalance_months": int(rebalance_months),
+            "train_lookback_years": int(train_lookback_years),
+            "etf_rebalance_days": int(etf_rebalance_days),
+            "etf_top_k": int(etf_top_k),
+        }, ensure_ascii=False),
+        start_date=start_s,
+        end_date=end_s,
+        initial_capital=cap_total,
+        final_capital=float(metrics.get("final_capital", cap_total)),
+        total_return=float(metrics.get("total_return", 0.0)),
+        annual_return=float(metrics.get("annual_return", 0.0)),
+        max_drawdown=float(metrics.get("max_drawdown", 0.0)),
+        sharpe_ratio=float(metrics.get("sharpe_ratio", 0.0)),
+        calmar_ratio=float(metrics.get("calmar_ratio", 0.0)),
+        win_rate=float(metrics.get("win_rate", 0.0)),
+        trade_count=int(metrics.get("trade_count", len(merged_trades))),
+        sell_count=int(metrics.get("sell_count", 0)),
+        equity_curve=combined_curve,
+        trades=merged_trades,
+    )
+    combined_res.alpha = float(metrics.get("alpha", 0.0))
+    combined_res.beta = float(metrics.get("beta", 0.0))
+    combined_res.profit_factor = float(metrics.get("profit_factor", 1.0))
+    combined_res.win_loss_ratio = float(metrics.get("win_loss_ratio", 1.0))
+    combined_res.avg_win = float(metrics.get("avg_win", 0.0))
+    combined_res.avg_loss = float(metrics.get("avg_loss", 0.0))
+    combined_res.break_even_count = int(metrics.get("break_even_count", 0))
+
+    if progress_callback:
+        progress_callback(1, 1)
+
+    return {
+        "result": combined_res,
+        "stock_result": stock_res,
+        "etf_result": etf_res,
+        "periods": stock_periods,
+        "weights": {"stock": w_stock, "etf": w_etf},
+    }

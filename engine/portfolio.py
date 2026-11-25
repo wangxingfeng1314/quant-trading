@@ -142,15 +142,20 @@ class Portfolio:
         # 执行买入
         self.cash -= total_amount
 
+        snap = dict(context_snapshot) if isinstance(context_snapshot, dict) else {}
+        entry_strat = str(snap.get("strategy", "") or "").strip()
         if ts_code not in self.positions:
             self.positions[ts_code] = Position(ts_code=ts_code)
-        self.positions[ts_code].buy(price, volume, cost["total"], trade_date)
+        try:
+            self.positions[ts_code].buy(price, volume, cost["total"], trade_date, entry_strategy=entry_strat)
+        except TypeError:
+            self.positions[ts_code].buy(price, volume, cost["total"], trade_date)
 
         trade = Trade(
             ts_code=ts_code, direction="BUY", trade_date=trade_date,
             price=price, volume=volume,
             commission=cost["commission"], tax=cost["tax"],
-            context_snapshot=context_snapshot or {},
+            context_snapshot=snap,
         )
         self.trades.append(trade)
         return trade
@@ -208,6 +213,7 @@ class Portfolio:
         cost = calc_cost(price, volume, "SELL", ts_code=ts_code)
 
         buy_date = pos.buy_date
+        orig_entry_strategy = str(getattr(pos, "entry_strategy", "") or "").strip()
 
         # 执行卖出
         realized_pnl = pos.sell(volume, price, cost["total"])
@@ -226,12 +232,21 @@ class Portfolio:
             except (ValueError, TypeError):
                 pass
 
+        snap = dict(context_snapshot) if isinstance(context_snapshot, dict) else {}
+        exit_strat = str(snap.get("strategy", "") or "").strip()
+        if orig_entry_strategy and not snap.get("entry_strategy"):
+            snap["entry_strategy"] = orig_entry_strategy
+        elif exit_strat and not snap.get("entry_strategy"):
+            snap["entry_strategy"] = exit_strat
+        if exit_strat and not snap.get("exit_strategy"):
+            snap["exit_strategy"] = exit_strat
+
         trade = Trade(
             ts_code=ts_code, direction="SELL", trade_date=trade_date,
             price=price, volume=volume,
             commission=cost["commission"], tax=cost["tax"],
             pnl=realized_pnl, holding_days=holding_days,
-            context_snapshot=context_snapshot or {},
+            context_snapshot=snap,
         )
         self.trades.append(trade)
         return trade

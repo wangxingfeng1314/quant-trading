@@ -13,6 +13,7 @@ class Position:
     available_shares: int = 0  # 当日可卖股数 (T+1)
     frozen_shares: int = 0  # 当日买入冻结股数
     current_date: str = ""  # 当前交易日
+    entry_strategy: str = ""  # 首次建仓触发策略（避免被风控平仓覆盖归因）
 
     @property
     def is_empty(self) -> bool:
@@ -39,7 +40,7 @@ class Position:
                 self.current_date = trade_date
         return self.available_shares >= volume and self.available_shares > 0
 
-    def buy(self, price: float, volume: int, cost: float, trade_date: str):
+    def buy(self, price: float, volume: int, cost: float, trade_date: str, entry_strategy: str = ""):
         """加仓（T+1冻结当日买入份额）"""
         if self.current_date != trade_date:
             if not self.buy_date or trade_date > self.buy_date:
@@ -47,6 +48,8 @@ class Position:
             else:
                 self.current_date = trade_date
 
+        if entry_strategy and (self.shares <= 0 or not self.entry_strategy):
+            self.entry_strategy = str(entry_strategy).strip()
         new_cost = self.avg_cost * self.shares + price * volume + cost
         self.shares += volume
         self.frozen_shares += volume
@@ -76,6 +79,7 @@ class Position:
             self.avg_cost = 0.0
             self.total_cost = 0.0
             self.buy_date = ""
+            self.entry_strategy = ""
         else:
             self.total_cost = round(self.avg_cost * self.shares, 2)
         return round(realized_pnl, 2)

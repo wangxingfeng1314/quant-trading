@@ -213,6 +213,9 @@ def evaluate_stock_strategy(ts_code: str, name: str = "", industry: str = "",
             preloaded_data=preloaded,
             max_active_positions=1,
             market_regime_filter=mrf,
+            dual_index_regime=True,
+            bear_position_scale=0.5,
+            max_open_gap_pct=3.0,
         )
         res = bt.run(save=False)
         has_pf = hasattr(res, "profit_factor")

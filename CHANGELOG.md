@@ -1,5 +1,29 @@
 # Changelog
 
+## [v0.9.0] - 2026-11-25
+
+### ✨ 核心修复、双舱位组合与精准归因升级
+
+1. **Baostock 线程安全会话 + ETF/指数多源级联 (`data/fetcher.py`, `scripts/init_data.py`)**
+   - 重构 `baostock_session` 共享会话锁与超时保护（退出不再注销全局连接，错误码 `10001001` 自动重登），解决估值通道与日线拉取并发互踢问题。
+   - `fetch_etf_daily()` 升级为 **TickFlow → Baostock (3位小数精度) → AKShare (`fund_etf_hist_em`)** 三级级联；`fetch_index_daily()` 新增 **Baostock** 兜底通道。
+   - `scripts/init_data.py` 增量更新新增 **「非空但日期滞后检测与绕开 TickFlow 备用源补拉」** 机制，解决少数标的数据滞后一天导致的漏扫。
+
+2. **3 年 PE-TTM 历史分位与估值守卫激活 (`services/valuation_service.py`, `app/screener.py`, `app/portfolio.py`)**
+   - `_fetch_valuations_baostock()` 拉取窗口扩至 3 年（`1095` 天），实时计算并入库 `pe_percentile`（3 年分位%）；选股器与估值表直接展示 `PE分位%`，且低分位（`≤20%`）周期/成长股不再被 `PE > 60` 机械误判高估。
+
+3. **持仓策略持久化端到端贯通与自动跟单升级 (`services/position_service.py`, `app/signal.py`, `app/portfolio.py`)**
+   - `_resolve_strategy_hint()` 支持中文显示名归一化，确保从信号中心回填的反转策略持仓准确启用反转宽止损/时间止损。
+   - 持仓管理页接入建仓策略选择与表格列展示，缓存复用持仓诊断（消除 `$O(N^2)$` 冗余计算）；「信号自动跟单」升级为 ATR 风险平价算手数、绑定建仓策略，且一键平仓直写 `real_trade_journal` 实盘复盘账本。
+
+4. **推送日报与策略推荐护栏对齐 (`notifier/push.py`, `services/strategy_recommender.py`)**
+   - `notify_signals()` 买入 TOP5 自动跳过当前已持仓防重买，熊市/成长空头期按 `position_scale=0.5` 减半建议股数（标注 `(熊市半仓)`），并嵌入 `PE/PB/3Y分位` 估值徽章。
+   - `evaluate_stock_strategy()` 启用 `dual_index_regime=True`、`bear_position_scale=0.5` 与 `max_open_gap_pct=3.0`。
+
+5. **双舱位「核心-卫星」组合回测与入场策略真归因 (`engine/position.py`, `engine/portfolio.py`, `engine/backtester.py`, `app/backtest.py`)**
+   - 新增 `run_dual_sleeve_backtest()`：将资金按比例配给 **「个股零前视滚动路由 + 多资产 ETF 动量轮动」**，大幅提升资金利用率并优化夏普表现。
+   - `Position` / `Trade.context_snapshot` 完整保留 `entry_strategy` 与 `exit_strategy`，回测结果页新增 **「🎯 分入场策略盈亏归因」** 统计表与明细列。
+
 ## [v0.8.0] - 2026-11-25
 
 ### ✨ 新增功能与核心优化

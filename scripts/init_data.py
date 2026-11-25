@@ -185,6 +185,7 @@ def main():
         skip_count = 0     # 跳过数（已是最新）
         fail_count = 0     # 失败数
         failed_targets = []  # 失败待重试标的列表 (ts_code, name, fetch_start)
+        updated_latest_map = dict(latest_map)
         total = len(stock_df)
 
         # ---------- 遍历每只股票拉取增量数据 ----------
@@ -199,6 +200,7 @@ def main():
             latest = latest_map.get(ts_code, "")
             # 若本地已有今天（或最新交易日）数据，则安全跳过，避免重复请求
             if latest and latest >= end_date:
+                updated_latest_map[ts_code] = latest
                 skip_count += 1
                 continue
 
@@ -214,7 +216,7 @@ def main():
             time.sleep(random.uniform(0.3, 1.5))
 
             try:
-                # 按标的类型路由：ETF 走 TickFlow，股票走多源级联
+                # 按标的类型路由：ETF 走 TickFlow/Baostock/AKShare，股票走多源级联
                 df = fetch_instrument_daily(ts_code, fetch_start, end_date)
                 if df.empty:
                     fail_count += 1
@@ -238,9 +240,11 @@ def main():
                         fail_count += 1
                         failed_targets.append((ts_code, name, fetch_start))
                         continue
+                    updated_latest_map[ts_code] = get_latest_date(ts_code) or latest
                 else:
                     # 写入数据库（INSERT OR REPLACE，安全重复执行）
                     save_daily(df)
+                    updated_latest_map[ts_code] = max(str(latest or ""), str(df["trade_date"].max()))
                 success_count += 1
 
                 # 每50只打印一次进度
@@ -266,11 +270,15 @@ def main():
                             df_retry = align_volume_unit(ts_code, df_retry)
                             if check_split_dividend_anomaly(ts_code, df_retry):
                                 if resync_full_history(ts_code, end_date):
+                                    updated_latest_map[ts_code] = get_latest_date(ts_code) or updated_latest_map.get(ts_code, "")
                                     success_count += 1
                                     fail_count = max(0, fail_count - 1)
                                     continue
                             else:
                                 save_daily(df_retry)
+                                updated_latest_map[ts_code] = max(
+                                    str(updated_latest_map.get(ts_code, "")), str(df_retry["trade_date"].max())
+                                )
                                 success_count += 1
                                 fail_count = max(0, fail_count - 1)
                                 continue
@@ -279,6 +287,56 @@ def main():
                     still_failed.append(f"{ts_code}({name})")
             if still_failed:
                 logger.warning(f"二次重试仍未成功的标的: {', '.join(still_failed)}")
+
+        # ---------- 非空但滞后检测与绕开缓存备用源补拉 ----------
+        batch_vals = [v for v in updated_latest_map.values() if v]
+        batch_latest = max(batch_vals) if batch_vals else ""
+        if batch_latest:
+            lag_targets = []
+            try:
+                batch_dt = datetime.strptime(batch_latest, "%Y%m%d")
+            except ValueError:
+                batch_dt = None
+            for _, row in stock_df.iterrows():
+                tc = row["ts_code"]
+                nm = row["name"]
+                cur_dt_s = updated_latest_map.get(tc, "")
+                if not cur_dt_s or cur_dt_s >= batch_latest:
+                    continue
+                if batch_dt is not None:
+                    try:
+                        if (batch_dt - datetime.strptime(cur_dt_s, "%Y%m%d")).days > 7:
+                            continue
+                    except ValueError:
+                        continue
+                lag_targets.append((tc, nm, cur_dt_s))
+            if lag_targets:
+                logger.warning(
+                    f"检测到 {len(lag_targets)} 只非空但日期滞后标的 (< {batch_latest}): "
+                    f"{', '.join(f'{c}({d})' for c, _, d in lag_targets)}，切换备用数据源补拉..."
+                )
+                skip_thr = (datetime.now() - timedelta(days=args.days or 14)).strftime("%Y%m%d")
+                for tc, nm, cur_dt_s in lag_targets:
+                    f_start = min(cur_dt_s, skip_thr)
+                    try:
+                        df_lag = fetch_instrument_daily(tc, f_start, end_date, skip_tickflow=True)
+                        if df_lag is None or df_lag.empty or str(df_lag["trade_date"].max()) <= cur_dt_s:
+                            time.sleep(1.5)
+                            df_lag = fetch_instrument_daily(tc, f_start, end_date)
+                        if df_lag is not None and not df_lag.empty:
+                            df_lag = clean_daily(df_lag)
+                        if df_lag is not None and not df_lag.empty and str(df_lag["trade_date"].max()) > cur_dt_s:
+                            df_lag = align_volume_unit(tc, df_lag)
+                            if check_split_dividend_anomaly(tc, df_lag):
+                                if resync_full_history(tc, end_date):
+                                    updated_latest_map[tc] = get_latest_date(tc) or cur_dt_s
+                                    logger.info(f"✅ 滞后标的全量重同步补齐: {tc} {nm}")
+                            else:
+                                save_daily(df_lag)
+                                updated_latest_map[tc] = str(df_lag["trade_date"].max())
+                                logger.info(f"✅ 滞后标的备用源补齐: {tc} {nm} ({cur_dt_s} -> {updated_latest_map[tc]})")
+                    except Exception as e_lag:
+                        logger.warning(f"滞后标的 {tc} {nm} 备用源补拉异常: {e_lag}")
 
         logger.info("=" * 50)
         logger.info(f"增量更新完成！成功: {success_count}, 失败: {fail_count}")

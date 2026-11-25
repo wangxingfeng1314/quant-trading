@@ -376,9 +376,11 @@ def _send_feishu(title: str, content: str) -> bool:
 
 def calc_atr_stops_and_sizing(ts_code: str, price: float, score: float = 0.7,
                               base_capital: float = 100000.0,
-                              strategy: str = "") -> dict:
+                              strategy: str = "",
+                              position_scale: float = 1.0) -> dict:
     """基于标的最近14日真实波幅(ATR14)与策略风格预设，计算动态止损止盈位与风险平价建议股数"""
     price = max(float(price or 0.0), 0.01)
+    scale = min(1.0, max(0.0, float(position_scale if position_scale is not None else 1.0)))
     atr_pct = 2.5  # 默认日均振幅 2.5% -> 2*ATR = 5% 止损
     try:
         from data.storage import get_daily
@@ -417,12 +419,12 @@ def calc_atr_stops_and_sizing(ts_code: str, price: float, score: float = 0.7,
     stop_loss = round(price * (1.0 - sl_pct / 100.0), 2)
     take_profit = round(price * (1.0 + tp_pct / 100.0), 2)
 
-    # 风险平价定仓：单笔最大承受总资金 1.2% ~ 1.8% 的止损风险（随信号评分上浮）
+    # 风险平价定仓：单笔最大承受总资金 1.2% ~ 1.8% 的止损风险（随信号评分与熊市缩放系数调整）
     risk_budget_pct = 0.010 + 0.008 * max(0.0, min(float(score or 0.7), 1.0))
     pos_pct = min(0.25, max(0.05, risk_budget_pct / (sl_pct / 100.0)))
-    budget = base_capital * pos_pct
+    budget = base_capital * pos_pct * scale
     calc_shares = int(budget / price) // 100 * 100
-    shares = calc_shares if calc_shares > 0 else (100 if base_capital >= price * 100 else 0)
+    shares = calc_shares if calc_shares > 0 else (100 if (scale > 0 and base_capital >= price * 100) else 0)
     est_cost = round(shares * price, 2)
 
     return {
@@ -437,6 +439,7 @@ def calc_atr_stops_and_sizing(ts_code: str, price: float, score: float = 0.7,
         "trail_callback": trail_callback,
         "break_even_trigger": break_even_trigger,
         "strategy": strat_key,
+        "position_scale": scale,
     }
 
 
@@ -453,13 +456,15 @@ def _fmt_strategy_cn(name: str) -> str:
     return _STRATEGY_CN_MAP.get(name, name or "")
 
 
-def notify_signals(signals, strategy_names: list = None, min_buy_score: float = None) -> bool:
+def notify_signals(signals, strategy_names: list = None, min_buy_score: float = None,
+                   skip_held_buys: bool = False) -> bool:
     """推送信号摘要
 
     Args:
         signals: Signal对象列表
         strategy_names: 策略名称列表（用于标题）
         min_buy_score: 买入推荐最低评分门槛（None=读取 SCANNER_MIN_BUY_SCORE，默认 0.60）
+        skip_held_buys: 是否跳过已持仓标的买入推荐（默认 False 保留持仓警告标注）
 
     Returns:
         是否推送成功
@@ -492,20 +497,22 @@ def notify_signals(signals, strategy_names: list = None, min_buy_score: float = 
 
     # 获取大盘与创业板双指数风控环境
     regime_line = ""
+    combined_regime = "RANGE"
     try:
         from services.signal_service import get_dual_market_regime, get_market_regime
         try:
             dual = get_dual_market_regime()
             large_cap = dual.get("large_cap", {})
             growth = dual.get("growth", {})
-            combined = dual.get("combined_regime", large_cap.get("regime", "RANGE"))
-            warn_suffix = " ｜ ⚠️ 创业板走熊分化·警惕高波成长追高" if combined == "GROWTH_BEAR" else ""
+            combined_regime = dual.get("combined_regime", large_cap.get("regime", "RANGE"))
+            warn_suffix = " ｜ ⚠️ 创业板走熊分化·警惕高波成长追高" if combined_regime == "GROWTH_BEAR" else ""
             regime_line = (
                 f"**大盘风控**: {large_cap.get('label', '🟡 震荡')}（建议总仓位 ≤ {large_cap.get('max_position_pct', 50)}%）"
                 f" ｜ 创业板: {growth.get('label', '')}{warn_suffix}\n"
             )
         except Exception:
             regime_info = get_market_regime()
+            combined_regime = regime_info.get("regime", "RANGE")
             regime_line = f"**大盘风控**: {regime_info['label']}（建议总仓位 ≤ {regime_info['max_position_pct']}%）\n"
     except Exception:
         pass
@@ -517,6 +524,17 @@ def notify_signals(signals, strategy_names: list = None, min_buy_score: float = 
         signals, guard_meta = annotate_portfolio_guardrails(signals)
     except Exception:
         guard_meta = {}
+
+    held_codes = set()
+    try:
+        from data.storage import get_positions
+        held_codes = {
+            str(p["ts_code"]).strip()
+            for p in (get_positions() or [])
+            if p.get("ts_code") and int(p.get("shares", 0) or 0) > 0
+        }
+    except Exception:
+        held_codes = set()
 
     content = f"""## 📊 量化交易信号日报
 **日期**: {today}
@@ -535,8 +553,12 @@ def notify_signals(signals, strategy_names: list = None, min_buy_score: float = 
             sell_by_code.setdefault(s.ts_code, []).append(s)
 
     buy_grouped = {}
+    skipped_held_count = 0
     for s in signals:
         if s.direction == "BUY":
+            if skip_held_buys and s.ts_code in held_codes:
+                skipped_held_count += 1
+                continue
             sells_for_code = sell_by_code.get(s.ts_code, [])
             if sells_for_code and max(x.score for x in sells_for_code) >= s.score - 0.05:
                 continue
@@ -563,24 +585,53 @@ def notify_signals(signals, strategy_names: list = None, min_buy_score: float = 
     filtered_low_buy_count = len(dedup_buys) - len(high_buys)
     buy_signals = sorted(high_buys, key=lambda item: item[0].score, reverse=True)[:5]
 
+    val_map = {}
+    if buy_signals:
+        try:
+            from data.storage import get_valuation_map
+            val_map = get_valuation_map([s.ts_code for s, _ in buy_signals]) or {}
+        except Exception:
+            val_map = {}
+
     if buy_signals:
         if guard_meta.get("at_capacity"):
             content += (
                 f"> ⚠️ 当前实盘/模拟持仓已达上限（{guard_meta.get('position_count', 0)}/"
                 f"{guard_meta.get('max_active_positions', 5)} 只），下列新买入信号仅作调仓替换参考。\n\n"
             )
+        if skipped_held_count > 0:
+            content += f"> 🛡️ 已自动跳过 {skipped_held_count} 条当前已持仓标的的重复买入推荐（防重复超买）。\n\n"
         content += (
             "| 股票 | 策略 | 评分 | 参考价 | 建议股数 | 预估金额 | 建议止损 | 目标止盈/风控 | 触发原因 |\n"
             "|------|------|------|--------|----------|----------|----------|----------|----------|\n"
         )
         for sig, strat_cn in buy_signals:
             price = max(sig.price_ref, 0.01)
+            is_cy_or_bear = (
+                combined_regime == "BEAR"
+                or (combined_regime == "GROWTH_BEAR" and str(sig.ts_code).startswith(("300", "301", "688")))
+            )
+            pos_scale = 0.5 if is_cy_or_bear else 1.0
             try:
                 plan = calc_atr_stops_and_sizing(
-                    sig.ts_code, price, sig.score, base_capital, strategy=sig.strategy
+                    sig.ts_code, price, sig.score, base_capital,
+                    strategy=sig.strategy, position_scale=pos_scale,
                 )
             except TypeError:
                 plan = calc_atr_stops_and_sizing(sig.ts_code, price, sig.score, base_capital)
+            if (
+                pos_scale == 1.0
+                and combined_regime == "GROWTH_BEAR"
+                and float(plan.get("atr_pct", 0.0) or 0.0) >= 2.2
+            ):
+                pos_scale = 0.5
+                try:
+                    plan = calc_atr_stops_and_sizing(
+                        sig.ts_code, price, sig.score, base_capital,
+                        strategy=sig.strategy, position_scale=pos_scale,
+                    )
+                except TypeError:
+                    pass
             shares = plan["shares"]
             est_cost = plan["est_cost"]
             stop_loss = plan["stop_loss"]
@@ -596,15 +647,30 @@ def notify_signals(signals, strategy_names: list = None, min_buy_score: float = 
             if be_trig > 0:
                 rm_notes.append(f"浮盈{be_trig:g}%保本")
             rm_suffix = f" ({'/'.join(rm_notes)})" if rm_notes else ""
-            shares_text = f"{shares}股" if shares > 0 else "资金不足1手"
+            scale_tag = "(熊市半仓)" if (pos_scale < 1.0 and shares > 0) else ""
+            shares_text = f"{shares}股{scale_tag}" if shares > 0 else "资金不足1手"
             cost_text = f"¥{est_cost:,.0f}" if shares > 0 else "-"
+            val_badge = ""
+            if sig.ts_code in val_map:
+                try:
+                    from services.valuation_service import evaluate_valuation_guard
+                    vg = evaluate_valuation_guard(sig.ts_code, val_map[sig.ts_code], ref_date=sig.trade_date)
+                    val_badge = vg.get("badge") or ""
+                except Exception:
+                    val_badge = ""
+            strat_col = f"{strat_cn} {val_badge}".strip() if val_badge else strat_cn
             safe_reason = (sig.reason or "").replace("|", "/")
             content += (
-                f"| {_label(sig)} | {strat_cn} | {sig.score:.2f} | ¥{price:.2f} | {shares_text} | {cost_text} "
+                f"| {_label(sig)} | {strat_col} | {sig.score:.2f} | ¥{price:.2f} | {shares_text} | {cost_text} "
                 f"| ¥{stop_loss:.2f} (-{sl_pct:g}%) | ¥{take_profit:.2f} (+{tp_pct:g}%{rm_suffix}) | {safe_reason} |\n"
             )
     else:
-        extra_msg = f"，已自动拦截 {filtered_low_buy_count} 条低分弱信号" if filtered_low_buy_count > 0 else ""
+        notes = []
+        if filtered_low_buy_count > 0:
+            notes.append(f"已自动拦截 {filtered_low_buy_count} 条低分弱信号")
+        if skipped_held_count > 0:
+            notes.append(f"已跳过 {skipped_held_count} 条已持仓买入")
+        extra_msg = ("，" + "；".join(notes)) if notes else ""
         content += f"> 🛡️ 今日无满足高置信度门槛（≥{min_score:.2f}）的买入信号{extra_msg}，建议观望。\n"
 
     # 卖出区域按标的去重聚合，避免同股多策略卖出刷屏重复两行

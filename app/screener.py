@@ -30,6 +30,8 @@ def _render_screener_results(df_result: pd.DataFrame):
     display["成交量(万手)"] = display["成交量(万手)"].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "0.00")
     if "PE-TTM" in display.columns:
         display["PE-TTM"] = display["PE-TTM"].apply(lambda x: f"{x:.1f}" if pd.notna(x) else "-")
+    if "PE分位%" in display.columns:
+        display["PE分位%"] = display["PE分位%"].apply(lambda x: f"{x:.0f}%" if pd.notna(x) else "-")
     if "PB" in display.columns:
         display["PB"] = display["PB"].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "-")
 
@@ -280,6 +282,7 @@ def show():
             # 10. 基本面估值因子 (PE-TTM / PB / 剔除亏损股)
             v_row = val_map.get(ts_code, {})
             pe_val = v_row.get("pe_ttm")
+            pe_pct_val = v_row.get("pe_percentile")
             pb_val = v_row.get("pb")
             if match and exclude_loss:
                 if pe_val is None or pd.isna(pe_val) or float(pe_val) <= 0:
@@ -314,6 +317,7 @@ def show():
                     "最新价": latest["close"],
                     "涨跌幅%": round(chg, 2) if pd.notna(chg) else 0,
                     "PE-TTM": round(float(pe_val), 2) if (pe_val is not None and pd.notna(pe_val)) else None,
+                    "PE分位%": round(float(pe_pct_val), 1) if (pe_pct_val is not None and pd.notna(pe_pct_val)) else None,
                     "PB": round(float(pb_val), 2) if (pb_val is not None and pd.notna(pb_val)) else None,
                     "成交量(万手)": round(float(latest["volume"]) / 1e6, 2) if latest.get("volume") else 0.0,
                     "MA5": round(latest.get("ma5", 0), 2),

@@ -270,18 +270,21 @@ def _show_run_backtest():
                     [
                         "🚀 统一组合自适应回测 (推荐·共享资金池，各股路由专属策略与风控)",
                         "🧪 严格零前视滚动组合回测 (按期历史选优外推，杜绝选策略前视偏差)",
+                        "🌐 双舱位核心-卫星组合回测 (个股零前视滚动 + 多资产ETF动量轮动)",
                         "⭐ 智能自适应逐股对比 (每只标的单独回测统计胜率)",
                         "统一策略回测 (所有自选股均使用左侧选定策略)",
                     ],
                     index=0,
                     key="bt_wl_eval_mode",
-                    help="「统一组合」按当前冻结推荐表快速评估；「🧪 严格零前视滚动组合」每期仅用过去历史重选策略路由并冻结外推下一期，完全杜绝选策略前视偏差。",
+                    help="「统一组合」按当前冻结推荐表快速评估；「🧪 严格零前视滚动组合」每期仅用过去历史重选策略；「🌐 双舱位核心-卫星」额外配置多资产ETF动量轮动大幅提升资金利用率。",
                 )
                 rolling_rebalance_months = 12
                 rolling_train_years = 3
+                stock_weight_pct = 60
+                etf_rb_days = 10
                 if wl_eval_mode.startswith("🚀"):
-                    st.caption("💡 当前按最新推荐标签快速评估；若要验证严格无前视外推能力，建议切换到「🧪 严格零前视滚动组合回测」。")
-                elif wl_eval_mode.startswith("🧪"):
+                    st.caption("💡 当前按最新推荐标签快速评估；若要验证严格无前视外推能力，建议切换到「🧪 严格零前视滚动组合回测」或「🌐 双舱位核心-卫星」。")
+                elif wl_eval_mode.startswith(("🧪", "🌐")):
                     rc1, rc2 = st.columns(2)
                     with rc1:
                         rolling_rebalance_months = st.selectbox(
@@ -295,6 +298,20 @@ def _show_run_backtest():
                             format_func=lambda y: f"过去 {y} 年历史选优",
                             key="bt_roll_years",
                         )
+                    if wl_eval_mode.startswith("🌐"):
+                        dc1, dc2 = st.columns(2)
+                        with dc1:
+                            stock_weight_pct = st.slider(
+                                "个股滚动舱位占比 (%)", 30, 80, 60, 5,
+                                key="bt_dual_stock_pct",
+                                help="其余资金 (1 - 个股占比) 自动分配给多资产 ETF 动量轮动子舱",
+                            )
+                        with dc2:
+                            etf_rb_days = st.selectbox(
+                                "ETF 轮动调仓频率", [10, 5, 20], index=0,
+                                format_func=lambda d: f"每 {d} 个交易日调仓",
+                                key="bt_dual_etf_rb",
+                            )
                 st.caption(f"📊 当前自选池共 {len(universe)} 只标的")
         else:
             all_codes = stock_df_data["ts_code"].tolist()
@@ -634,6 +651,88 @@ def _show_run_backtest():
                         st.dataframe(pd.DataFrame(roll_periods), hide_index=True, width="stretch")
                 benchmark_curve = _get_benchmark_curve(start_date, end_date) if show_benchmark else None
                 _display_result(roll_res, benchmark_curve=benchmark_curve)
+                return
+
+            if eval_mode_val.startswith("🌐"):
+                from engine.backtester import run_dual_sleeve_backtest
+                from strategies.momentum_rotation import ROTATION_ETF_PRESETS
+                grp_map = (
+                    dict(zip(watchlist["ts_code"], watchlist["group_name"].fillna("")))
+                    if (watchlist is not None and not watchlist.empty and "group_name" in watchlist.columns)
+                    else {}
+                )
+                stock_codes = [
+                    c for c in universe
+                    if str(grp_map.get(c, "")) != "ETF轮动池"
+                    and not str(c).upper().startswith(("51", "56", "58", "15", "16"))
+                ] or list(universe)
+                etf_ready_set = set(cached_get_stocks_with_data(min_days=60))
+                etf_codes = [c for c, _ in ROTATION_ETF_PRESETS if c in etf_ready_set]
+                pooled_max_pos = int(max_pos_val) if int(max_pos_val) > 0 else 5
+                pooled_rm = ("auto" if follow_strategy_rm else rm_instance) if enable_rm else None
+
+                ds_pb = st.progress(0.0)
+                ds_txt = st.empty()
+
+                def _on_ds(done_s, tot_s):
+                    ds_pb.progress(min(1.0, done_s / max(tot_s, 1)))
+                    ds_txt.text(f"双舱位核心-卫星回测进度: {done_s}/{tot_s}")
+
+                ds_out = run_dual_sleeve_backtest(
+                    stock_universe=stock_codes,
+                    etf_universe=etf_codes,
+                    start_date=start_date,
+                    end_date=end_date,
+                    stock_weight=float(stock_weight_pct if "stock_weight_pct" in locals() else 60) / 100.0,
+                    rebalance_months=int(rolling_rebalance_months if "rolling_rebalance_months" in locals() else 12),
+                    train_lookback_years=int(rolling_train_years if "rolling_train_years" in locals() else 3),
+                    etf_rebalance_days=int(etf_rb_days if "etf_rb_days" in locals() else 10),
+                    etf_top_k=2,
+                    initial_capital=float(capital),
+                    progress_callback=_on_ds,
+                    execution_mode=exec_mode,
+                    risk_manager=pooled_rm,
+                    max_active_positions=pooled_max_pos,
+                    position_sizing=pos_sizing,
+                    market_regime_filter=enable_regime,
+                    max_open_gap_pct=float(max_open_gap_pct),
+                    drawdown_brake_pct=float(drawdown_brake_pct),
+                    max_sector_positions=int(max_sector_positions),
+                    max_correlation=float(max_correlation),
+                    dual_index_regime=bool(enable_regime and dual_index_regime),
+                    bear_position_scale=float(bear_position_scale if enable_regime else 1.0),
+                    cash_yield_annual=float(cash_yield_annual),
+                )
+                ds_pb.empty()
+                ds_txt.empty()
+                ds_res = ds_out["result"]
+                s_res = ds_out["stock_result"]
+                e_res = ds_out["etf_result"]
+                if not ds_res.equity_curve:
+                    st.warning("双舱位组合回测无有效净值数据，请先确认个股与 7 只轮动 ETF 数据均已下载")
+                    return
+                if not etf_codes:
+                    st.warning("本地暂无轮动 ETF 历史数据，本次仅运行了核心个股滚动子舱（可在「持仓管理」导入轮动 ETF 数据）")
+                st.success(
+                    f"🌐 双舱位核心-卫星组合回测完成！({len(stock_codes)} 只个股 {ds_out['weights']['stock']*100:.0f}% + "
+                    f"{len(etf_codes)} 只ETF轮动 {ds_out['weights']['etf']*100:.0f}% | "
+                    f"总收益 {ds_res.total_return:+.2f}% | 年化 {ds_res.annual_return:+.2f}% | "
+                    f"最大回撤 {ds_res.max_drawdown:.2f}% | 夏普 {ds_res.sharpe_ratio:.2f})"
+                )
+                sc_a, sc_b = st.columns(2)
+                sc_a.info(
+                    f"📈 **个股零前视滚动子舱 ({ds_out['weights']['stock']*100:.0f}%)**："
+                    f"收益 {s_res.total_return:+.2f}% ｜ 回撤 {s_res.max_drawdown:.2f}% ｜ 夏普 {s_res.sharpe_ratio:.2f}"
+                )
+                sc_b.info(
+                    f"🔄 **多资产 ETF 轮动子舱 ({ds_out['weights']['etf']*100:.0f}%)**："
+                    f"收益 {e_res.total_return:+.2f}% ｜ 回撤 {e_res.max_drawdown:.2f}% ｜ 夏普 {e_res.sharpe_ratio:.2f}"
+                )
+                if ds_out["periods"]:
+                    with st.expander(f"📅 个股滚动子舱逐期演化明细 ({len(ds_out['periods'])} 期)", expanded=False):
+                        st.dataframe(pd.DataFrame(ds_out["periods"]), hide_index=True, width="stretch")
+                benchmark_curve = _get_benchmark_curve(start_date, end_date) if show_benchmark else None
+                _display_result(ds_res, benchmark_curve=benchmark_curve)
                 return
 
             is_unified_adaptive = eval_mode_val.startswith("🚀")
@@ -2009,13 +2108,52 @@ def _display_result(result, benchmark_curve=None):
                 )
                 st.plotly_chart(k_fig, width="stretch")
 
+        sell_trades = [t for t in result.trades if t.direction == "SELL"]
+        if sell_trades:
+            st.subheader("🎯 分入场策略盈亏归因")
+            grp_attr: dict = {}
+            for t in sell_trades:
+                snap = t.context_snapshot if isinstance(getattr(t, "context_snapshot", None), dict) else {}
+                e_strat = str(snap.get("entry_strategy") or snap.get("strategy") or result.strategy or "unknown").strip()
+                x_strat = str(snap.get("exit_strategy") or snap.get("strategy") or "").strip()
+                bucket = grp_attr.setdefault(e_strat, {"pnls": [], "days": [], "rm_exits": 0})
+                bucket["pnls"].append(float(t.pnl))
+                bucket["days"].append(int(getattr(t, "holding_days", 0) or 0))
+                if x_strat == "risk_manager":
+                    bucket["rm_exits"] += 1
+            attr_rows = []
+            for s_key, b in sorted(grp_attr.items(), key=lambda kv: sum(kv[1]["pnls"]), reverse=True):
+                pnls = b["pnls"]
+                cnt = len(pnls)
+                wins = [p for p in pnls if p > 0]
+                losses = [p for p in pnls if p < 0]
+                win_sum = sum(wins)
+                loss_sum = abs(sum(losses))
+                pf_str = f"{win_sum / loss_sum:.2f}" if loss_sum > 0 else ("∞" if win_sum > 0 else "0.00")
+                attr_rows.append({
+                    "入场策略": format_strategy_cn(s_key) if s_key else "未知",
+                    "平仓笔数": cnt,
+                    "胜率%": round(len(wins) / cnt * 100.0, 1) if cnt > 0 else 0.0,
+                    "累计盈亏": round(sum(pnls), 2),
+                    "平均盈亏": round(sum(pnls) / cnt, 2) if cnt > 0 else 0.0,
+                    "盈亏比": pf_str,
+                    "平均持仓天数": round(sum(b["days"]) / cnt, 1) if cnt > 0 else 0.0,
+                    "风控出场占比%": round(b["rm_exits"] / cnt * 100.0, 1) if cnt > 0 else 0.0,
+                })
+            chinese_dataframe(pd.DataFrame(attr_rows))
+
         st.subheader("📋 交易记录")
         trade_data = []
         for t in result.trades:
+            snap = t.context_snapshot if isinstance(getattr(t, "context_snapshot", None), dict) else {}
+            entry_s = str(snap.get("entry_strategy") or snap.get("strategy") or "")
+            exit_s = str(snap.get("exit_strategy") or snap.get("strategy") or "")
             trade_data.append({
                 "日期": t.trade_date,
                 "股票": format_stock_cn(t.ts_code, name_map),
                 "方向": format_direction_cn(t.direction),
+                "入场策略": format_strategy_cn(entry_s) if entry_s else "-",
+                "出场来源": (format_strategy_cn(exit_s) if exit_s else "-") if t.direction == "SELL" else "",
                 "价格": f"{t.price:.2f}",
                 "数量": t.volume,
                 "佣金": f"{t.commission:.2f}",

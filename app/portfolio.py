@@ -342,13 +342,14 @@ def _show_watchlist():
 
 
 
-def diagnose_position_action(ts_code: str, buy_price: float, buy_date: str = "") -> dict:
+def diagnose_position_action(ts_code: str, buy_price: float, buy_date: str = "", strategy_hint: str = "") -> dict:
     """诊断单只持仓标的的实时风控状态与卖出/止盈指令（委托给 services.position_service）。"""
     from services.position_service import diagnose_position_action as _svc_diagnose
     return _svc_diagnose(
         ts_code=ts_code,
         buy_price=buy_price,
         buy_date=buy_date,
+        strategy_hint=strategy_hint,
         get_daily_fn=get_daily,
         get_signals_fn=get_signals,
         calc_atr_fn=calc_atr_stops_and_sizing,
@@ -366,7 +367,7 @@ def _show_portfolio():
     # 添加持仓
     with st.form("add_position", clear_on_submit=True):
         st.markdown("**添加持仓**")
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3, col4, col5 = st.columns([1.1, 1.0, 1.0, 1.1, 1.2])
         with col1:
             code_input = st.text_input("股票代码", placeholder="000001.SZ")
         with col2:
@@ -375,11 +376,19 @@ def _show_portfolio():
             shares = st.number_input("数量(股)", min_value=100, step=100)
         with col4:
             buy_date = chinese_date_picker("买入日期", key="buy_date")
+        with col5:
+            strat_choices = [""] + list(STRATEGY_REGISTRY.keys())
+            sel_strat = st.selectbox(
+                "建仓策略",
+                strat_choices,
+                format_func=lambda s: "自动识别" if not s else format_strategy_cn(s),
+                key="add_pos_strategy",
+            )
 
         if st.form_submit_button("添加（同股自动合并均价并记入账本）"):
             if code_input and buy_price > 0 and shares > 0:
                 code_str = normalize_stock_code(code_input)
-                upsert_position_buy(code_str, buy_price, shares, buy_date, note="手动买入")
+                upsert_position_buy(code_str, buy_price, shares, buy_date, note="手动买入", strategy=sel_strat)
                 st.rerun()
 
     positions = get_positions()
@@ -389,13 +398,16 @@ def _show_portfolio():
 
     # 显示持仓盈亏与风控预警雷达
     rows = []
+    diag_by_id = {}
     total_cost = 0
     total_value = 0
     alert_msgs = []
 
     for pos in positions:
         ts_code = pos["ts_code"]
-        diag = diagnose_position_action(ts_code, pos["buy_price"], pos.get("buy_date", ""))
+        diag = diagnose_position_action(ts_code, pos["buy_price"], pos.get("buy_date", ""), strategy_hint=pos.get("strategy", ""))
+        if "_id" in pos:
+            diag_by_id[pos["_id"]] = diag
         current_price = diag["current_price"]
 
         cost = pos["buy_price"] * pos["shares"]
@@ -411,8 +423,11 @@ def _show_portfolio():
             alert_msgs.append(f"**{stock_label}**：{diag['action']}")
 
         trail_px = diag.get("trailing_stop_price")
+        resolved_hint = diag.get("strategy_hint") or pos.get("strategy", "")
+        strat_disp = format_strategy_cn(resolved_hint) if resolved_hint else "默认规则"
         rows.append({
             "股票": stock_label,
+            "建仓策略": strat_disp,
             "买入价": f"¥{pos['buy_price']:.2f}",
             "现价": f"¥{current_price:.2f}",
             "数量": pos["shares"],
@@ -475,10 +490,12 @@ def _show_portfolio():
             if sell_pos_choice:
                 max_sh = int(sell_pos_choice["shares"])
                 sell_sh = st.number_input("卖出股数", min_value=1, max_value=max_sh, value=max_sh, step=100, key="reduce_shares")
-                def_px = next((d["current_price"] for p, d in zip(positions, [diagnose_position_action(x["ts_code"], x["buy_price"], x.get("buy_date", "")) for x in positions]) if p["_id"] == sell_pos_choice["_id"]), float(sell_pos_choice["buy_price"]))
+                cached_diag = diag_by_id.get(sell_pos_choice.get("_id"))
+                def_px = cached_diag["current_price"] if cached_diag else float(sell_pos_choice["buy_price"])
                 sell_px = st.number_input("成交价格(元)", min_value=0.01, value=round(float(def_px), 2), step=0.01, key="reduce_price")
                 sell_dt = chinese_date_picker("卖出日期", key="reduce_date")
-                sell_strat = st.text_input("关联策略(可选)", value="", placeholder="如 kdj_cross / risk_manager", key="reduce_strat")
+                def_strat = str(sell_pos_choice.get("strategy") or (cached_diag.get("strategy_hint") if cached_diag else "") or "")
+                sell_strat = st.text_input("关联策略(可选)", value=def_strat, placeholder="如 kdj_cross / risk_manager", key="reduce_strat")
                 if st.button("确认平仓记账", type="primary", key="confirm_reduce_pos"):
                     r_out = reduce_position(
                         ts_code=sell_pos_choice["ts_code"],
@@ -589,22 +606,44 @@ def _show_auto_trade():
         df_buy = pd.DataFrame(buy_rows)
         chinese_dataframe(df_buy)
 
-        # 一键跟单按钮（顶层无嵌套，点击绝不闪退）
+        # 一键跟单按钮（按 ATR 风险平价算手数、记录建仓策略并入实盘账本）
         if st.button("📥 一键跟入（将买入信号加入持仓）", type="primary", key="btn_auto_buy"):
+            from core.config import DEFAULT_CAPITAL
             added = 0
             existing_set = set(existing_codes)
             seen_codes = set()
             for _, sig in buy_signals.iterrows():
                 code = sig["ts_code"]
-                if code not in existing_set and code not in seen_codes and sig["price_ref"] > 0:
-                    budget_per_stock = 50000
-                    shares = int(budget_per_stock / sig["price_ref"]) // 100 * 100
+                ref_px = float(sig.get("price_ref") or 0.0)
+                if code not in existing_set and code not in seen_codes and ref_px > 0:
+                    strat_k = str(sig.get("strategy") or "").strip()
+                    try:
+                        plan = calc_atr_stops_and_sizing(
+                            code, ref_px, float(sig.get("score") or 0.7),
+                            base_capital=float(DEFAULT_CAPITAL), strategy=strat_k,
+                        )
+                        shares = int(plan.get("shares") or 0)
+                    except TypeError:
+                        plan = calc_atr_stops_and_sizing(
+                            code, ref_px, float(sig.get("score") or 0.7), float(DEFAULT_CAPITAL),
+                        )
+                        shares = int(plan.get("shares") or 0)
+                    if shares < 100:
+                        shares = int(float(DEFAULT_CAPITAL) * 0.2 / ref_px) // 100 * 100
                     if shares >= 100:
-                        add_position(code, sig["price_ref"], shares, sig["trade_date"])
+                        upsert_position_buy(
+                            ts_code=code,
+                            buy_price=ref_px,
+                            shares=shares,
+                            buy_date=str(sig.get("trade_date") or datetime.now().strftime("%Y%m%d")),
+                            note=f"自动跟单:{strat_k}",
+                            signal_price=ref_px,
+                            strategy=strat_k,
+                        )
                         added += 1
                         existing_set.add(code)
                         seen_codes.add(code)
-            st.toast(f"✅ 已成功跟入 {added} 只标的到模拟持仓", icon="📥")
+            st.toast(f"✅ 已按 ATR 风险平价跟入 {added} 只标的并写入账本", icon="📥")
             st.rerun()
     else:
         st.info("无买入信号")
@@ -626,15 +665,33 @@ def _show_auto_trade():
         df_sell = pd.DataFrame(sell_rows)
         chinese_dataframe(df_sell)
 
-        if st.button("📤 一键跟出（将卖出信号从持仓移除）", type="secondary", key="btn_auto_sell"):
+        if st.button("📤 一键跟出（平仓卖出信号持仓并记入账本）", type="secondary", key="btn_auto_sell"):
             removed = 0
-            target_codes = set(sell_signals["ts_code"].tolist())
+            total_pnl = 0.0
+            sell_best = sell_signals.sort_values("score", ascending=False).drop_duplicates(subset=["ts_code"], keep="first")
+            sell_info_map = {str(r["ts_code"]): r for _, r in sell_best.iterrows()}
             current_positions = get_positions()
             for pos in current_positions:
-                if pos["ts_code"] in target_codes:
-                    remove_position(pos["_id"])
+                p_code = pos["ts_code"]
+                if p_code in sell_info_map:
+                    s_row = sell_info_map[p_code]
+                    s_px = float(s_row.get("price_ref") or 0.0)
+                    if s_px <= 0:
+                        d_lat = get_daily(p_code, limit=5)
+                        s_px = float(d_lat.iloc[-1]["close"]) if (d_lat is not None and not d_lat.empty) else float(pos["buy_price"])
+                    res_red = reduce_position(
+                        ts_code=p_code,
+                        sell_shares=int(pos["shares"]),
+                        sell_price=s_px,
+                        sell_date=str(s_row.get("trade_date") or datetime.now().strftime("%Y%m%d")),
+                        strategy=str(s_row.get("strategy") or pos.get("strategy") or ""),
+                        signal_price=s_px,
+                        note=f"自动跟出:{s_row.get('strategy', '')}",
+                        position_id=pos.get("_id"),
+                    )
+                    total_pnl += float(res_red.get("pnl", 0.0))
                     removed += 1
-            st.toast(f"✅ 已移除 {removed} 只持仓", icon="📤")
+            st.toast(f"✅ 已平仓 {removed} 只持仓，累计实现盈亏 ¥{total_pnl:+.2f}", icon="📤")
             st.rerun()
     else:
         st.info("无卖出信号")
@@ -740,6 +797,7 @@ def _show_allocation_and_valuation():
                 "代码": code,
                 "名称": name_map.get(code, ""),
                 "PE(TTM)": round(v["pe_ttm"], 2) if v.get("pe_ttm") is not None else "-",
+                "PE分位%": f"{v['pe_percentile']:.0f}%" if v.get("pe_percentile") is not None else "-",
                 "PB": round(v["pb"], 2) if v.get("pb") is not None else "-",
                 "股息率%": round(v["dividend_yield"], 2) if v.get("dividend_yield") is not None else "-",
                 "总市值(亿)": round(v["market_cap_yi"], 1) if v.get("market_cap_yi") is not None else "-",

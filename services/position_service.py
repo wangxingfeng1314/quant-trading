@@ -43,8 +43,10 @@ def _parse_yyyymmdd(val: str) -> Optional[datetime]:
 
 
 def _resolve_strategy_hint(ts_code: str, strategy_hint: str = "") -> str:
-    if strategy_hint:
-        return str(strategy_hint).strip()
+    raw = str(strategy_hint or "").strip()
+    if raw:
+        parsed = parse_recommended_strategy_key(raw)
+        return parsed or raw
     try:
         wl = get_watchlist()
         if wl is not None and not wl.empty and "recommended_strategy" in wl.columns:

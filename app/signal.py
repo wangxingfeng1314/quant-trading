@@ -507,19 +507,22 @@ def _render_broker_order_sheet(signals: list, scan_date_str: str, stock_map: dic
                     for pos in cur_positions:
                         held_shares_map[pos["ts_code"]] = held_shares_map.get(pos["ts_code"], 0) + int(pos.get("shares", 0) or 0)
 
+                    from services.strategy_recommender import parse_recommended_strategy_key
                     for idx in selected_indices:
                         r = order_rows[idx]
                         code = r["标的代码"]
                         ref_px = sig_ref_map.get(code, float(r["委托价格"]))
+                        raw_strat = str(r.get("来源策略") or "").strip()
+                        strat_key = parse_recommended_strategy_key(raw_strat) or raw_strat
                         if r["操作"] == "买入" and r["委托数量(股)"] > 0:
                             upsert_position_buy(
                                 ts_code=code,
                                 buy_price=float(r["委托价格"]),
                                 shares=int(r["委托数量(股)"]),
                                 buy_date=scan_date_str,
-                                note=f"信号跟单:{r['来源策略']}",
+                                note=f"信号跟单:{raw_strat}",
                                 signal_price=ref_px,
-                                strategy=r["来源策略"],
+                                strategy=strat_key,
                             )
                             bought_cnt += 1
                         elif r["操作"] == "卖出":
@@ -533,9 +536,9 @@ def _render_broker_order_sheet(signals: list, scan_date_str: str, stock_map: dic
                                     sell_shares=sell_qty,
                                     sell_price=float(r["委托价格"]),
                                     sell_date=scan_date_str,
-                                    strategy=r["来源策略"],
+                                    strategy=strat_key,
                                     signal_price=ref_px,
-                                    note=f"信号平仓:{r['来源策略']}",
+                                    note=f"信号平仓:{raw_strat}",
                                 )
                                 total_realized_pnl += float(res.get("pnl", 0.0))
                                 sold_cnt += 1

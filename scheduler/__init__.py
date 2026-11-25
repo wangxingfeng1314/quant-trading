@@ -122,9 +122,12 @@ def scan_and_notify(force: bool = False):
             signals.sort(key=lambda s: s.score, reverse=True)
             logger.info(f"信号扫描完成：共 {len(signals)} 条信号")
 
-            # 推送信号通知
+            # 推送信号通知（定时日报自动跳过已持仓买入，防重复追买）
             if signals:
-                notify_signals(signals)
+                try:
+                    notify_signals(signals, skip_held_buys=True)
+                except TypeError:
+                    notify_signals(signals)
                 logger.info(f"已推送 {len(signals)} 条信号通知")
             else:
                 logger.info("当日经大盘择时/适配策略/防洗盘过滤后无有效交易信号")
