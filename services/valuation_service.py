@@ -287,6 +287,11 @@ def evaluate_valuation_guard(
             "earnings_warning": earnings_warning,
         }
 
+    is_abs_deep_value = (
+        pe is not None and 0 < pe <= 12.0
+        and pb is not None and 0 < pb <= 1.2
+    )
+
     if pe is not None and pe < 0:
         zone = "亏损预警"
         allow_left_buy = False
@@ -294,7 +299,7 @@ def evaluate_valuation_guard(
         badge = "⚠️亏损(负PE)"
         detail = f"PE(TTM)={pe:.1f}<0，基本面亏损，不宜盲目左侧抄底"
     elif (pe is not None and pe > 60.0 and (pe_pct is None or pe_pct >= 50.0)) or (
-        pe_pct is not None and pe_pct >= 85.0
+        pe_pct is not None and pe_pct >= 85.0 and not is_abs_deep_value
     ):
         zone = "估值偏高"
         allow_left_buy = False
@@ -303,9 +308,10 @@ def evaluate_valuation_guard(
         pe_txt = f"PE={pe:.1f}" if pe is not None else ""
         pct_txt = f"3年分位={pe_pct:.0f}%" if pe_pct is not None else ""
         detail = f"{' / '.join(x for x in (pe_txt, pct_txt) if x)}，处于高估值拥挤区间，左侧接盘风险大"
-    elif ((pe is not None and 0 < pe <= 15.0)
-          or (div_y is not None and div_y >= 3.5)
-          or (pe_pct is not None and 0 < pe_pct <= 30.0)):
+    elif (
+        ((pe is not None and 0 < pe <= 15.0) or (div_y is not None and div_y >= 3.5))
+        and (pe_pct is None or pe_pct < 85.0)
+    ) or (pe_pct is not None and 0 < pe_pct <= 30.0):
         zone = "低估高息"
         allow_left_buy = True
         score_adj = 0.03

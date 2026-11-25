@@ -9,14 +9,14 @@ from datetime import datetime, timedelta
 from data.storage import (
     get_instrument_list, get_daily, get_watchlist, get_daily_count,
     get_signals, batch_get_latest, get_index_daily, get_stocks_with_data,
-    get_latest_date, get_index_latest_date,
+    get_latest_date, get_index_latest_date, get_valuation_map,
 )
 from app.st_utils import (
     chinese_dataframe, cached_get_stocks_with_data, cached_check_data_freshness,
     cached_instrument_list, format_strategy_cn, format_direction_cn,
 )
 from data.indicators import apply_indicators
-from core.config import TUSHARE_TOKEN
+from core.config import TUSHARE_TOKEN, TICKFLOW_API_KEY
 
 
 
@@ -117,10 +117,10 @@ def _show_market_overview():
     """大盘概况卡片"""
     st.subheader("📈 大盘概况")
 
-    # 从数据库获取主要指数数据（使用ETF或指数代码的近似数据）
-    # 用000001.SH 上证、399001.SZ 深证、399006.SZ 创业板
+    # 从数据库获取主要指数数据（上证指数、沪深300、深证成指、创业板指）
     index_codes = {
         "000001.SH": "上证指数",
+        "000300.SH": "沪深300",
         "399001.SZ": "深证成指",
         "399006.SZ": "创业板指",
     }
@@ -130,7 +130,7 @@ def _show_market_overview():
         # 优先从数据库读取（已缓存）
         df = get_index_daily(code, limit=2)
         if df.empty or len(df) < 2:
-            # 数据库没有或数据不足，从 AKShare 实时拉取
+            # 数据库没有或数据不足，通过多源级联实时拉取
             df = _fetch_index_realtime(code)
         if not df.empty:
             latest = df.iloc[-1]
@@ -158,50 +158,48 @@ def _show_market_overview():
                     delta_color="inverse",
                 )
         try:
-            from services.signal_service import get_market_regime
-            regime_info = get_market_regime()
+            from services.signal_service import get_dual_market_regime
+            dual = get_dual_market_regime()
+            large = dual.get("large_cap", {})
+            growth = dual.get("growth", {})
             st.caption(
-                f"🧭 **量化市场环境：{regime_info['label']}** ｜ "
-                f"**建议总仓位：≤ {regime_info['max_position_pct']}%** ｜ "
-                f"{regime_info['advice']}"
+                f"🧭 **双指数共振择时：{dual.get('combined_regime', 'RANGE')}** ｜ "
+                f"权重({large.get('label', '-')}, 仓位≤{large.get('max_position_pct', 70)}%) ｜ "
+                f"成长({growth.get('label', '-')}, 仓位≤{growth.get('max_position_pct', 70)}%)"
             )
         except Exception:
-            pass
+            try:
+                from services.signal_service import get_market_regime
+                regime_info = get_market_regime()
+                st.caption(
+                    f"🧭 **量化市场环境：{regime_info['label']}** ｜ "
+                    f"**建议总仓位：≤ {regime_info['max_position_pct']}%** ｜ "
+                    f"{regime_info['advice']}"
+                )
+            except Exception:
+                pass
     else:
         st.info("暂无指数数据，请先运行数据初始化脚本")
 
 
 @st.cache_data(ttl=300)
 def _fetch_index_realtime(index_code: str) -> pd.DataFrame:
-    """从 AKShare 实时获取指数最新行情（缓存 5 分钟）
+    """多源级联实时获取指数最新行情（TickFlow → AKShare → Baostock，缓存 5 分钟）
 
     Args:
-        index_code: '000001.SH'(上证), '399001.SZ'(深证), '399006.SZ'(创业板)
+        index_code: '000001.SH'(上证), '000300.SH'(沪深300), '399001.SZ'(深证), '399006.SZ'(创业板)
 
     Returns:
-        含 close / trade_date 列的 DataFrame（模拟 get_daily 返回格式）
+        含 close / trade_date 列的最近约 30 个交易日 DataFrame
     """
     try:
-        import akshare as ak
-        # AKShare 代码格式: sh000001, sz399001, sz399006
-        parts = index_code.split(".")
-        market = parts[1].lower()
-        symbol = parts[0]
-        ak_code = f"{market}{symbol}"
-
-        df = ak.stock_zh_index_daily(symbol=ak_code)
+        from data.fetcher import fetch_index_daily
+        end_dt = datetime.now().strftime("%Y%m%d")
+        start_dt = (datetime.now() - timedelta(days=60)).strftime("%Y%m%d")
+        df = fetch_index_daily(index_code, start_date=start_dt, end_date=end_dt)
         if df is None or df.empty:
             return pd.DataFrame()
-
-        df = df.rename(columns={
-            "date": "trade_date", "open": "open", "high": "high",
-            "low": "low", "close": "close", "volume": "volume",
-        })
-        df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.strftime("%Y%m%d")
-        df["ts_code"] = index_code
-        # 计算涨跌幅
-        df["pct_chg"] = df["close"].pct_change() * 100
-        return df.sort_values("trade_date").reset_index(drop=True)
+        return df.sort_values("trade_date").tail(30).reset_index(drop=True)
     except Exception:
         return pd.DataFrame()
 
@@ -251,6 +249,7 @@ def _show_system_status():
 
     # 数据源状态检测（轻量级，不做阻塞性外网探测以免拖慢首页渲染）
     import importlib.util
+    ds_tickflow = "🟢 就绪" if (TICKFLOW_API_KEY and TICKFLOW_API_KEY != "your_key_here") else "🟡 未配置"
     ds_akshare = "🟢 就绪" if importlib.util.find_spec("akshare") else "🟡 未安装"
     ds_tushare = "🟡 未配置" if not TUSHARE_TOKEN else "🟢 就绪"
     ds_baostock = "🟢 就绪" if importlib.util.find_spec("baostock") else "🟡 未安装"
@@ -266,20 +265,23 @@ def _show_system_status():
 
     # ---------- 第二行：数据源状态 ----------
     with st.expander("🔌 数据源状态", expanded=True):
-        ds_cols = st.columns(4)
+        ds_cols = st.columns(5)
         with ds_cols[0]:
-            st.markdown(f"**AKShare** {ds_akshare}")
-            st.caption("主力数据源（日线/指数）")
+            st.markdown(f"**TickFlow** {ds_tickflow}")
+            st.caption("主力接口（日线/ETF/指数）")
         with ds_cols[1]:
-            st.markdown(f"**Tushare** {ds_tushare}")
-            st.caption("备用数据源（股票列表/行业）")
+            st.markdown(f"**AKShare** {ds_akshare}")
+            st.caption("备用数据源（ETF/行情快照）")
         with ds_cols[2]:
             st.markdown(f"**Baostock** {ds_baostock}")
-            st.caption("兜底数据源（日线备用）")
+            st.caption("兜底数据源（估值/ETF/日线）")
         with ds_cols[3]:
+            st.markdown(f"**Tushare** {ds_tushare}")
+            st.caption("备用数据源（股票列表/行业）")
+        with ds_cols[4]:
             idx_status = f"🟢 {idx_latest}" if idx_latest else "🟡 未同步"
             st.markdown(f"**大盘指数** {idx_status}")
-            st.caption("上证/深证/创业板")
+            st.caption("上证/沪深300/深证/创业板")
 
     # ---------- 第三行：自选股数据健康度明细 ----------
     if not watchlist.empty:
@@ -359,7 +361,7 @@ def _show_system_status():
                     clear_backtester_cache()
                     st.rerun()
     with col_b:
-        st.markdown("🏷️ 版本: v0.9.0 | 🗄️ `data/quant.db`")
+        st.markdown("🏷️ 版本: v0.10.0 | 🗄️ `data/quant.db`")
     with col_c:
         import json
         report = {
@@ -383,12 +385,28 @@ def _show_system_status():
 
 @st.cache_data(ttl=60)
 def _calc_watchlist_snapshot_rows(watchlist_tuples: tuple, name_tuples: tuple) -> list:
-    """缓存版自选股行情与趋势指标计算（缓存 1 分钟，大幅加速页面切换）"""
+    """缓存版自选股行情与趋势指标计算（批量查询消除 N+1 + 估值分位展示，缓存 1 分钟）"""
     name_map = dict(name_tuples)
+    codes = [tc for tc, _ in watchlist_tuples]
+    df_map = {}
+    if codes:
+        batch_df = batch_get_latest(codes, limit=60)
+        if batch_df is not None and not batch_df.empty:
+            for code, grp in batch_df.groupby("ts_code"):
+                df_map[code] = grp.sort_values("trade_date").reset_index(drop=True)
+    val_map = {}
+    if codes:
+        try:
+            val_map = get_valuation_map(codes) or {}
+        except Exception:
+            val_map = {}
+
     rows = []
     for ts_code, note in watchlist_tuples:
-        df = get_daily(ts_code)
-        if df.empty:
+        df = df_map.get(ts_code)
+        if df is None or df.empty:
+            df = get_daily(ts_code, limit=60)
+        if df is None or df.empty:
             continue
 
         latest = df.iloc[-1]
@@ -408,6 +426,12 @@ def _calc_watchlist_snapshot_rows(watchlist_tuples: tuple, name_tuples: tuple) -
         else:
             trend = "🟡 震荡"
 
+        vinfo = val_map.get(ts_code) or {}
+        pe = vinfo.get("pe_ttm")
+        pct = vinfo.get("pe_percentile")
+        pe_str = f"{float(pe):.1f}" if (pe is not None and pd.notna(pe)) else "-"
+        pct_str = f"{float(pct):.0f}%" if (pct is not None and pd.notna(pct)) else "-"
+
         rows.append({
             "代码": ts_code,
             "名称": name_map.get(ts_code, ts_code),
@@ -416,6 +440,8 @@ def _calc_watchlist_snapshot_rows(watchlist_tuples: tuple, name_tuples: tuple) -
             "趋势": trend,
             "RSI": f"{rsi:.1f}",
             "MA20": f"¥{ma20:.2f}",
+            "PE-TTM": pe_str,
+            "PE分位%": pct_str,
             "备注": note,
         })
     return rows
@@ -484,11 +510,21 @@ def _show_hot_stocks():
     if not stock_df.empty:
         name_map = dict(zip(stock_df["ts_code"], stock_df["name"]))
 
+    codes = watchlist["ts_code"].tolist()
+    df_map = {}
+    if codes:
+        batch_df = batch_get_latest(codes, limit=10)
+        if batch_df is not None and not batch_df.empty:
+            for code, grp in batch_df.groupby("ts_code"):
+                df_map[code] = grp.sort_values("trade_date").reset_index(drop=True)
+
     rows = []
     for _, wl in watchlist.iterrows():
         ts_code = wl["ts_code"]
-        df = get_daily(ts_code)
-        if df.empty:
+        df = df_map.get(ts_code)
+        if df is None or df.empty:
+            df = get_daily(ts_code, limit=10)
+        if df is None or df.empty:
             continue
         latest = df.iloc[-1]
         prev = df.iloc[-2] if len(df) > 1 else latest

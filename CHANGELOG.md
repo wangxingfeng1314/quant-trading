@@ -1,5 +1,28 @@
 # Changelog
 
+## [v0.10.0] - 2026-11-25
+
+### ✨ 精准执行定价、双舱风控默认、估值纠偏与驾驶舱升级
+
+1. **场内 ETF 0.001 元最小变动价位与零过户费 (`engine/commission.py`, `engine/portfolio.py`)**
+   - 新增 `is_etf_code()` 识别沪深场内 ETF/LOF（`51/56/58/15/16` 开头），将 `_exchange_round()`、`apply_slippage()`、`get_price_limits()`、`adjust_price()` 升级为按 `ts_code` 区分精度：ETF 精确至 `0.001` 元（3 位小数，消除 1.xxx ETF 强制 0.01 舍入造成的 ~0.4%~0.8% 虚假往返滑点），个股保持 `0.01` 元。
+   - `calc_cost()` 对场内 ETF 同步免除中登过户费（`transfer_fee = 0.0`）与印花税；`Portfolio.buy()` / `Portfolio.sell()` 透传 `ts_code` 对齐撮合价与涨跌停板约束。
+
+2. **双舱位「核心-卫星」ETF 轮动默认 ATR 风险平价 (`engine/backtester.py`, `app/backtest.py`)**
+   - `run_dual_sleeve_backtest()` 新增 `etf_position_sizing: str = "atr_risk"` 并设为默认，按各 ETF 近期 ATR 波动率自动压缩高波权益 ETF 仓位、提高国债/黄金/红利仓位，显著降低组合最大回撤并提升夏普/卡玛比。
+   - 回测中心双舱面板新增「ETF 轮动仓位模型」切换控件（`ATR 风险平价` / `等权轮动`）。
+
+3. **低估值破净高分位误杀修复 (`services/valuation_service.py`)**
+   - `evaluate_valuation_guard()` 针对绝对深低估破净标的（`0 < PE <= 12` 且 `0 < PB <= 1.2`，如 `601318.SH`）增设基本面保护，避免因 3 年滚动历史低基数造成 `PE分位 >= 85%` 时被机械误判为 `⚠️高估值`，转为准确标注 `✅估值合理` 并保留 `PE分位%` 透明度展示。
+
+4. **首页驾驶舱全面升级与 N+1 查询消除 (`app/dashboard.py`)**
+   - 大盘概况扩展为 **4 张指数卡**（新增沪深300 `000300.SH`），择时横幅升级为 `get_dual_market_regime()` 双指数共振展示，`_fetch_index_realtime()` 接入 `fetch_index_daily()`（TickFlow → AKShare → Baostock 多源级联）。
+   - 数据源状态面板新增 **TickFlow** 通道状态检查；自选股快照 `_calc_watchlist_snapshot_rows()` 与排行 `_show_hot_stocks()` 改用 `batch_get_latest()` 单次批量查询消除 `$O(N)$` N+1 SQL 往返，自选股快照新增 **PE-TTM** 与 **PE分位%** 展示列。
+
+5. **服务层与自动命令行现代重构 (`services/backtest_service.py`, `scripts/run_auto_strategy.py`)**
+   - `BacktestService.run_backtest()` 支持透传 `backtest_options` 与全量引擎参数，新增 `BacktestService.run_dual_sleeve()` 双舱组合服务接口。
+   - `scripts/run_auto_strategy.py` 淘汰旧版硬编码截止日期与固定止损，升级为动态截止日 + `run_dual_sleeve_backtest` 双舱回测与策略路由信号扫描。
+
 ## [v0.9.0] - 2026-11-25
 
 ### ✨ 核心修复、双舱位组合与精准归因升级

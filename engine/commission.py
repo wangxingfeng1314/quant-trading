@@ -8,15 +8,23 @@ from core.config import (
 )
 
 
-def _exchange_round(value) -> float:
-    """按交易所规则把价格舍入到分（ROUND_HALF_UP）。
+def is_etf_code(ts_code: str) -> bool:
+    """判断是否为场内 ETF/LOF 基金（沪市 51/56/58，深市 15/16）"""
+    code = str(ts_code or "").strip().upper()
+    return code.startswith(("51", "56", "58", "15", "16"))
+
+
+def _exchange_round(value, decimals: int = 2) -> float:
+    """按交易所规则把价格舍入到最小变动价位（ROUND_HALF_UP）。
 
     Python 内置 ``round`` 是银行家舍入（ROUND_HALF_EVEN），在 ``x.xx5`` 这类
     恰好半分的价位上会向下/向偶数取整，与交易所公布的涨跌停价差 1 分。
     例如 prev_close=2.05：Python 给 1.84/2.25，交易所应为 1.85/2.26。
+    场内 ETF 最小变动价位为 0.001 元（decimals=3），个股为 0.01 元（decimals=2）。
     用 ``Decimal(str(...))`` 避免二进制浮点误差干扰舍入方向。
     """
-    return float(Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+    q = Decimal("0.001") if int(decimals) == 3 else Decimal("0.01")
+    return float(Decimal(str(value)).quantize(q, rounding=ROUND_HALF_UP))
 
 
 def calc_cost(price: float, volume: int, direction: str,
@@ -31,7 +39,7 @@ def calc_cost(price: float, volume: int, direction: str,
         direction: 'BUY' 或 'SELL'
         commission_rate: 佣金费率，默认从配置读取
         stamp_tax_rate: 印花税费率，默认从配置读取
-        ts_code: 标的代码（如 510300.SH，场内ETF免征印花税）
+        ts_code: 标的代码（如 510300.SH，场内ETF免征印花税与过户费）
 
     Returns:
         {'commission': 佣金, 'tax': 印花税, 'transfer_fee': 过户费, 'total': 总费用}
@@ -45,8 +53,10 @@ def calc_cost(price: float, volume: int, direction: str,
     if amount <= 0 or volume <= 0:
         return {"commission": 0.0, "tax": 0.0, "transfer_fee": 0.0, "total": 0.0}
 
+    code_u = str(ts_code or "").strip().upper()
+    is_etf = is_etf_code(code_u)
     # 判断是否为场内基金/ETF/可转债（免征印花税）
-    is_etf_or_bond = ts_code.startswith(("51", "56", "58", "15", "16", "11", "12"))
+    is_etf_or_bond = is_etf or code_u.startswith(("11", "12"))
 
     # 佣金：双向收取，最低5元
     commission = max(amount * commission_rate, MIN_COMMISSION)
@@ -57,8 +67,8 @@ def calc_cost(price: float, volume: int, direction: str,
     else:
         tax = 0.0
 
-    # 过户费：双向收取
-    transfer_fee = amount * TRANSFER_FEE_RATE
+    # 过户费：中登按沪市/深市股票双向收取，场内 ETF/基金免收过户费
+    transfer_fee = 0.0 if is_etf else amount * TRANSFER_FEE_RATE
 
     total = commission + tax + transfer_fee
 
@@ -72,7 +82,7 @@ def calc_cost(price: float, volume: int, direction: str,
 
 def apply_slippage(price: float, direction: str, slippage_rate: float = None,
                    volume: int = 0, bar_volume: float = 0,
-                   volatility: float = 0.0) -> float:
+                   volatility: float = 0.0, ts_code: str = "") -> float:
     """应用滑点：买入按更高价成交，卖出按更低价成交
 
     Args:
@@ -82,6 +92,7 @@ def apply_slippage(price: float, direction: str, slippage_rate: float = None,
         volume: 本单股数（用于计算市场冲击）
         bar_volume: 参考成交量（信号日成交量/ADV，禁止用执行日的未来数据）
         volatility: 日波动率（小数，如 0.02 表示 2%）
+        ts_code: 标的代码（场内 ETF 使用 0.001 元最小变动价位）
 
     额外冲击成本（默认关闭，SLIPPAGE_IMPACT_K=0 时与旧行为完全一致）：
         impact = k * sigma * sqrt(volume / bar_volume)，并受 MAX_IMPACT_PCT 封顶。
@@ -93,12 +104,13 @@ def apply_slippage(price: float, direction: str, slippage_rate: float = None,
         impact = SLIPPAGE_IMPACT_K * sigma * math.sqrt(participation)
         rate += min(impact, max(0.0, MAX_IMPACT_PCT))
 
+    dec = 3 if is_etf_code(ts_code) else 2
     if direction == "BUY":
         # 买入：实际成交价 = 触发价 * (1 + 滑点率)
-        return _exchange_round(price * (1 + rate))
+        return _exchange_round(price * (1 + rate), decimals=dec)
     else:
         # 卖出：实际成交价 = 触发价 * (1 - 滑点率)
-        return _exchange_round(price * (1 - rate))
+        return _exchange_round(price * (1 - rate), decimals=dec)
 
 
 def cap_order_volume(volume: int, bar_volume, lot_size: int = 100,
@@ -122,7 +134,8 @@ def cap_order_volume(volume: int, bar_volume, lot_size: int = 100,
 
 
 def get_price_limits(prev_close: float, is_st: bool = False,
-                     is_cy: bool = False, is_bj: bool = False) -> tuple:
+                     is_cy: bool = False, is_bj: bool = False,
+                     ts_code: str = "") -> tuple:
     """获取A股当日跌停价与涨停价 (lower, upper)，按交易所 ROUND_HALF_UP 舍入。"""
     if prev_close <= 0:
         return (0.0, float("inf"))
@@ -137,7 +150,7 @@ def get_price_limits(prev_close: float, is_st: bool = False,
     else:
         up_factor, lo_factor = Decimal("1.10"), Decimal("0.90")
 
-    q = Decimal("0.01")
+    q = Decimal("0.001") if is_etf_code(ts_code) else Decimal("0.01")
     upper = float((p * up_factor).quantize(q, rounding=ROUND_HALF_UP))
     lower = float((p * lo_factor).quantize(q, rounding=ROUND_HALF_UP))
     return (lower, upper)
@@ -145,14 +158,14 @@ def get_price_limits(prev_close: float, is_st: bool = False,
 
 def is_limit_up_locked(price: float, prev_close: float, is_st: bool = False,
                        is_cy: bool = False, is_bj: bool = False,
-                       low_price: float = None) -> bool:
+                       low_price: float = None, ts_code: str = "") -> bool:
     """判定是否涨停封死（无法买入）
 
     当拟成交价格已达到或超过涨停价（如一字涨停开盘、或收盘涨停封死），买单无法排队成交。
     """
     if prev_close <= 0:
         return False
-    _, upper = get_price_limits(prev_close, is_st=is_st, is_cy=is_cy, is_bj=is_bj)
+    _, upper = get_price_limits(prev_close, is_st=is_st, is_cy=is_cy, is_bj=is_bj, ts_code=ts_code)
     if low_price is not None and low_price > 0:
         return price >= upper - 1e-4 and low_price >= upper - 1e-4
     return price >= upper - 1e-4
@@ -160,21 +173,22 @@ def is_limit_up_locked(price: float, prev_close: float, is_st: bool = False,
 
 def is_limit_down_locked(price: float, prev_close: float, is_st: bool = False,
                          is_cy: bool = False, is_bj: bool = False,
-                         high_price: float = None) -> bool:
+                         high_price: float = None, ts_code: str = "") -> bool:
     """判定是否跌停封死（无法卖出）
 
     当拟成交价格已达到或低于跌停价（如一字跌停开盘、或收盘跌停封死），卖单无法成交。
     """
     if prev_close <= 0:
         return False
-    lower, _ = get_price_limits(prev_close, is_st=is_st, is_cy=is_cy, is_bj=is_bj)
+    lower, _ = get_price_limits(prev_close, is_st=is_st, is_cy=is_cy, is_bj=is_bj, ts_code=ts_code)
     if high_price is not None and high_price > 0:
         return price <= lower + 1e-4 and high_price <= lower + 1e-4
     return price <= lower + 1e-4
 
 
 def adjust_price(price: float, prev_close: float, is_st: bool = False,
-                 is_cy: bool = False, is_bj: bool = False) -> float:
+                 is_cy: bool = False, is_bj: bool = False,
+                 ts_code: str = "") -> float:
     """价格涨跌停限制
 
     Args:
@@ -183,6 +197,7 @@ def adjust_price(price: float, prev_close: float, is_st: bool = False,
         is_st: 是否ST股 (5%)
         is_cy: 是否创业板/科创板（20%涨跌停）
         is_bj: 是否北交所（30%涨跌停）
+        ts_code: 标的代码（场内 ETF 使用 0.001 元最小变动价位）
 
     Returns:
         限制后的价格
@@ -190,8 +205,9 @@ def adjust_price(price: float, prev_close: float, is_st: bool = False,
     if prev_close <= 0:
         return price
 
-    lower, upper = get_price_limits(prev_close, is_st=is_st, is_cy=is_cy, is_bj=is_bj)
-    return _exchange_round(max(lower, min(upper, price)))
+    dec = 3 if is_etf_code(ts_code) else 2
+    lower, upper = get_price_limits(prev_close, is_st=is_st, is_cy=is_cy, is_bj=is_bj, ts_code=ts_code)
+    return _exchange_round(max(lower, min(upper, price)), decimals=dec)
 
 
 def round_lot(volume: int, direction: str) -> int:

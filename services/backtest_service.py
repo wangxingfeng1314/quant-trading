@@ -2,7 +2,10 @@
 import logging
 from typing import Optional, List
 
-from engine.backtester import Backtester, grid_search, grid_search_parallel
+from engine.backtester import (
+    Backtester, grid_search, grid_search_parallel,
+    BACKTEST_OPTION_KEYS, run_dual_sleeve_backtest,
+)
 from data.storage import (
     get_backtest_results, get_backtest_trades, get_backtest_result_by_id,
     save_backtest_result, save_backtest_trades,
@@ -34,7 +37,9 @@ class BacktestService:
                      risk_manager = None,
                      max_active_positions: int = 0,
                      market_regime_filter: bool = False,
-                     market_index: str = "000300.SH"):
+                     market_index: str = "000300.SH",
+                     backtest_options: dict = None,
+                     **bt_kwargs):
         """执行单次回测
 
         Args:
@@ -50,6 +55,8 @@ class BacktestService:
             max_active_positions: 最大持仓只数控制
             market_regime_filter: 是否开启大盘牛熊择时网关
             market_index: 大盘基准指数代码，默认沪深300 '000300.SH'
+            backtest_options: 由 ``build_backtest_options()`` 打包的全量引擎规则字典
+            **bt_kwargs: 其他透传给 Backtester 的引擎选项（如 position_sizing、dual_index_regime 等）
 
         Returns:
             BacktestResult 对象
@@ -72,6 +79,26 @@ class BacktestService:
 
         strategy_cls = STRATEGY_REGISTRY[strategy_name]
 
+        extra_opts = {}
+        eff_exec_mode = execution_mode
+        if isinstance(backtest_options, dict):
+            for k, v in backtest_options.items():
+                if k in BACKTEST_OPTION_KEYS:
+                    extra_opts[k] = v
+            if "execution_mode" in backtest_options and eff_exec_mode == "current_close":
+                eff_exec_mode = backtest_options["execution_mode"]
+        for k, v in bt_kwargs.items():
+            if k in BACKTEST_OPTION_KEYS or k == "preloaded_data":
+                extra_opts[k] = v
+
+        # 显式形参非默认时覆盖 options，同时避免重复键传入 Backtester
+        if max_active_positions != 0 or "max_active_positions" not in extra_opts:
+            extra_opts["max_active_positions"] = max_active_positions
+        if market_regime_filter or "market_regime_filter" not in extra_opts:
+            extra_opts["market_regime_filter"] = market_regime_filter
+        if market_index != "000300.SH" or "market_index" not in extra_opts:
+            extra_opts["market_index"] = market_index
+
         bt = Backtester(
             strategy_cls=strategy_cls,
             params=params,
@@ -79,13 +106,58 @@ class BacktestService:
             start_date=start_date,
             end_date=end_date,
             initial_capital=capital,
-            execution_mode=execution_mode,
+            execution_mode=eff_exec_mode,
             risk_manager=risk_manager,
-            max_active_positions=max_active_positions,
-            market_regime_filter=market_regime_filter,
-            market_index=market_index,
+            **extra_opts,
         )
         return bt.run(save=save)
+
+    @staticmethod
+    def run_dual_sleeve(stock_universe: list, etf_universe: list,
+                        start_date: str, end_date: str,
+                        stock_weight: float = 0.60,
+                        rebalance_months: int = 12,
+                        train_lookback_years: int = 3,
+                        etf_rebalance_days: int = 10,
+                        etf_top_k: int = 2,
+                        etf_position_sizing: str = "atr_risk",
+                        capital: float = None,
+                        progress_callback=None,
+                        backtest_options: dict = None,
+                        **bt_kwargs) -> dict:
+        """执行双舱位核心-卫星组合回测（个股零前视滚动路由 + 多资产 ETF 动量轮动）"""
+        validate_date_range(start_date, end_date)
+        cap = validate_capital(capital or DEFAULT_CAPITAL)
+
+        clean_stocks = [str(c).strip() for c in (stock_universe or []) if str(c).strip()]
+        clean_etfs = [str(c).strip() for c in (etf_universe or []) if str(c).strip()]
+        if not clean_stocks and not clean_etfs:
+            raise ValidationError("股票列表和 ETF 列表不能同时为空", field="stock_universe")
+        for code in clean_stocks + clean_etfs:
+            validate_stock_code(code)
+
+        merged_kwargs = {}
+        if isinstance(backtest_options, dict):
+            for k, v in backtest_options.items():
+                if k in BACKTEST_OPTION_KEYS or k == "execution_mode":
+                    merged_kwargs[k] = v
+        merged_kwargs.update(bt_kwargs)
+
+        return run_dual_sleeve_backtest(
+            stock_universe=clean_stocks,
+            etf_universe=clean_etfs,
+            start_date=start_date,
+            end_date=end_date,
+            stock_weight=float(stock_weight),
+            rebalance_months=int(rebalance_months),
+            train_lookback_years=int(train_lookback_years),
+            etf_rebalance_days=int(etf_rebalance_days),
+            etf_top_k=int(etf_top_k),
+            etf_position_sizing=etf_position_sizing,
+            initial_capital=cap,
+            progress_callback=progress_callback,
+            **merged_kwargs,
+        )
 
     @staticmethod
     def run_grid_search(strategy_name: str, param_grid: dict, universe: list,

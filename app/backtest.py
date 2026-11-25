@@ -299,7 +299,7 @@ def _show_run_backtest():
                             key="bt_roll_years",
                         )
                     if wl_eval_mode.startswith("🌐"):
-                        dc1, dc2 = st.columns(2)
+                        dc1, dc2, dc3 = st.columns(3)
                         with dc1:
                             stock_weight_pct = st.slider(
                                 "个股滚动舱位占比 (%)", 30, 80, 60, 5,
@@ -311,6 +311,15 @@ def _show_run_backtest():
                                 "ETF 轮动调仓频率", [10, 5, 20], index=0,
                                 format_func=lambda d: f"每 {d} 个交易日调仓",
                                 key="bt_dual_etf_rb",
+                            )
+                        with dc3:
+                            etf_sizing_opt = st.selectbox(
+                                "ETF 轮动仓位模型",
+                                ["atr_risk", "score"],
+                                index=0,
+                                format_func=lambda m: "ATR 风险平价 (推荐·降回撤)" if m == "atr_risk" else "等权轮动 (score)",
+                                key="bt_dual_etf_sizing",
+                                help="ATR 风险平价会按 ETF 近期波动率自动降低高波权益 ETF 仓位、提高国债/黄金/红利仓位，显著压缩组合回撤",
                             )
                 st.caption(f"📊 当前自选池共 {len(universe)} 只标的")
         else:
@@ -688,6 +697,7 @@ def _show_run_backtest():
                     train_lookback_years=int(rolling_train_years if "rolling_train_years" in locals() else 3),
                     etf_rebalance_days=int(etf_rb_days if "etf_rb_days" in locals() else 10),
                     etf_top_k=2,
+                    etf_position_sizing=str(etf_sizing_opt if "etf_sizing_opt" in locals() else "atr_risk"),
                     initial_capital=float(capital),
                     progress_callback=_on_ds,
                     execution_mode=exec_mode,

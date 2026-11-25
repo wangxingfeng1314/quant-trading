@@ -107,12 +107,13 @@ class Portfolio:
         # 涨停价成交，从而绕过一字板拒单。
         if slippage:
             price = apply_slippage(price, "BUY", volume=volume,
-                                   bar_volume=bar_volume, volatility=volatility)
+                                   bar_volume=bar_volume, volatility=volatility,
+                                   ts_code=ts_code)
         if prev_close > 0:
-            price = adjust_price(price, prev_close, is_st, is_cy, is_bj)
+            price = adjust_price(price, prev_close, is_st, is_cy, is_bj, ts_code=ts_code)
             if is_limit_up_locked(
                     price, prev_close, is_st=is_st, is_cy=is_cy, is_bj=is_bj,
-                    low_price=bar_low):
+                    low_price=bar_low, ts_code=ts_code):
                 return None
 
         # 取整手
@@ -195,12 +196,13 @@ class Portfolio:
         # 先算出最终成交价，再判封板（与 buy 对称，堵住「滑点后裁到跌停价」的绕过）
         if slippage:
             price = apply_slippage(price, "SELL", volume=volume,
-                                   bar_volume=bar_volume, volatility=volatility)
+                                   bar_volume=bar_volume, volatility=volatility,
+                                   ts_code=ts_code)
         if prev_close > 0:
-            price = adjust_price(price, prev_close, is_st, is_cy, is_bj)
+            price = adjust_price(price, prev_close, is_st, is_cy, is_bj, ts_code=ts_code)
             if is_limit_down_locked(
                     price, prev_close, is_st=is_st, is_cy=is_cy, is_bj=is_bj,
-                    high_price=bar_high):
+                    high_price=bar_high, ts_code=ts_code):
                 return None
 
         # 不能卖出超过可用持仓

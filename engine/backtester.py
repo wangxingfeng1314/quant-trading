@@ -1586,6 +1586,7 @@ def run_dual_sleeve_backtest(
     etf_lookback: int = 20,
     etf_rebalance_days: int = 10,
     etf_top_k: int = 2,
+    etf_position_sizing: str = "atr_risk",
     initial_capital: float = 100000.0,
     progress_callback: Callable = None,
     **bt_kwargs,
@@ -1627,6 +1628,7 @@ def run_dual_sleeve_backtest(
     exec_mode = bt_kwargs.get("execution_mode", "next_open")
     cash_yield = float(bt_kwargs.get("cash_yield_annual", 0.0) or 0.0)
     etf_preloaded = bt_kwargs.get("etf_preloaded_data")
+    etf_sz = "atr_risk" if str(etf_position_sizing or "atr_risk").strip() == "atr_risk" else "score"
     if clean_etfs:
         bt_etf = Backtester(
             strategy_cls=MomentumRotationStrategy,
@@ -1643,7 +1645,7 @@ def run_dual_sleeve_backtest(
             execution_mode=exec_mode,
             risk_manager=None,
             max_active_positions=int(etf_top_k),
-            position_sizing="score",
+            position_sizing=etf_sz,
             market_regime_filter=False,
             preloaded_data=etf_preloaded,
             cash_yield_annual=cash_yield,
@@ -1711,6 +1713,7 @@ def run_dual_sleeve_backtest(
             "train_lookback_years": int(train_lookback_years),
             "etf_rebalance_days": int(etf_rebalance_days),
             "etf_top_k": int(etf_top_k),
+            "etf_position_sizing": etf_sz,
         }, ensure_ascii=False),
         start_date=start_s,
         end_date=end_s,
