@@ -438,6 +438,7 @@ _STRATEGY_CN_MAP = {
     "bollinger_reversal": "布林反转",
     "ma_cross": "双均线",
     "signal_combo": "多因子共振",
+    "momentum_rotation": "动量轮动",
 }
 
 
@@ -614,84 +615,94 @@ def notify_backtest_result(result):
 
 
 def notify_position_summary() -> bool:
-    """推送持仓盈亏日报
+    """推送持仓盈亏日报与实盘风控预警（ATR止损 / 移动止盈 / 保本平仓 / 时间止损）
 
-    计算当前所有模拟持仓的浮动盈亏，生成日报推送。
-    数据来源：storage.get_positions() + 最新收盘价。
+    计算当前所有模拟持仓的浮动盈亏与风控处置建议，生成日报推送。
+    数据来源：services.position_service.build_position_risk_report()。
 
     返回:
         True=已推送, False=跳过（无持仓或推送失败）
     """
     try:
-        from data.storage import get_positions, get_daily, get_instrument_name
+        from data.storage import get_positions, get_daily, get_instrument_name, get_signals
+        from services.position_service import build_position_risk_report
 
         positions = get_positions()
         if not positions:
             logger.info("持仓为空，跳过盈亏推送")
             return False
 
+        report = build_position_risk_report(
+            positions=positions,
+            get_daily_fn=get_daily,
+            get_signals_fn=get_signals,
+            get_instrument_name_fn=get_instrument_name,
+        )
+
         today = datetime.now().strftime("%Y-%m-%d")
-        total_cost = 0.0
-        total_market = 0.0
+        total_cost = report["total_cost"]
+        total_market = report["total_market"]
+        total_pnl = report["total_pnl"]
+        total_pnl_pct = report["total_pnl_pct"]
+        urgent_alerts = report["urgent_alerts"]
+        profit_alerts = report["profit_alerts"]
+
         rows = []
-
-        for pos in positions:
-            ts_code = pos["ts_code"]
-            buy_price = pos["buy_price"]
-            shares = pos["shares"]
-            cost = buy_price * shares
-
-            # 取最新收盘价
-            df = get_daily(ts_code, limit=1)
-            if not df.empty:
-                current_price = df.iloc[-1]["close"]
-            else:
-                current_price = buy_price  # 无数据则用成本价
-
-            market_value = current_price * shares
-            pnl = market_value - cost
-            pnl_pct = (pnl / cost * 100) if cost > 0 else 0.0
-
-            total_cost += cost
-            total_market += market_value
-
+        for item in report["items"]:
+            ts_code = item["ts_code"]
+            name = item["name"]
+            buy_price = item["buy_price"]
+            pnl = item["pnl"]
+            pnl_pct = item["pnl_pct"]
+            diag = item["diag"]
+            current_price = diag["current_price"]
             icon = "🟢" if pnl >= 0 else "🔴"
-            name = get_instrument_name(ts_code).replace("*", "\\*")
-            note_str = f" · {str(pos.get('note')).strip()}" if pos.get("note") else ""
+            note_str = f" · {item['note']}" if item.get("note") else ""
+            sl_px = diag["stop_loss_price"]
+            max_g = diag["max_gain_pct"]
+            trail_px = diag.get("trailing_stop_price")
+            trail_txt = f" | 移动止盈¥{trail_px:.2f}" if trail_px is not None else ""
             rows.append(
                 f"{icon} **{name}** ({ts_code}{note_str})  "
                 f"成本¥{buy_price:.2f}→现¥{current_price:.2f}  "
-                f"**{pnl:+.0f}元 ({pnl_pct:+.1f}%)**"
+                f"**{pnl:+.0f}元 ({pnl_pct:+.1f}%)**  "
+                f"*(最高{max_g:+.1f}% | 止损¥{sl_px:.2f}{trail_txt} | {diag['action']})*"
             )
 
-        total_pnl = total_market - total_cost
-        total_pnl_pct = (total_pnl / total_cost * 100) if total_cost > 0 else 0.0
         total_icon = "🟢" if total_pnl >= 0 else "🔴"
-
         total_pnl_sign = "+" if total_pnl > 0 else "-" if total_pnl < 0 else ""
-        
-        title = f"📊 持仓日报 - {today}"
-        content = f"""## 📊 持仓日报
+
+        alert_block = ""
+        if urgent_alerts:
+            alert_block += "### 🚨 持仓风控预警（需立即关注）\n" + "\n".join(f"- {a}" for a in urgent_alerts) + "\n\n"
+        if profit_alerts:
+            alert_block += "### 🎯 分批止盈提示\n" + "\n".join(f"- {a}" for a in profit_alerts) + "\n\n"
+
+        alert_prefix = f"🚨 持仓风控预警({len(urgent_alerts)}项) · " if urgent_alerts else ""
+        title = f"{alert_prefix}📊 持仓日报 - {today}"
+        content = f"""## 📊 持仓风控日报
 **日期**: {today}
 
-**持仓汇总**
+{alert_block}**持仓汇总**
 | 指标 | 数值 |
 |:-----|:------|
-| 持仓数 | {len(positions)} 只 |
+| 持仓数 | {len(positions)} 只 (触发预警 {len(urgent_alerts)} 只) |
 | 总成本 | ¥{total_cost:,.0f} |
 | 总市值 | ¥{total_market:,.0f} |
 | 总盈亏 | {total_icon} **{total_pnl_sign}¥{abs(total_pnl):,.0f} ({total_pnl_pct:+.1f}%)** |
 
-**逐只明细**
+**逐只明细与风控指令**
 {chr(10).join(rows)}
 
 ---
-*数据来源：A股量化交易系统 · 自动推送*
+*数据来源：A股量化交易系统 · 自动风控闭环推送*
 """
         send_notification(title, content)
-        logger.info(f"持仓日报推送完成: 共 {len(positions)} 只持仓, "
-                     f"总盈亏 {total_pnl:+.0f}元")
+        logger.info(
+            f"持仓日报推送完成: 共 {len(positions)} 只持仓, "
+            f"总盈亏 {total_pnl:+.0f}元, 风控预警 {len(urgent_alerts)} 项"
+        )
         return True
     except Exception as e:
-        logger.error(f"持仓日报推送失败: {type(e).__name__}")
+        logger.error(f"持仓日报推送失败: {type(e).__name__}: {e}")
         return False

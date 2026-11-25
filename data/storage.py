@@ -370,6 +370,11 @@ _MIGRATIONS = (
          ("watchlist", "group_name", "TEXT DEFAULT ''")], []),
     (5, [], ["CREATE TABLE IF NOT EXISTS notify_log ("
              "job_key TEXT PRIMARY KEY, created_at TEXT)"]),
+    (6, [], ["CREATE TABLE IF NOT EXISTS stock_valuation ("
+             "ts_code TEXT PRIMARY KEY, pe_ttm REAL, pb REAL, "
+             "dividend_yield REAL, roe REAL, market_cap_yi REAL, "
+             "pe_percentile REAL, next_report_date TEXT DEFAULT '', "
+             "updated_at TEXT)"]),
 )
 
 
@@ -574,6 +579,19 @@ def init_db():
             CREATE TABLE IF NOT EXISTS notify_log (
                 job_key     TEXT PRIMARY KEY,      -- 如 'signals:20261112'
                 created_at  TEXT
+            );
+
+            -- 标的估值与基本面快照表（PE/PB/股息率/财报窗口守卫）
+            CREATE TABLE IF NOT EXISTS stock_valuation (
+                ts_code          TEXT PRIMARY KEY, -- 标的代码
+                pe_ttm           REAL,             -- 滚动市盈率 PE(TTM)
+                pb               REAL,             -- 市净率 PB
+                dividend_yield   REAL,             -- 股息率(%)
+                roe              REAL,             -- ROE(%)
+                market_cap_yi    REAL,             -- 总市值(亿元)
+                pe_percentile    REAL,             -- PE历史分位(0~100)
+                next_report_date TEXT DEFAULT '',  -- 下次财报日期 YYYYMMDD
+                updated_at       TEXT              -- 更新时间
             );
         """)
 
@@ -1666,3 +1684,72 @@ def clear_positions():
     """清空所有模拟持仓"""
     with get_conn() as conn:
         conn.execute("DELETE FROM position")
+
+
+# ============================================================
+# 标的估值快照 (stock_valuation) 表操作
+# ============================================================
+
+def save_valuation_batch(rows: list[dict]) -> int:
+    """批量保存或更新标的估值快照数据（PE/PB/股息率等）。"""
+    if not rows:
+        return 0
+    now = datetime.now().isoformat()
+    payload = []
+    for r in rows:
+        code = str(r.get("ts_code", "")).strip()
+        if not code:
+            continue
+        payload.append((
+            code,
+            r.get("pe_ttm"),
+            r.get("pb"),
+            r.get("dividend_yield"),
+            r.get("roe"),
+            r.get("market_cap_yi"),
+            r.get("pe_percentile"),
+            str(r.get("next_report_date") or "").strip(),
+            str(r.get("updated_at") or now),
+        ))
+    if not payload:
+        return 0
+    sql = (
+        "INSERT OR REPLACE INTO stock_valuation "
+        "(ts_code, pe_ttm, pb, dividend_yield, roe, market_cap_yi, "
+        "pe_percentile, next_report_date, updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?)"
+    )
+    with get_conn() as conn:
+        conn.executemany(sql, payload)
+    return len(payload)
+
+
+def get_valuation_map(ts_codes: list[str] = None) -> dict:
+    """读取缓存的标的估值字典 {ts_code: {...}}；表不存在时安全返回空字典。"""
+    cols = [
+        "ts_code", "pe_ttm", "pb", "dividend_yield", "roe",
+        "market_cap_yi", "pe_percentile", "next_report_date", "updated_at",
+    ]
+    result = {}
+    try:
+        with get_conn() as conn:
+            col_sql = ", ".join(cols)
+            if ts_codes:
+                clean_codes = [str(c).strip() for c in ts_codes if str(c).strip()]
+                for i in range(0, len(clean_codes), 500):
+                    chunk = clean_codes[i:i + 500]
+                    ph = ",".join("?" * len(chunk))
+                    rows = conn.execute(
+                        f"SELECT {col_sql} FROM stock_valuation WHERE ts_code IN ({ph})",
+                        chunk,
+                    ).fetchall()
+                    for row in rows:
+                        result[row[0]] = dict(zip(cols, row))
+            else:
+                rows = conn.execute(f"SELECT {col_sql} FROM stock_valuation").fetchall()
+                for row in rows:
+                    result[row[0]] = dict(zip(cols, row))
+    except sqlite3.Error as e:
+        logger.debug(f"读取 stock_valuation 跳过: {e}")
+        return {}
+    return result

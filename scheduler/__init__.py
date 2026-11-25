@@ -95,14 +95,14 @@ def scan_and_notify(force: bool = False):
     except Exception as e:
         logger.error(f"自选股信号扫描/推送发生异常: {e}", exc_info=True)
 
-    # ---------- 2. 推送持仓盈亏日报 ----------
+    # ---------- 2. 推送持仓盈亏与风控预警日报 ----------
     pos_ok = False
     try:
         pushed = notify_position_summary()
         if pushed:
-            logger.info("持仓盈亏日报已推送")
+            logger.info("持仓风控日报已推送（含ATR止损/移动止盈/保本预警检查）")
         else:
-            logger.info("本次未推送持仓日报（无持仓或推送失败）")
+            logger.info("本次未推送持仓日报（当前模拟持仓为空或推送失败）")
         pos_ok = True
     except Exception as e:
         logger.error(f"持仓盈亏日报推送发生异常: {e}", exc_info=True)

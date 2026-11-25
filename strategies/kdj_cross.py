@@ -16,6 +16,7 @@ class KDJCrossStrategy(BaseStrategy):
     name = "kdj_cross"
     description = "KDJ金叉死叉策略（低位金叉买、高位死叉卖）"
     style = "短线"
+    allow_bear_buy = True
     param_schema = {
         "k_period": {"default": 3, "desc": "K线平滑周期"},
         "d_period": {"default": 3, "desc": "D线平滑周期"},

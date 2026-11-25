@@ -203,6 +203,7 @@ STRATEGY_CHINESE_NAMES = {
     "multi_factor": "多因子综合评分",
     "signal_combo": "双策略组合验证",
     "high_dividend_value": "高股息价值红利",
+    "momentum_rotation": "多资产动量轮动",
     "arbitrated_net": "多空博弈净额",
 }
 

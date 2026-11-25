@@ -1,5 +1,24 @@
 # Changelog
 
+## [v0.5.0] - 2026-11-25
+
+### 🚀 全栈量化策略、自适应风控与实盘闭环全面改造
+
+针对近 4 年全量交易解构暴露出的「实盘缺移动止盈/保本闭环」「单股选策 7 倍仓位稀释与强制适配亏损股」「布林反转窄止损负期望」「大盘择时误杀超卖策略」「高波与低波标的混用固定风控」5 大结构性亏损根因，实施全链路 P0~P2 深度重构：
+
+- **风控与回测引擎升级 (`engine/risk_manager.py`, `engine/backtester.py`)**:
+  - `RiskManager` 新增 ATR 自适应止损 (`use_atr_stop` / `atr_stop_mult`)、ATR 自适应移动止盈 (`atr_trailing_mult`) 与分批止盈 (`partial_tp_pct` / `partial_tp_ratio`)，新增 `RiskManager.for_strategy()` 按策略风格生成专属默认风控配置；`clone_risk_manager()` 同步完整复制新字段。
+  - `Backtester` 升级为策略感知大盘择时（显式声明 `allow_bear_buy=True` 的反转与轮动策略不被熊市硬拦截误杀），主循环传入实时 `atr_pct` 并支持 `sell_ratio` 分批减仓而不误触发跌停顺延。
+- **既有策略修复与新增多资产动量轮动 (`strategies/`)**:
+  - `BollingerReversalStrategy` 升级为阳线企稳买入 (`RSI<42` + 收盘阳线防接飞刀) 与触上轨遇阻回落止盈（放量突破允许续持），4 年回测从 `-14.85%`（回撤 `23.5%`）反转为 `+10.66%`（回撤 `9.3%`）。
+  - `SignalComboStrategy` 调高默认共振门槛 (`buy_threshold=3.0`, `sell_threshold=-2.5`, `vol_ratio=1.5`)，压低高频震荡手续费磨损与噪音单。
+  - 新增横截面策略 [strategies/momentum_rotation.py](strategies/momentum_rotation.py) (`momentum_rotation`) 与 `ROTATION_ETF_PRESETS`（7 只低相关宽基/红利/黄金/纳指/国债 ETF），按风险调整动量排名持强弃弱，全体走弱自动空仓防御；`engine/scanner.py` 同步支持横截面一体化扫描。
+- **修复选策偏差、OOS 熔断与实盘持仓风控闭环 (`services/strategy_recommender.py`, `services/position_service.py`, `notifier/push.py`)**:
+  - 修复 `evaluate_stock_strategy()` 单股未传 `max_active_positions=1` 导致的收益稀释 Bug；改用夏普+盈亏比+回撤+因果 60 日 ATR% 风格先验的综合评分；新增样本外 `⛔ 暂不适配·观望` 熔断（OOS 收益 ≤ 0 或 PF < 1.05），并在 `scanner.py` 自动拦截其单策略买入提示（保留卖出风控）。
+  - 新增 `services/position_service.py`，将 ATR 动态止损、保本平仓、高点移动止盈与时间止损纳入 `notify_position_summary()` 每日 15:10 自动预警推送；信号页委托单支持一键回填成交到持仓表，打通实盘闭环。
+- **估值过滤与核心-卫星 70/30 配置层 (`data/storage.py`, `services/valuation_service.py`, `app/portfolio.py`)**:
+  - SQLite 新增 `stock_valuation` 表（迁移 v6），提供 PE-TTM/PB/股息率抓取缓存与财报窗口/亏损/高估值守卫，在信号扫描与委托单中自动提示；新增「核心-卫星与估值配置」页面标签按滚动 ATR% 自动划分 70% 核心底仓与 30% 卫星趋势仓位。
+
 ## [v0.4.9] - 2026-11-24
 
 ### 🛡️ 实盘信号推送、大盘择时对齐与防洗盘机制重构

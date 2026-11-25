@@ -24,20 +24,33 @@ PREFIX_MAP = {
     "bollinger_reversal": "↔️ 布林反转",
     "ma_cross": "📈 双均线趋势",
     "signal_combo": "🧩 多因子共振",
+    "momentum_rotation": "🔄 动量轮动",
 }
+
+
+def is_no_trade_recommendation(rec_tag: str) -> bool:
+    """判断自选股推荐标签是否被样本外熔断为「暂不适配·观望」。"""
+    if rec_tag is None:
+        return False
+    text = str(rec_tag).strip()
+    return ("暂不适配" in text) or ("⛔" in text)
 
 
 def parse_recommended_strategy_key(rec_tag: str) -> str:
     """从自选股推荐标签（中文展示文本或策略键名）解析出规范策略键名。
 
-    若标签为空或无法识别任何内置策略，返回空字符串 ``""``。
+    若标签为空、属于「暂不适配」熔断或无法识别任何内置策略，返回空字符串 ``""``。
     """
     if rec_tag is None:
         return ""
     text = str(rec_tag).strip()
     if not text or text.lower() in ("nan", "none"):
         return ""
+    if is_no_trade_recommendation(text):
+        return ""
     lower = text.lower()
+    if "动量轮动" in text or "momentum_rotation" in lower or "rotation" in lower:
+        return "momentum_rotation"
     if "布林" in text or "bollinger" in lower:
         return "bollinger_reversal"
     if "双均线" in text or "ma_cross" in lower:
@@ -167,21 +180,39 @@ def evaluate_stock_strategy(ts_code: str, name: str = "", industry: str = "",
         logger.warning(f"预加载标的 {ts_code} 数据失败: {e}")
         preloaded = None
 
+    # 仅使用训练段末尾60日K线统计因果 ATR%（绝不偷看测试段波动率）
+    train_atr_pct = None
+    if preloaded and ts_code in preloaded:
+        df_pre = preloaded[ts_code]
+        if (df_pre is not None and not df_pre.empty
+                and "atr_pct" in df_pre.columns and "trade_date" in df_pre.columns):
+            sub_atr = df_pre[df_pre["trade_date"].astype(str) <= train_end]["atr_pct"].dropna().tail(60)
+            if not sub_atr.empty:
+                med_atr = float(sub_atr.median())
+                if med_atr == med_atr and med_atr > 0:
+                    train_atr_pct = round(med_atr, 2)
+    atr_bucket = "unknown" if train_atr_pct is None else ("low" if train_atr_pct < 2.2 else "high")
+
     empty_stats = {"total_return": 0.0, "win_rate": 0.0, "trades": 0,
-                   "sells": 0, "mdd": 0.0, "sharpe": 0.0}
+                   "sells": 0, "mdd": 0.0, "sharpe": 0.0,
+                   "profit_factor": 1.0, "has_pf": False}
 
     def _run(s_name: str, s_start: str, s_end: str) -> dict:
         s_cls = STRATEGY_REGISTRY[s_name]
         params = {k: v.get("default", 0) for k, v in s_cls.param_schema.items()}
-        rm = RiskManager(stop_loss_pct=-6.0, trailing_stop_activation=12.0,
-                         trailing_stop_callback=3.0)
+        rm = RiskManager.for_strategy(s_name, use_atr_stop=True)
+        mrf = s_name in ("ma_cross", "signal_combo")
         bt = Backtester(
             strategy_cls=s_cls, params=params, universe=[ts_code],
             start_date=s_start, end_date=s_end, initial_capital=100000.0,
             execution_mode="next_open", risk_manager=rm,
             preloaded_data=preloaded,
+            max_active_positions=1,
+            market_regime_filter=mrf,
         )
         res = bt.run(save=False)
+        has_pf = hasattr(res, "profit_factor")
+        pf_val = float(getattr(res, "profit_factor", 1.0) or 1.0)
         return {
             "total_return": float(res.total_return),
             "win_rate": float(res.win_rate),
@@ -189,6 +220,8 @@ def evaluate_stock_strategy(ts_code: str, name: str = "", industry: str = "",
             "sells": int(getattr(res, "sell_count", 0)),
             "mdd": float(res.max_drawdown),
             "sharpe": float(res.sharpe_ratio),
+            "profit_factor": pf_val,
+            "has_pf": has_pf,
         }
 
     stats = {}
@@ -210,15 +243,25 @@ def evaluate_stock_strategy(ts_code: str, name: str = "", industry: str = "",
         }
 
     # 综合效用评分（仅在训练段上选策略）：
-    # 评分 = 收益*1.5 + (胜率-40)*0.6 - 最大回撤*0.4
-    # 无任何平仓成交的策略给予极低哨兵值，避免与正常策略混淆
+    # 综合考量满仓总收益、夏普、盈亏比与回撤，并叠加滚动 ATR% 风格先验，避免高胜率低期望策略霸榜
     best_s, best_score = None, -1e12
     for s_name, m in stats.items():
         if m["sells"] == 0 and m["trades"] == 0:
             score = -1e9
         else:
+            pf = min(max(float(m.get("profit_factor", 1.0)), 0.0), 5.0)
+            style_prior = 0.0
+            if atr_bucket == "low" and s_name in ("kdj_cross", "bollinger_reversal"):
+                style_prior = 4.0
+            elif atr_bucket == "high" and s_name in ("ma_cross", "signal_combo"):
+                style_prior = 4.0
             score = (
-                m["total_return"] * 1.5 + (m["win_rate"] - 40.0) * 0.6 - m["mdd"] * 0.4
+                m["total_return"] * 0.8
+                + m["sharpe"] * 12.0
+                + (pf - 1.0) * 10.0
+                + (m["win_rate"] - 45.0) * 0.15
+                - m["mdd"] * 0.6
+                + style_prior
             )
         if score > best_score:
             best_score, best_s = score, s_name
@@ -234,11 +277,18 @@ def evaluate_stock_strategy(ts_code: str, name: str = "", industry: str = "",
         oos = dict(empty_stats)
 
     # 胜率仅由已平仓卖单计算，因此样本外必须满足最低平仓笔数 (sells >= OOS_MIN_TRADES)
+    # 若样本外收益<=0或盈亏比<1.05，强制触发「暂不适配·观望」熔断，防止硬打适配标签误导买单
+    oos_passed = False
     if oos["sells"] >= OOS_MIN_TRADES:
-        if oos["win_rate"] >= 55.0:
-            tag = f"{prefix} (样本外胜率{oos['win_rate']:.1f}%/{oos['total_return']:+.1f}%)"
+        has_pf = bool(oos.get("has_pf", False))
+        oos_passed = (oos["total_return"] > 0.0) and (not has_pf or oos["profit_factor"] >= 1.05)
+        if oos_passed:
+            if oos["win_rate"] >= 55.0:
+                tag = f"{prefix} (样本外胜率{oos['win_rate']:.1f}%/{oos['total_return']:+.1f}%)"
+            else:
+                tag = f"{prefix} (样本外{oos['total_return']:+.1f}%/回撤{oos['mdd']:.1f}%)"
         else:
-            tag = f"{prefix} (样本外{oos['total_return']:+.1f}%/回撤{oos['mdd']:.1f}%)"
+            tag = f"⛔ 暂不适配·观望 ({prefix} 样本外{oos['total_return']:+.1f}%/回撤{oos['mdd']:.1f}%)"
     else:
         tag = f"{prefix} (样本外交易不足)"
 
@@ -246,7 +296,8 @@ def evaluate_stock_strategy(ts_code: str, name: str = "", industry: str = "",
         f"训练段 {train_start}~{train_end} 比较 {len(stats)} 个策略后选出该策略；"
         f"以下业绩来自从未参与选参的样本外测试段 {test_start}~{test_end}："
         f"总收益 {oos['total_return']:+.2f}%，胜率 {oos['win_rate']:.1f}%，"
-        f"最大回撤 {oos['mdd']:.2f}%，平仓 {oos['sells']} 笔（总成交 {oos['trades']} 次）。"
+        f"盈亏比 {oos.get('profit_factor', 1.0):.2f}，最大回撤 {oos['mdd']:.2f}%，"
+        f"平仓 {oos['sells']} 笔（总成交 {oos['trades']} 次）。"
         f"（details 中的分策略对比为样本内结果，不可当作业绩）"
     )
 
@@ -258,6 +309,9 @@ def evaluate_stock_strategy(ts_code: str, name: str = "", industry: str = "",
         "details": stats,
         "is_backtested": True,
         "is_oos": True,
+        "oos_passed": oos_passed,
+        "oos_profit_factor": oos.get("profit_factor", 1.0),
+        "atr_bucket": atr_bucket,
         "train_window": [train_start, train_end],
         "test_window": [test_start, test_end],
         "oos_total_return": oos["total_return"],

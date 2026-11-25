@@ -6,7 +6,10 @@ import pandas as pd
 from datetime import datetime, date
 
 from engine.scanner import scan_signals
-from data.storage import get_signals, get_instrument_list, get_daily, get_stocks_with_data, get_watchlist, get_positions
+from data.storage import (
+    get_signals, get_instrument_list, get_daily, get_stocks_with_data,
+    get_watchlist, get_positions, add_position, remove_position, get_valuation_map,
+)
 from app.st_utils import (
     chinese_dataframe, chinese_date_picker, strategy_label,
     cached_get_stocks_with_data, cached_instrument_list,
@@ -280,6 +283,10 @@ def build_deduplicated_broker_orders(signals: list, capital: float = 100000.0,
     stock_map = stock_map or {}
     held_map = held_map or {}
     single_budget = capital * (max_pos_pct / 100.0)
+    try:
+        val_map = get_valuation_map([s.ts_code for s in signals]) if signals else {}
+    except Exception:
+        val_map = {}
 
     # 1. 按股票分组识别多空冲突与同向聚合
     sell_by_code = {}
@@ -337,6 +344,15 @@ def build_deduplicated_broker_orders(signals: list, capital: float = 100000.0,
             sl_tag = "-"
             action_text = "卖出"
 
+        val_badge = "-"
+        if sig.ts_code in val_map:
+            try:
+                from services.valuation_service import evaluate_valuation_guard
+                vg = evaluate_valuation_guard(sig.ts_code, val_map[sig.ts_code], ref_date=sig.trade_date)
+                val_badge = vg.get("badge") or "-"
+            except Exception:
+                val_badge = "-"
+
         order_rows.append({
             "证券代码": symbol,
             "标的代码": sig.ts_code,
@@ -347,6 +363,7 @@ def build_deduplicated_broker_orders(signals: list, capital: float = 100000.0,
             "委托数量(股)": shares,
             "预估金额(元)": est_amount,
             "建议止损价": sl_tag,
+            "估值参考": val_badge,
             "来源策略": strat_str,
             "状态": "待委托" if shares > 0 else "资金不足1手",
         })
@@ -408,6 +425,46 @@ def _render_broker_order_sheet(signals: list, scan_date_str: str, stock_map: dic
                 file_name=f"券商批量委托_{scan_date_str}.txt",
                 mime="text/plain",
             )
+
+        # 一键同步已成交信号到模拟持仓表，激活每日15:10移动止盈与ATR止损推送闭环
+        st.markdown("---")
+        with st.form("sync_broker_orders_to_pos"):
+            st.markdown("**📌 实盘成交回填（勾选后一键同步到模拟持仓，开启每日 ATR 止损与移动止盈预警）**")
+            row_labels = [
+                f"{r['操作']} | {r['标的代码']} {r['名称']} ({r['委托数量(股)']}股 @ ¥{r['委托价格']:.2f})"
+                for r in order_rows
+            ]
+            selected_indices = st.multiselect(
+                "选择你在券商实际成交的委托单",
+                list(range(len(order_rows))),
+                format_func=lambda idx: row_labels[idx],
+                key="sync_orders_select",
+            )
+            if st.form_submit_button("✅ 同步选中成交到持仓表", type="primary"):
+                if not selected_indices:
+                    st.warning("请先勾选实际已成交的委托记录")
+                else:
+                    bought_cnt, sold_cnt = 0, 0
+                    cur_positions = get_positions()
+                    for idx in selected_indices:
+                        r = order_rows[idx]
+                        code = r["标的代码"]
+                        if r["操作"] == "买入" and r["委托数量(股)"] > 0:
+                            add_position(
+                                code,
+                                float(r["委托价格"]),
+                                int(r["委托数量(股)"]),
+                                scan_date_str,
+                                note=f"信号跟单:{r['来源策略']}",
+                            )
+                            bought_cnt += 1
+                        elif r["操作"] == "卖出":
+                            for pos in cur_positions:
+                                if pos["ts_code"] == code:
+                                    remove_position(pos["_id"])
+                                    sold_cnt += 1
+                    st.toast(f"✅ 持仓闭环已更新：新开仓 {bought_cnt} 笔，平仓移除 {sold_cnt} 笔", icon="💼")
+                    st.rerun()
 
 
 

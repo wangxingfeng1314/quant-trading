@@ -23,15 +23,16 @@ class SignalComboStrategy(BaseStrategy):
     name = "signal_combo"
     description = "信号共振策略（趋势+动量+量能+强度多维度确认）"
     style = "综合"
+    allow_bear_buy = False
     param_schema = {
         "ma_period": {"default": 20, "desc": "趋势参考均线"},
-        "buy_threshold": {"default": 2.5, "desc": "买入阈值（总分4分，默认2.5过滤假突破与噪音）"},
-        "sell_threshold": {"default": -2.0, "desc": "卖出阈值（总分-4分）"},
-        "vol_ratio": {"default": 1.3, "desc": "放量判定倍数"},
+        "buy_threshold": {"default": 3.0, "desc": "买入阈值（总分4分，默认3.0严格要求三因子以上共振过滤噪音）"},
+        "sell_threshold": {"default": -2.5, "desc": "卖出阈值（总分-4分，默认-2.5防震荡洗盘）"},
+        "vol_ratio": {"default": 1.5, "desc": "放量判定倍数"},
     }
 
-    def __init__(self, ma_period: int = 20, buy_threshold: float = 2.5,
-                 sell_threshold: float = -2.0, vol_ratio: float = 1.3):
+    def __init__(self, ma_period: int = 20, buy_threshold: float = 3.0,
+                 sell_threshold: float = -2.5, vol_ratio: float = 1.5):
         self.ma_period = ma_period
         self.buy_threshold = buy_threshold
         self.sell_threshold = sell_threshold

@@ -72,6 +72,24 @@ def _liquidity_context(fa, idx):
     return float(vol), float(atr_pct) / 100.0
 
 
+def _resolve_sell_volume(avail_before: int, sig, ref_volume: float) -> tuple[int, int]:
+    """根据信号的 sell_ratio 与市场参与率上限计算 (目标卖出股数, 实际下单股数)。"""
+    snap = getattr(sig, "context_snapshot", None) or {}
+    raw_ratio = snap.get("sell_ratio", 1.0)
+    try:
+        ratio = float(raw_ratio)
+    except (TypeError, ValueError):
+        ratio = 1.0
+    if 0.0 < ratio < 1.0:
+        desired_sell = int(avail_before * ratio) // 100 * 100
+        if desired_sell <= 0:
+            desired_sell = avail_before
+    else:
+        desired_sell = avail_before
+    sell_vol = cap_order_volume(desired_sell, ref_volume, lot_size=1)
+    return desired_sell, sell_vol
+
+
 # ============================================================
 # 进程内缓存 —— 消除网格搜索 / 批量回测中的重复 I/O
 # ============================================================
@@ -361,22 +379,30 @@ class Backtester:
         # 4. 逐日迭代
         # current_close 模式下一字跌停卖单失败后需要跨日重试；next_open 仍保持
         # 「当日合并进 signals、次日开盘重试」的原有节奏，两者不能共用同一队列。
+        # 超卖反转/多资产轮动等显式声明 allow_bear_buy=True 的策略不受熊市买单硬拦截误杀。
+        effective_regime_filter = self.market_regime_filter and not bool(
+            getattr(strategy, "allow_bear_buy", False)
+        )
         pending_deferred_sells = []
         for date in trade_dates:
             # 每日开盘前触发持仓日结（T+1结转）
             portfolio.on_new_day(date)
 
-            # 大盘环境检查：熊市防守期禁止逆势开仓
-            market_allow_buy = self.market_regime_lookup.get(date, True) if self.market_regime_filter else True
+            # 大盘环境检查：熊市防守期禁止趋势追涨逆势开仓
+            market_allow_buy = self.market_regime_lookup.get(date, True) if effective_regime_filter else True
 
-            # 收集当日价格
+            # 收集当日价格与 ATR%
             prices = {}
+            atr_pct_map = {}
             data_slice = {}  # 传给策略的数据切片
 
             for ts_code, df in stock_data.items():
                 idx = date_index[ts_code].get(date)
                 if idx is not None:
                     prices[ts_code] = fast_data[ts_code].val("close", idx, 0.0)
+                    atr_v = fast_data[ts_code].val("atr_pct", idx)
+                    if atr_v is not None and atr_v > 0:
+                        atr_pct_map[ts_code] = atr_v
                     # 零拷贝：列式视图语义等价于 df.iloc[:idx+1]，但列访问不再构造 Series
                     if use_fast_view:
                         data_slice[ts_code] = BarFrame(frame_stores[ts_code], 0, idx + 1)
@@ -455,8 +481,7 @@ class Backtester:
                         pos = portfolio.get_position(ts_code)
                         if pos and not pos.is_empty:
                             avail_before = pos.available_shares
-                            sell_vol = cap_order_volume(
-                                avail_before, ref_volume, lot_size=1)
+                            desired_sell, sell_vol = _resolve_sell_volume(avail_before, sig, ref_volume)
                             sold_trade = portfolio.sell(
                                 ts_code=ts_code,
                                 price=open_price,
@@ -475,7 +500,7 @@ class Backtester:
                             # 一字跌停拒单，或参与率上限导致部分成交时，顺延剩余份额至下一交易日继续卖出
                             if sell_vol > 0 and (
                                 sold_trade is None
-                                or (sell_vol < avail_before and pos.available_shares > 0)
+                                or (sell_vol < desired_sell and pos.available_shares > 0)
                             ):
                                 deferred_sells.append(sig)
                 pending_signals = []
@@ -487,9 +512,14 @@ class Backtester:
             if not market_allow_buy and signals:
                 signals = [s for s in signals if s.direction != "BUY"]
 
-            # 风控拦截器检查（止损/跟踪止盈/到期强制平仓）
+            # 风控拦截器检查（止损/跟踪止盈/保本/分批止盈/到期强制平仓）
             if self.risk_manager is not None:
-                risk_signals = self.risk_manager.check_risks(date, portfolio, prices)
+                try:
+                    risk_signals = self.risk_manager.check_risks(
+                        date, portfolio, prices, current_atr_pct=atr_pct_map
+                    )
+                except TypeError:
+                    risk_signals = self.risk_manager.check_risks(date, portfolio, prices)
                 if risk_signals:
                     risk_sell_codes = {s.ts_code for s in risk_signals}
                     filtered_signals = [s for s in signals if s.ts_code not in risk_sell_codes]
@@ -568,8 +598,7 @@ class Backtester:
                         pos = portfolio.get_position(sig.ts_code)
                         if pos and not pos.is_empty:
                             avail_before = pos.available_shares
-                            sell_vol = cap_order_volume(
-                                avail_before, ref_volume, lot_size=1)
+                            desired_sell, sell_vol = _resolve_sell_volume(avail_before, sig, ref_volume)
                             sold_trade = portfolio.sell(
                                 ts_code=sig.ts_code,
                                 price=sig.price_ref,
@@ -588,7 +617,7 @@ class Backtester:
                             # 一字跌停拒单，或参与率上限导致部分成交时，顺延剩余份额到下一交易日重新挂单
                             if sell_vol > 0 and (
                                 sold_trade is None
-                                or (sell_vol < avail_before and pos.available_shares > 0)
+                                or (sell_vol < desired_sell and pos.available_shares > 0)
                             ):
                                 pending_deferred_sells.append(sig)
 

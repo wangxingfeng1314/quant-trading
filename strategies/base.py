@@ -18,6 +18,8 @@ class BaseStrategy(ABC):
     description: str = ""
     style: str = "综合"  # 策略风格: 短线 / 震荡 / 中长线 / 综合
     param_schema: dict = {}  # {参数名: {'default': 默认值, 'desc': '说明'}}
+    allow_bear_buy: bool = False  # 熊市空头防守期是否允许买入（超卖反转/低相关轮动策略为True）
+    is_cross_sectional: bool = False  # 是否需要多标的横截面排名（如动量轮动）
 
     @abstractmethod
     def on_bar(self, trade_date: str, data: dict, portfolio=None) -> List[Signal]:

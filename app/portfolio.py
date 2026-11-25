@@ -27,7 +27,9 @@ from services.strategy_recommender import evaluate_stock_strategy, batch_update_
 def show():
     st.title("💼 持仓管理")
 
-    tab1, tab2, tab3 = st.tabs(["自选股", "模拟持仓", "信号自动跟单"])
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "自选股", "模拟持仓", "信号自动跟单", "🧱 核心-卫星与估值配置"
+    ])
 
     with tab1:
         _show_watchlist()
@@ -35,6 +37,8 @@ def show():
         _show_portfolio()
     with tab3:
         _show_auto_trade()
+    with tab4:
+        _show_allocation_and_valuation()
 
 
 def _show_watchlist():
@@ -148,22 +152,50 @@ def _show_watchlist():
         st.info("暂无自选股，请添加")
         return
 
-    # 分组筛选与智能策略重新评估
+    # 分组筛选与智能策略重新评估 / ETF 轮动池导入
     from data.storage import get_watchlist_groups, update_watchlist_group
+    from strategies.momentum_rotation import ROTATION_ETF_PRESETS
     groups = get_watchlist_groups()
-    col_f1, col_f2 = st.columns([3, 1])
+    col_f1, col_f2, col_f3 = st.columns([2.2, 1.1, 1.3])
     with col_f1:
         group_filter = st.selectbox("按分组筛选", ["全部", *groups], key="wl_group_filter")
         if group_filter != "全部":
             watchlist = watchlist[watchlist["group_name"] == group_filter]
     with col_f2:
         st.markdown("")
-        if st.button("🎯 重新评估策略", key="btn_refresh_rec", help="重新对当前自选股进行快速全策略回测并更新推荐标签", width="stretch"):
+        if st.button("🎯 重新评估策略", key="btn_refresh_rec", help="重新对当前自选股进行全策略样本外回测与熔断校准", width="stretch"):
             with st.spinner("正在智能评估自选股最佳策略..."):
                 updated_count = batch_update_watchlist_recommendations(force=True)
                 st.cache_data.clear()
                 st.toast(f"✅ 已成功更新 {updated_count} 只自选股的推荐策略", icon="🎯")
                 st.rerun()
+    with col_f3:
+        st.markdown("")
+        if st.button("🌐 导入ETF轮动池", key="btn_import_etf_pool", help="一键添加7只低相关多资产ETF（宽基/红利/黄金/纳指/国债）至「ETF轮动池」分组并拉取历史日线", width="stretch"):
+            end = datetime.now().strftime("%Y%m%d")
+            added_cnt = 0
+            with st.spinner("⏳ 正在导入多资产 ETF 轮动池并拉取行情..."):
+                for etf_code, etf_name in ROTATION_ETF_PRESETS:
+                    latest = get_latest_date(etf_code)
+                    if not latest or latest < end:
+                        df_etf = fetch_instrument_daily(etf_code, DATA_START_DATE, end)
+                        if df_etf is not None and not df_etf.empty:
+                            df_etf = clean_daily(df_etf)
+                            if not df_etf.empty:
+                                df_etf = align_volume_unit(etf_code, df_etf)
+                                save_daily(df_etf)
+                    add_to_watchlist(
+                        etf_code,
+                        note=f"多资产轮动:{etf_name}",
+                        group_name="ETF轮动池",
+                        recommended_strategy="🔄 动量轮动 (多资产横截面轮动)",
+                    )
+                    added_cnt += 1
+            from engine.backtester import clear_backtester_cache
+            st.cache_data.clear()
+            clear_backtester_cache()
+            st.toast(f"✅ 已导入 {added_cnt} 只多资产 ETF 至「ETF轮动池」", icon="🌐")
+            st.rerun()
 
     name_map = dict(zip(stock_df["ts_code"], stock_df["name"])) if not stock_df.empty else {}
 
@@ -310,75 +342,16 @@ def _show_watchlist():
 
 
 def diagnose_position_action(ts_code: str, buy_price: float, buy_date: str = "") -> dict:
-    """诊断单只持仓标的的实时风控状态与卖出/止盈指令
-
-    结合：
-      1. 标的 ATR14 自适应止损线与目标止盈线
-      2. 建仓以来的最高价回撤（移动止盈保护）
-      3. 最近3个交易日内是否触发策略 SELL 卖出信号
-    """
-    buy_price = max(float(buy_price or 0.0), 0.01)
-    plan = calc_atr_stops_and_sizing(ts_code, buy_price, score=0.7)
-    sl_pct = plan["sl_pct"]
-    tp_pct = plan["tp_pct"]
-    stop_loss_price = plan["stop_loss"]
-    take_profit_price = plan["take_profit"]
-
-    df = get_daily(ts_code, limit=30)
-    current_price = float(df.iloc[-1]["close"]) if not df.empty else buy_price
-    latest_trade_date = str(df.iloc[-1]["trade_date"]) if not df.empty else ""
-    pnl_pct = (current_price / buy_price - 1.0) * 100.0
-
-    # 计算建仓后的最高价与高点回撤
-    peak_price = max(buy_price, current_price)
-    if not df.empty:
-        clean_buy_date = str(buy_date or "").replace("-", "").replace("/", "")
-        sub_df = df[df["trade_date"] >= clean_buy_date] if clean_buy_date else df.tail(10)
-        if not sub_df.empty and "high" in sub_df.columns:
-            peak_price = max(peak_price, float(sub_df["high"].max()))
-    max_gain_pct = (peak_price / buy_price - 1.0) * 100.0
-    drawdown_from_peak = ((peak_price - current_price) / peak_price * 100.0) if peak_price > 0 else 0.0
-
-    # 查询近期是否有策略发出 SELL 信号
-    recent_sell_str = ""
-    try:
-        sig_df = get_signals(ts_code=ts_code, direction="SELL", limit=3)
-        if not sig_df.empty:
-            top_sell = sig_df.iloc[0]
-            sig_date = str(top_sell.get("trade_date", ""))
-            # 若信号日期在近5天内（或等于最新交易日）且评分 >= 0.55
-            if float(top_sell.get("score", 0.0)) >= 0.55 and (not latest_trade_date or sig_date >= latest_trade_date[:6]):
-                recent_sell_str = format_strategy_cn(str(top_sell.get("strategy", "")))
-    except Exception:
-        pass
-
-    # 按风控优先级生成操作指令
-    if pnl_pct <= -sl_pct:
-        action = f"🚨 跌破ATR止损(-{sl_pct:.1f}%)·建议止损清仓"
-        level = "danger"
-    elif max_gain_pct >= 8.0 and drawdown_from_peak >= 3.5 and pnl_pct > 1.0:
-        action = f"⚠️ 冲高回落({drawdown_from_peak:.1f}%)·建议移动止盈锁利"
-        level = "warning"
-    elif recent_sell_str:
-        action = f"⚠️ 触发卖出信号({recent_sell_str})·建议减仓/离场"
-        level = "warning"
-    elif pnl_pct >= tp_pct:
-        action = f"🎯 达到目标止盈(+{tp_pct:.1f}%)·可分批止盈"
-        level = "profit"
-    else:
-        action = f"✅ 趋势正常·持有(止损¥{stop_loss_price:.2f})"
-        level = "hold"
-
-    return {
-        "current_price": current_price,
-        "pnl_pct": round(pnl_pct, 2),
-        "stop_loss_price": stop_loss_price,
-        "take_profit_price": take_profit_price,
-        "sl_pct": sl_pct,
-        "tp_pct": tp_pct,
-        "action": action,
-        "level": level,
-    }
+    """诊断单只持仓标的的实时风控状态与卖出/止盈指令（委托给 services.position_service）。"""
+    from services.position_service import diagnose_position_action as _svc_diagnose
+    return _svc_diagnose(
+        ts_code=ts_code,
+        buy_price=buy_price,
+        buy_date=buy_date,
+        get_daily_fn=get_daily,
+        get_signals_fn=get_signals,
+        calc_atr_fn=calc_atr_stops_and_sizing,
+    )
 
 
 def _show_portfolio():
@@ -436,6 +409,7 @@ def _show_portfolio():
         if diag["level"] in ("danger", "warning"):
             alert_msgs.append(f"**{stock_label}**：{diag['action']}")
 
+        trail_px = diag.get("trailing_stop_price")
         rows.append({
             "股票": stock_label,
             "买入价": f"¥{pos['buy_price']:.2f}",
@@ -444,7 +418,10 @@ def _show_portfolio():
             "市值": f"¥{value:.0f}",
             "盈亏": f"¥{pnl:+.0f}",
             "盈亏%": f"{pnl_pct:+.2f}%",
+            "最高浮盈%": f"{diag.get('max_gain_pct', 0.0):+.1f}%",
+            "持仓天数": f"{diag.get('holding_days', 0)}天",
             "ATR止损价": f"¥{diag['stop_loss_price']:.2f} (-{diag['sl_pct']:.1f}%)",
+            "移动止盈价": f"¥{trail_px:.2f}" if trail_px else "未激活",
             "目标止盈价": f"¥{diag['take_profit_price']:.2f} (+{diag['tp_pct']:.1f}%)",
             "风控处置建议": diag["action"],
         })
@@ -643,4 +620,79 @@ def _show_auto_trade():
                 st.plotly_chart(fig, width='stretch')
     else:
         st.info("暂无持仓，可通过信号跟单或手动添加")
+
+
+def _show_allocation_and_valuation():
+    """核心-卫星70/30仓位规划与基本面估值快照"""
+    st.subheader("🧱 核心-卫星仓位配置与估值守卫")
+    st.caption("按滚动 60 日波动率(ATR%)、低估高息特征及样本外适配结论，将资金自动划分为「核心底仓 + 卫星趋势」两层，避免高波动股与低波蓝筹混用同一风控与仓位。")
+
+    watchlist = get_watchlist()
+    if watchlist.empty:
+        st.info("暂无自选股，请先在「自选股」标签页添加标的")
+        return
+
+    from services.valuation_service import (
+        fetch_and_cache_valuations, build_core_satellite_plan,
+    )
+    from data.storage import get_valuation_map
+
+    col_c1, col_c2, col_c3 = st.columns([1.4, 1.4, 1.2])
+    with col_c1:
+        total_cap = st.number_input("总规划资金 (元)", value=100000, min_value=10000, step=10000, key="alloc_cap")
+    with col_c2:
+        core_pct = st.slider("核心底仓占比 (%)", min_value=30, max_value=90, value=70, step=5, key="alloc_core_pct")
+    with col_c3:
+        st.markdown("")
+        if st.button("🔄 刷新估值数据 (PE/PB/股息率)", key="btn_refresh_val", width="stretch"):
+            with st.spinner("正在拉取并缓存自选股最新估值数据..."):
+                fetch_and_cache_valuations(watchlist["ts_code"].tolist())
+                st.cache_data.clear()
+                st.toast("✅ 估值快照更新完成", icon="💎")
+                st.rerun()
+
+    val_map = get_valuation_map(watchlist["ts_code"].tolist())
+    inst_df = cached_instrument_list()
+    plan = build_core_satellite_plan(
+        watchlist_df=watchlist,
+        capital=float(total_cap),
+        core_ratio=float(core_pct) / 100.0,
+        val_map=val_map,
+        inst_df=inst_df,
+    )
+
+    st.info(f"📊 **配置方案摘要**：{plan['summary']}")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("🧱 核心底仓预算", f"¥{plan['core_budget']:,.0f}", f"{plan['core_count']} 只")
+    m2.metric("⚡ 卫星趋势预算", f"¥{plan['satellite_budget']:,.0f}", f"{plan['satellite_count']} 只")
+    m3.metric("⛔ 观望空仓数", f"{plan['skip_count']} 只")
+    m4.metric("💵 整手后预留现金", f"¥{plan['cash_reserve']:,.0f}")
+
+    if plan["rows"]:
+        df_plan = pd.DataFrame(plan["rows"])
+        chinese_dataframe(df_plan, height=440)
+        csv_plan = df_plan.to_csv(index=False).encode("utf-8-sig")
+        st.download_button(
+            "📥 导出核心-卫星配置方案 CSV",
+            data=csv_plan,
+            file_name=f"核心卫星配置方案_{datetime.now().strftime('%Y%m%d')}.csv",
+            mime="text/csv",
+        )
+
+    if val_map:
+        st.markdown("---")
+        st.markdown("**💎 已缓存估值快照明细**")
+        name_map = dict(zip(inst_df["ts_code"], inst_df["name"])) if (inst_df is not None and not inst_df.empty) else {}
+        val_rows = []
+        for code, v in sorted(val_map.items()):
+            val_rows.append({
+                "代码": code,
+                "名称": name_map.get(code, ""),
+                "PE(TTM)": round(v["pe_ttm"], 2) if v.get("pe_ttm") is not None else "-",
+                "PB": round(v["pb"], 2) if v.get("pb") is not None else "-",
+                "股息率%": round(v["dividend_yield"], 2) if v.get("dividend_yield") is not None else "-",
+                "总市值(亿)": round(v["market_cap_yi"], 1) if v.get("market_cap_yi") is not None else "-",
+                "更新时间": str(v.get("updated_at") or "")[:10],
+            })
+        chinese_dataframe(pd.DataFrame(val_rows), height=280)
 

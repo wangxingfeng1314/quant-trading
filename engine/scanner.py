@@ -178,10 +178,11 @@ def _scan_single_stock(
 
 
 def _filter_by_watchlist_strategy(signals: list) -> list:
-    """自选股按各自适配策略过滤（防错配策略低胜率乱推）。
+    """自选股按各自适配策略过滤（防错配策略与样本外不适配标的乱推）。
 
     规则：
-      - 若标的不在自选股推荐映射表中（或暂无有效推荐策略），原样放行；
+      - 若标的不在自选股推荐映射表中（或暂无有效推荐策略且未被熔断），原样放行；
+      - 若被样本外熔断为「⛔ 暂不适配·观望」：放行 SELL 保护已有持仓，拦截单策略 BUY（>=2共振仍放行）；
       - 若在映射表中：仅保留命中该股适配策略（附 ``[⭐适配]`` 标记）的信号，
         或当日同向有 ``>= 2`` 个独立策略同时触发的强共振信号。
     """
@@ -195,14 +196,22 @@ def _filter_by_watchlist_strategy(signals: list) -> list:
     if wl is None or wl.empty or "recommended_strategy" not in wl.columns:
         return signals
 
-    from services.strategy_recommender import parse_recommended_strategy_key
+    from services.strategy_recommender import (
+        parse_recommended_strategy_key, is_no_trade_recommendation,
+    )
 
     rec_map = {}
+    no_trade_codes = set()
     for _, row in wl.iterrows():
-        key = parse_recommended_strategy_key(row.get("recommended_strategy", ""))
+        code_str = str(row["ts_code"])
+        raw_tag = row.get("recommended_strategy", "")
+        if is_no_trade_recommendation(raw_tag):
+            no_trade_codes.add(code_str)
+            continue
+        key = parse_recommended_strategy_key(raw_tag)
         if key:
-            rec_map[str(row["ts_code"])] = key
-    if not rec_map:
+            rec_map[code_str] = key
+    if not rec_map and not no_trade_codes:
         return signals
 
     grouped = {}
@@ -210,14 +219,24 @@ def _filter_by_watchlist_strategy(signals: list) -> list:
         grouped.setdefault((s.ts_code, s.direction), []).append(s)
 
     kept = []
-    for (code, _direction), grp in grouped.items():
-        rec_key = rec_map.get(code)
-        if not rec_key:
+    for (code, direction), grp in grouped.items():
+        distinct_strats = {s.strategy for s in grp}
+        if len(distinct_strats) >= 2:
             kept.extend(grp)
             continue
 
-        distinct_strats = {s.strategy for s in grp}
-        if len(distinct_strats) >= 2:
+        if code in no_trade_codes:
+            if direction == "SELL":
+                kept.extend(grp)
+            else:
+                logger.info(
+                    f"熔断拦截不适配标的买入: {code} ({','.join(distinct_strats)}) "
+                    f"已标记为「暂不适配·观望」"
+                )
+            continue
+
+        rec_key = rec_map.get(code)
+        if not rec_key:
             kept.extend(grp)
             continue
 
@@ -232,6 +251,68 @@ def _filter_by_watchlist_strategy(signals: list) -> list:
                     f"(该股适配策略为 {rec_key})"
                 )
     return kept
+
+
+def _scan_cross_sectional(
+    universe: list,
+    end_date: str,
+    cross_strats: list,
+    min_daily_amount: float = None,
+    filter_suspended: bool = None,
+) -> list:
+    """运行横截面轮动类策略（需要同时观察全部候选标的面板进行强弱排名）。"""
+    if not universe or not cross_strats:
+        return []
+    amt_threshold = min_daily_amount if min_daily_amount is not None else SCANNER_MIN_DAILY_AMOUNT
+    flt_susp = filter_suspended if filter_suspended is not None else SCANNER_FILTER_SUSPENDED
+
+    panel_data = {}
+    for ts_code in universe:
+        try:
+            try:
+                df = get_daily(ts_code, end_date=end_date)
+            except TypeError:
+                df = get_daily(ts_code)
+            if df is None or df.empty:
+                continue
+            df = clean_daily(df)
+            if df.empty:
+                continue
+            if end_date:
+                df = df[df["trade_date"] <= end_date]
+            if len(df) < SCANNER_MIN_DATA_DAYS:
+                continue
+            if not check_stock_liquidity(
+                df, end_date=end_date, min_daily_amount=amt_threshold, filter_suspended=flt_susp
+            ):
+                continue
+            panel_data[ts_code] = apply_indicators(df, ["ma", "macd", "rsi", "boll", "vol_ma", "kdj", "atr"])
+        except Exception as e:
+            logger.debug(f"横截面数据预加载跳过 {ts_code}: {e}")
+
+    if not panel_data:
+        return []
+
+    latest_dt = max(str(d["trade_date"].iloc[-1]) for d in panel_data.values())
+    if len(panel_data) > 1:
+        panel_data = {
+            c: d for c, d in panel_data.items() if str(d["trade_date"].iloc[-1]) == latest_dt
+        }
+    if not panel_data:
+        return []
+
+    from services.signal_service import STRATEGY_CREDIBILITY_WEIGHTS
+    out_signals = []
+    for strat in cross_strats:
+        try:
+            sigs = strat.on_bar(latest_dt, panel_data, None)
+            for s in sigs:
+                weight = STRATEGY_CREDIBILITY_WEIGHTS.get(s.strategy, 1.0)
+                s.score = round(min(max(s.score * weight, 0.10), 1.0), 2)
+                out_signals.append(s)
+        except Exception as e:
+            logger.warning(f"横截面策略 {strat.name} 扫描异常: {e}")
+    return out_signals
 
 
 def _min_guard_date(prior_dates: list, sig_date: str, n_days: int) -> str:
@@ -452,54 +533,68 @@ def scan_signals(universe: list = None, strategy_names: list = None,
     logger.info(f"扫描 {len(universe)} 只股票(预过滤), "
                 f"策略: {strategy_names}, 日期: {end_date}")
 
-    # 初始化策略实例
+    # 初始化策略实例（区分单股逐个扫描与横截面多标的一体化排名扫描）
     strategy_instances = []
     for name in strategy_names:
         if name in STRATEGY_REGISTRY:
             strategy_instances.append(STRATEGY_REGISTRY[name]())
+
+    single_strats = [s for s in strategy_instances if not getattr(s, "is_cross_sectional", False)]
+    cross_strats = [s for s in strategy_instances if getattr(s, "is_cross_sectional", False)]
 
     all_signals = []
 
     # 并行扫描（>= 50 只股票时启用并行）
     use_parallel = parallel and len(universe) >= 50
 
-    if use_parallel:
-        max_workers = SCANNER_PARALLEL_WORKERS or None  # None = 自动检测 CPU 核心数
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {
-                executor.submit(
-                    _scan_single_stock, ts_code, end_date, strategy_instances,
+    if single_strats:
+        if use_parallel:
+            max_workers = SCANNER_PARALLEL_WORKERS or None  # None = 自动检测 CPU 核心数
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(
+                        _scan_single_stock, ts_code, end_date, single_strats,
+                        min_daily_amount, filter_suspended,
+                    ): ts_code
+                    for ts_code in universe
+                }
+                completed = 0
+                for future in concurrent.futures.as_completed(futures):
+                    ts_code = futures[future]
+                    try:
+                        sigs = future.result()
+                        all_signals.extend(sigs)
+                    except Exception as e:
+                        logger.warning(f"{ts_code} 扫描异常: {e}")
+
+                    completed += 1
+                    if completed % 100 == 0:
+                        logger.info(f"已扫描 {completed}/{len(universe)}")
+                    if progress_callback:
+                        progress_callback(completed, len(universe))
+        else:
+            # 串行扫描（少量股票时更高效，无进程开销）
+            for i, ts_code in enumerate(universe):
+                sigs = _scan_single_stock(
+                    ts_code, end_date, single_strats,
                     min_daily_amount, filter_suspended,
-                ): ts_code
-                for ts_code in universe
-            }
-            completed = 0
-            for future in concurrent.futures.as_completed(futures):
-                ts_code = futures[future]
-                try:
-                    sigs = future.result()
-                    all_signals.extend(sigs)
-                except Exception as e:
-                    logger.warning(f"{ts_code} 扫描异常: {e}")
+                )
+                all_signals.extend(sigs)
 
-                completed += 1
-                if completed % 100 == 0:
-                    logger.info(f"已扫描 {completed}/{len(universe)}")
+                if (i + 1) % 100 == 0:
+                    logger.info(f"已扫描 {i + 1}/{len(universe)}")
                 if progress_callback:
-                    progress_callback(completed, len(universe))
-    else:
-        # 串行扫描（少量股票时更高效，无进程开销）
-        for i, ts_code in enumerate(universe):
-            sigs = _scan_single_stock(
-                ts_code, end_date, strategy_instances,
-                min_daily_amount, filter_suspended,
-            )
-            all_signals.extend(sigs)
+                    progress_callback(i + 1, len(universe))
 
-            if (i + 1) % 100 == 0:
-                logger.info(f"已扫描 {i + 1}/{len(universe)}")
-            if progress_callback:
-                progress_callback(i + 1, len(universe))
+    if cross_strats:
+        cross_sigs = _scan_cross_sectional(
+            universe, end_date, cross_strats,
+            min_daily_amount=min_daily_amount,
+            filter_suspended=filter_suspended,
+        )
+        all_signals.extend(cross_sigs)
+        if progress_callback and not single_strats:
+            progress_callback(len(universe), len(universe))
 
     # 1. 过滤滞后交易日过期信号（例如单只股票数据源延迟停在昨日，避免把昨日信号当作今日重推）
     sig_dates = {s.trade_date for s in all_signals if s.trade_date}
@@ -516,7 +611,7 @@ def scan_signals(universe: list = None, strategy_names: list = None,
             fresh_signals.append(s)
         all_signals = fresh_signals
 
-    # 2. 大盘环境风控（空头防守期与回测引擎保持一致：硬拦截趋势追涨买入；多头小幅鼓励）
+    # 2. 大盘环境风控（与回测引擎对齐：allow_bear_buy=False 的趋势追涨策略在空头期硬拦截；反转/轮动策略温和降权放行）
     if all_signals:
         try:
             from services.signal_service import get_market_regime
@@ -526,20 +621,26 @@ def scan_signals(universe: list = None, strategy_names: list = None,
                 "ma_cross", "signal_combo", "ma_bullish", "ma60_breakout",
                 "volume_price_breakout", "turtle", "donchian_breakout",
             }
-            oversold_strats = {"kdj_cross", "bollinger_reversal"}
+            oversold_strats = {"kdj_cross", "bollinger_reversal", "momentum_rotation"}
             trend_strats = {"ma_bullish", "ma60_breakout", "ma_cross", "volume_price_breakout", "macd_cross"}
             after_regime = []
             for sig in all_signals:
+                strat_cls = STRATEGY_REGISTRY.get(sig.strategy)
+                allow_bear = getattr(strat_cls, "allow_bear_buy", None)
+                is_trend_bear_block = (
+                    (allow_bear is False)
+                    or (allow_bear is None and sig.strategy in bear_blocked_buy_strats)
+                )
                 if sig.direction == "BUY" and regime == "BEAR":
-                    if respect_market_regime and sig.strategy in bear_blocked_buy_strats:
+                    if respect_market_regime and is_trend_bear_block:
                         logger.info(
                             f"大盘空头防守拦截趋势买单: {sig.ts_code} {sig.strategy} "
                             f"(score={sig.score:.2f})"
                         )
                         continue
-                    if sig.strategy in oversold_strats:
+                    if allow_bear is True or sig.strategy in oversold_strats:
                         sig.score = round(max(sig.score - 0.05, 0.10), 2)
-                    elif not respect_market_regime and sig.strategy in (bear_blocked_buy_strats | oversold_strats):
+                    elif not respect_market_regime and is_trend_bear_block:
                         sig.score = round(max(sig.score - 0.08, 0.10), 2)
                 elif sig.direction == "BUY" and regime == "BULL" and sig.strategy in trend_strats:
                     sig.score = round(min(sig.score + 0.03, 0.99), 2)
@@ -548,13 +649,39 @@ def scan_signals(universe: list = None, strategy_names: list = None,
         except Exception as e:
             logger.debug(f"大盘环境调权跳过: {e}")
 
-    # 3. 自选股个股适配策略过滤
+    # 3. 自选股个股适配策略过滤（含「⛔ 暂不适配·观望」熔断）
     if respect_watchlist_strategy and all_signals:
         all_signals = _filter_by_watchlist_strategy(all_signals)
 
     # 4. 跨日反手冷却 & 滞后重复卖出抑制
     if anti_whipsaw and all_signals:
         all_signals = _apply_cross_day_whipsaw_guard(all_signals)
+
+    # 5. 轻量估值与财报窗口守卫（仅当本地 stock_valuation 表已有缓存数据时激活）
+    if all_signals and any(s.direction == "BUY" for s in all_signals):
+        try:
+            from data.storage import get_valuation_map
+            from services.valuation_service import evaluate_valuation_guard
+            buy_codes = list({s.ts_code for s in all_signals if s.direction == "BUY"})
+            val_map = get_valuation_map(buy_codes)
+            if val_map:
+                for sig in all_signals:
+                    if sig.direction != "BUY" or sig.ts_code not in val_map:
+                        continue
+                    vg = evaluate_valuation_guard(
+                        sig.ts_code, val_map[sig.ts_code], ref_date=sig.trade_date
+                    )
+                    if vg["score_adj"] != 0.0:
+                        sig.score = round(min(max(sig.score + vg["score_adj"], 0.10), 0.99), 2)
+                    badge = vg.get("badge", "")
+                    if not vg["allow_left_buy"] and badge:
+                        sig.reason = f"[{badge}警示] {sig.reason}"
+                    elif "💎" in badge:
+                        sig.reason = f"[💎低估高息] {sig.reason}"
+                    elif vg.get("earnings_warning"):
+                        sig.reason = f"[📅财报窗口] {sig.reason}"
+        except Exception as e:
+            logger.debug(f"估值守卫检查跳过: {e}")
 
     # 按 score 降序排列
     all_signals.sort(key=lambda s: s.score, reverse=True)

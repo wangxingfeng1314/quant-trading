@@ -14,8 +14,9 @@ class BollingerReversalStrategy(BaseStrategy):
     适合震荡行情中的波段操作。
     """
     name = "bollinger_reversal"
-    description = "布林带反转策略（触下轨买、触上轨卖）"
+    description = "布林带反转策略（触下轨阳线企稳买、触上轨遇阻回落卖）"
     style = "震荡"
+    allow_bear_buy = True
     param_schema = {
         "boll_period": {"default": 20, "desc": "布林带周期"},
         "boll_std": {"default": 2.0, "desc": "标准差倍数"},
@@ -62,33 +63,35 @@ class BollingerReversalStrategy(BaseStrategy):
             curr_high = df["high"].iloc[-1]
             curr_close = df["close"].iloc[-1]
             prev_close = df["close"].iloc[-2]
+            curr_open = df["open"].iloc[-1] if "open" in df.columns else curr_close
 
             pos = portfolio.get_position(ts_code) if portfolio is not None else None
             has_position = pos is not None and not pos.is_empty
 
-            # 胜率增强过滤（RSI超卖探底配合下轨支撑，过滤阴跌无动能陷阱）
+            # 胜率增强过滤：RSI<42超卖探底 + 收盘收阳/平盘企稳（避免阴线盲目接飞刀）
             rsi = df["rsi14"].iloc[-1] if "rsi14" in df.columns else 50.0
-            rsi_oversold = pd.isna(rsi) or rsi < 45.0
+            rsi_oversold = pd.isna(rsi) or rsi < 42.0
+            candle_ok = curr_close >= curr_open
 
-            # 买入: 前一日在轨内或触轨，今日低点触及下轨后收盘回升 + RSI超卖支撑
-            if not has_position and rsi_oversold and prev_close >= prev_boll_lower and curr_low <= boll_lower and curr_close > boll_lower:
-                score = round(min(0.5 + (curr_close - boll_lower) / (boll_mid - boll_lower + 0.01) * 0.5, 1.0), 2)
+            # 买入: 前一日在轨内或触轨，今日低点触及下轨后收盘阳线企稳回升 + RSI超卖支撑
+            if not has_position and rsi_oversold and candle_ok and prev_close >= prev_boll_lower and curr_low <= boll_lower and curr_close > boll_lower:
+                score = round(min(0.55 + (curr_close - boll_lower) / (boll_mid - boll_lower + 0.01) * 0.45, 0.95), 2)
                 signals.append(Signal(
                     ts_code=ts_code, trade_date=trade_date,
                     strategy=self.name, direction="BUY",
                     score=score,
-                    reason=f"触及布林下轨{boll_lower:.2f}超卖企稳反弹至{curr_close:.2f}",
+                    reason=f"触及布林下轨{boll_lower:.2f}阳线企稳反弹至{curr_close:.2f}",
                     price_ref=curr_close,
                 ))
 
-            # 卖出: 当日最高点触及或突破布林带上轨，高抛止盈锁定胜率
-            elif (portfolio is None or has_position) and curr_high >= boll_upper:
-                score = round(min(0.6 + max(0.0, (curr_high - boll_upper) / (boll_upper - boll_mid + 0.01)) * 0.4, 0.95), 2)
+            # 卖出: 触及布林上轨后遇阻回落（收在上轨下方或收阴）才止盈；强势实体阳线突破上轨允许继续持有
+            elif (portfolio is None or has_position) and curr_high >= boll_upper and (curr_close < boll_upper or curr_close < curr_open):
+                score = round(min(0.6 + max(0.0, (curr_high - boll_upper) / (boll_upper - boll_mid + 0.01)) * 0.35, 0.95), 2)
                 signals.append(Signal(
                     ts_code=ts_code, trade_date=trade_date,
                     strategy=self.name, direction="SELL",
                     score=score,
-                    reason=f"触及布林上轨{boll_upper:.2f}逢高止盈",
+                    reason=f"触及布林上轨{boll_upper:.2f}遇阻回落止盈",
                     price_ref=curr_close,
                 ))
 

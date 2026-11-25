@@ -77,7 +77,7 @@ def test_migrations_are_idempotent(isolated_db):
     st.init_db()
     st.init_db()
     with st.get_conn() as conn:
-        assert st._get_db_version(conn) == 5
+        assert st._get_db_version(conn) == st._MIGRATIONS[-1][0]
 
 
 def test_migration_failure_does_not_advance_user_version(isolated_db, monkeypatch):

@@ -263,7 +263,9 @@ def _show_run_backtest():
                 return f"[{tag}] {c} {name_map.get(c, '')}"
 
             # 快捷操作栏
-            btn_col1, btn_col2, btn_col3 = st.columns([1.1, 1.2, 0.9])
+            from strategies.momentum_rotation import ROTATION_ETF_PRESETS
+            rotation_codes = [c for c, _ in ROTATION_ETF_PRESETS if c in all_codes]
+            btn_col1, btn_col2, btn_col3, btn_col4 = st.columns([1.0, 1.1, 1.1, 0.8])
             with btn_col1:
                 if st.button("➕ 选入自选股", key="bt_quick_wl", help=f"一键将 {len(wl_codes)} 只自选股加入多选框"):
                     st.session_state["bt_multiselect"] = sorted(list(set(st.session_state.get("bt_multiselect", []) + wl_codes)))
@@ -274,6 +276,13 @@ def _show_run_backtest():
                     st.session_state["bt_multiselect"] = sorted(list(set(st.session_state.get("bt_multiselect", []) + available_core)))
                     st.rerun()
             with btn_col3:
+                if st.button("🔄 选入ETF轮动池", key="bt_quick_rot", help="一键选入7只多资产轮动ETF（需在持仓管理页先导入数据）"):
+                    if rotation_codes:
+                        st.session_state["bt_multiselect"] = sorted(list(set(st.session_state.get("bt_multiselect", []) + rotation_codes)))
+                        st.rerun()
+                    else:
+                        st.toast("⚠️ 本地尚无轮动ETF日线，请先到「持仓管理→自选股」点击导入ETF轮动池", icon="⚠️")
+            with btn_col4:
                 if st.button("🗑️ 清空已选", key="bt_quick_clear"):
                     st.session_state["bt_multiselect"] = []
                     st.rerun()
@@ -355,7 +364,32 @@ def _show_run_backtest():
             enable_be = True
             be_trigger = 5.0
             be_buffer = 0.2
+            use_atr_stop = True
+            atr_stop_mult = 2.5
+            enable_partial_tp = False
+            partial_tp_pct = 8.0
+            follow_strategy_rm = True
             if enable_rm:
+                from engine.risk_manager import RiskManager as _RM
+
+                def _load_strategy_rm_preset(s_key: str):
+                    preset = _RM.for_strategy(s_key, use_atr_stop=True)
+                    st.session_state["bt_sl_pct"] = float(abs(preset.stop_loss_pct))
+                    st.session_state["bt_ts_pct"] = float(preset.trailing_stop_activation)
+                    st.session_state["bt_tp_pct"] = float(preset.trailing_stop_callback)
+                    st.session_state["bt_max_days"] = int(preset.max_holding_days)
+                    st.session_state["bt_enable_be"] = bool(preset.enable_break_even)
+                    st.session_state["bt_be_trigger"] = float(preset.break_even_trigger_pct)
+                    st.session_state["bt_be_buffer"] = float(preset.break_even_buffer_pct)
+                    st.session_state["bt_use_atr"] = bool(preset.use_atr_stop)
+                    st.session_state["bt_atr_mult"] = float(preset.atr_stop_mult)
+
+                st.button(
+                    f"⚡ 一键加载「{format_strategy_cn(selected_strategy)}」推荐风控预设",
+                    key="bt_load_rm_preset",
+                    on_click=_load_strategy_rm_preset,
+                    args=(selected_strategy,),
+                )
                 rm_c1, rm_c2 = st.columns(2)
                 with rm_c1:
                     stop_loss_pct = st.number_input("硬止损阈值 (%)", value=6.0, min_value=1.0, max_value=20.0, step=0.5, key="bt_sl_pct")
@@ -365,8 +399,17 @@ def _show_run_backtest():
                 with rm_c2:
                     trail_pullback_pct = st.number_input("移动止盈高点回撤 (%)", value=4.0, min_value=1.0, max_value=20.0, step=0.5, key="bt_tp_pct")
                     rm_trail_callback = float(trail_pullback_pct)
-                    max_days_val = st.number_input("最长持仓天数 (0=不限)", value=0, min_value=0, max_value=250, step=5, key="bt_max_days", help="推荐设为0(不强制平仓)，避免波段策略被30天硬中断")
+                    max_days_val = st.number_input("最长持仓天数 (0=不限)", value=0, min_value=0, max_value=250, step=5, key="bt_max_days", help="波段反转策略建议35天防阴跌僵持，趋势策略建议设为0")
                     rm_max_days = int(max_days_val)
+
+                # ATR 自适应止损与分批止盈
+                atr_c1, atr_c2 = st.columns(2)
+                with atr_c1:
+                    use_atr_stop = st.checkbox("📐 启用 ATR 动态止损 (按股性自动宽窄自适应)", value=True, key="bt_use_atr")
+                    atr_stop_mult = st.number_input("ATR 止损倍数", value=2.5, min_value=1.0, max_value=6.0, step=0.1, key="bt_atr_mult", disabled=not use_atr_stop)
+                with atr_c2:
+                    enable_partial_tp = st.checkbox("🎯 启用分批止盈 (浮盈达标先兑现50%)", value=False, key="bt_enable_ptp")
+                    partial_tp_pct = st.number_input("分批止盈目标 (%)", value=8.0, min_value=2.0, max_value=30.0, step=0.5, key="bt_ptp_pct", disabled=not enable_partial_tp)
 
                 # 保本止损机制
                 enable_be = st.checkbox("🛡️ 启用保本止损保护 (浮盈达标后回撤保本，锁定本金不转亏)", value=True, key="bt_enable_be")
@@ -377,8 +420,14 @@ def _show_run_backtest():
                     with bec2:
                         be_buffer = st.number_input("保本平仓缓冲 (%)", value=0.2, min_value=0.0, max_value=2.0, step=0.1, key="bt_be_buffer", help="回撤至成本+缓冲线时平仓锁定本金（覆盖手续费）")
 
+                if mode == "全部自选股":
+                    follow_strategy_rm = st.checkbox(
+                        "🤖 全部自选股自适应模式下，按每只股匹配策略自动选用专属风控 presets",
+                        value=True, key="bt_follow_strat_rm",
+                    )
+
             # 单只股票回测默认 1 (全仓)，多只股票组合默认 4
-            default_max_pos = 1 if (mode == "单只标的" or len(universe) <= 1) else 4
+            default_max_pos = 1 if (mode == "单只股票" or len(universe) <= 1) else 4
             max_pos_val = st.number_input("最大并发持仓股票数 (0=不限)", value=default_max_pos, min_value=0, max_value=50, step=1, key="bt_max_pos", help="单只标的回测请保持1以全额使用资金，多只股票组合建议设为3~5只")
 
             pos_sizing_opt = st.radio(
@@ -395,7 +444,7 @@ def _show_run_backtest():
             st.error("请选择至少一只股票")
             return
 
-        from engine.risk_manager import RiskManager
+        from engine.risk_manager import RiskManager, clone_risk_manager
         rm_instance = None
         if enable_rm:
             rm_instance = RiskManager(
@@ -406,11 +455,15 @@ def _show_run_backtest():
                 enable_break_even=enable_be,
                 break_even_trigger_pct=be_trigger,
                 break_even_buffer_pct=be_buffer,
+                use_atr_stop=use_atr_stop,
+                atr_stop_mult=float(atr_stop_mult),
+                partial_tp_pct=float(partial_tp_pct) if enable_partial_tp else 0.0,
             )
 
         # 批量回测自选股模式
         if mode == "全部自选股":
             results = []
+            skipped_no_trade = []
             progress_bar = st.progress(0)
             status_text = st.empty()
             watchlist = get_watchlist()
@@ -422,13 +475,20 @@ def _show_run_backtest():
                 cur_strategy_cls = strategy_cls
                 cur_params = params
                 cur_strat_label = format_strategy_cn(strategy_cls.name)
+                cur_rm = clone_risk_manager(rm_instance)
 
                 if 'wl_eval_mode' in locals() and wl_eval_mode.startswith("⭐"):
                     # 智能自适应匹配模式
                     from services.strategy_recommender import (
                         evaluate_stock_strategy, parse_recommended_strategy_key,
+                        is_no_trade_recommendation,
                     )
                     rec_str = wl_dict.get(ts_code, "")
+                    if is_no_trade_recommendation(rec_str):
+                        skipped_no_trade.append((ts_code, rec_str))
+                        progress_bar.progress((i + 1) / len(universe))
+                        continue
+
                     matched_key = parse_recommended_strategy_key(rec_str) or None
 
                     if not matched_key:
@@ -440,12 +500,18 @@ def _show_run_backtest():
                             nm = r.get("name", "")
                             ind = r.get("industry", "")
                         ev = evaluate_stock_strategy(ts_code, name=nm, industry=ind, start_date=start_date, end_date=end_date)
+                        if ev.get("is_oos") and ev.get("oos_passed") is False:
+                            skipped_no_trade.append((ts_code, ev.get("tag", "样本外暂不适配")))
+                            progress_bar.progress((i + 1) / len(universe))
+                            continue
                         matched_key = ev.get("strategy", "kdj_cross")
 
                     if matched_key in STRATEGY_REGISTRY:
                         cur_strategy_cls = STRATEGY_REGISTRY[matched_key]
                         cur_params = {k: v.get("default", 0) for k, v in cur_strategy_cls.param_schema.items()}
                         cur_strat_label = format_strategy_cn(matched_key)
+                        if enable_rm and follow_strategy_rm:
+                            cur_rm = RiskManager.for_strategy(matched_key, use_atr_stop=use_atr_stop)
 
                 bt = Backtester(
                     strategy_cls=cur_strategy_cls, params=cur_params,
@@ -453,8 +519,8 @@ def _show_run_backtest():
                     start_date=start_date, end_date=end_date,
                     initial_capital=float(capital),
                     execution_mode=exec_mode,
-                    risk_manager=rm_instance,
-                    max_active_positions=int(max_pos_val),
+                    risk_manager=cur_rm,
+                    max_active_positions=1,
                     position_sizing=pos_sizing,
                     market_regime_filter=enable_regime,
                 )
@@ -469,6 +535,10 @@ def _show_run_backtest():
 
             progress_bar.empty()
             status_text.empty()
+
+            if skipped_no_trade:
+                skip_txt = "、".join(f"{c}({t})" for c, t in skipped_no_trade)
+                st.info(f"⛔ 以下 {len(skipped_no_trade)} 只自选股被样本外风控熔断为「暂不适配·观望」，已跳过交易：{skip_txt}")
 
             if not results:
                 st.warning("所有自选股均无交易产生")
