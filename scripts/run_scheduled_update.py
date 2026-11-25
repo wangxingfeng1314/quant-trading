@@ -22,5 +22,13 @@ if __name__ == "__main__":
             sys.exit(0)
         # 1. 增量更新自选股数据
         run_update(days=3, watchlist=True)
+        # 1.5 自动刷新过期/缺失的估值缓存，并为新增自选股补齐推荐策略
+        try:
+            from services.valuation_service import refresh_watchlist_valuations_if_stale
+            from services.strategy_recommender import batch_update_watchlist_recommendations
+            refresh_watchlist_valuations_if_stale(max_age_days=7)
+            batch_update_watchlist_recommendations(force=False)
+        except Exception as sync_err:
+            print(f"估值/策略标签自动补齐跳过: {sync_err}")
         # 2. 扫描自选股信号 + 推送通知（含持仓盈亏日报）
         scan_and_notify()

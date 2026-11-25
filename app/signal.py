@@ -9,6 +9,7 @@ from engine.scanner import scan_signals
 from data.storage import (
     get_signals, get_instrument_list, get_daily, get_stocks_with_data,
     get_watchlist, get_positions, add_position, remove_position, get_valuation_map,
+    upsert_position_buy, reduce_position,
 )
 from app.st_utils import (
     chinese_dataframe, chinese_date_picker, strategy_label,
@@ -427,43 +428,78 @@ def _render_broker_order_sheet(signals: list, scan_date_str: str, stock_map: dic
             )
 
         # 一键同步已成交信号到模拟持仓表，激活每日15:10移动止盈与ATR止损推送闭环
+        sig_ref_map = {}
+        for s in signals:
+            if s.ts_code not in sig_ref_map and float(getattr(s, "price_ref", 0) or 0) > 0:
+                sig_ref_map[s.ts_code] = float(s.price_ref)
+
         st.markdown("---")
         with st.form("sync_broker_orders_to_pos"):
-            st.markdown("**📌 实盘成交回填（勾选后一键同步到模拟持仓，开启每日 ATR 止损与移动止盈预警）**")
+            st.markdown("**📌 实盘成交回填（同股自动合并均价 + 支持分批减仓与净盈亏记账，开启每日 ATR 止损/移动止盈预警）**")
             row_labels = [
                 f"{r['操作']} | {r['标的代码']} {r['名称']} ({r['委托数量(股)']}股 @ ¥{r['委托价格']:.2f})"
                 for r in order_rows
             ]
-            selected_indices = st.multiselect(
-                "选择你在券商实际成交的委托单",
-                list(range(len(order_rows))),
-                format_func=lambda idx: row_labels[idx],
-                key="sync_orders_select",
-            )
-            if st.form_submit_button("✅ 同步选中成交到持仓表", type="primary"):
+            sc_col1, sc_col2 = st.columns([2.5, 1.2])
+            with sc_col1:
+                selected_indices = st.multiselect(
+                    "选择你在券商实际成交的委托单",
+                    list(range(len(order_rows))),
+                    format_func=lambda idx: row_labels[idx],
+                    key="sync_orders_select",
+                )
+            with sc_col2:
+                sell_ratio_opt = st.radio(
+                    "卖出执行比例",
+                    ["全部清仓 (100%)", "分批减半 (50%)"],
+                    index=0,
+                    key="sync_sell_ratio",
+                )
+            if st.form_submit_button("✅ 同步选中成交到持仓与实盘账本", type="primary"):
                 if not selected_indices:
                     st.warning("请先勾选实际已成交的委托记录")
                 else:
                     bought_cnt, sold_cnt = 0, 0
+                    total_realized_pnl = 0.0
                     cur_positions = get_positions()
+                    held_shares_map = {}
+                    for pos in cur_positions:
+                        held_shares_map[pos["ts_code"]] = held_shares_map.get(pos["ts_code"], 0) + int(pos.get("shares", 0) or 0)
+
                     for idx in selected_indices:
                         r = order_rows[idx]
                         code = r["标的代码"]
+                        ref_px = sig_ref_map.get(code, float(r["委托价格"]))
                         if r["操作"] == "买入" and r["委托数量(股)"] > 0:
-                            add_position(
-                                code,
-                                float(r["委托价格"]),
-                                int(r["委托数量(股)"]),
-                                scan_date_str,
+                            upsert_position_buy(
+                                ts_code=code,
+                                buy_price=float(r["委托价格"]),
+                                shares=int(r["委托数量(股)"]),
+                                buy_date=scan_date_str,
                                 note=f"信号跟单:{r['来源策略']}",
+                                signal_price=ref_px,
+                                strategy=r["来源策略"],
                             )
                             bought_cnt += 1
                         elif r["操作"] == "卖出":
-                            for pos in cur_positions:
-                                if pos["ts_code"] == code:
-                                    remove_position(pos["_id"])
-                                    sold_cnt += 1
-                    st.toast(f"✅ 持仓闭环已更新：新开仓 {bought_cnt} 笔，平仓移除 {sold_cnt} 笔", icon="💼")
+                            held_qty = held_shares_map.get(code, 0)
+                            if held_qty > 0:
+                                sell_qty = (held_qty // 2 // 100 * 100) if ("50%" in sell_ratio_opt and held_qty >= 200) else held_qty
+                                if sell_qty <= 0:
+                                    sell_qty = held_qty
+                                res = reduce_position(
+                                    ts_code=code,
+                                    sell_shares=sell_qty,
+                                    sell_price=float(r["委托价格"]),
+                                    sell_date=scan_date_str,
+                                    strategy=r["来源策略"],
+                                    signal_price=ref_px,
+                                    note=f"信号平仓:{r['来源策略']}",
+                                )
+                                total_realized_pnl += float(res.get("pnl", 0.0))
+                                sold_cnt += 1
+                    pnl_msg = f"，累计实现盈亏 ¥{total_realized_pnl:+.2f}" if sold_cnt > 0 else ""
+                    st.toast(f"✅ 持仓与账本已更新：买入 {bought_cnt} 笔，卖出 {sold_cnt} 笔{pnl_msg}", icon="💼")
                     st.rerun()
 
 
@@ -630,8 +666,8 @@ def _show_signal_validation():
             else:
                 entry_price = signal_close
 
-            # N日后的价格
-            future_idx = pos + hold_days
+            # N日后的价格（next_open 次日开盘买入则持有 hold_days 天后在 pos+1+hold_days 收盘结算，避免 T+0 少算一天）
+            future_idx = (pos + 1 + hold_days) if use_next_open else (pos + hold_days)
             if future_idx >= len(df):
                 continue
 

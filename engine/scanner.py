@@ -611,12 +611,21 @@ def scan_signals(universe: list = None, strategy_names: list = None,
             fresh_signals.append(s)
         all_signals = fresh_signals
 
-    # 2. 大盘环境风控（与回测引擎对齐：allow_bear_buy=False 的趋势追涨策略在空头期硬拦截；反转/轮动策略温和降权放行）
+    # 2. 大盘环境风控（与回测引擎对齐：allow_bear_buy=False 的趋势追涨策略在空头期硬拦截；
+    #    若大盘平稳但创业板指处于空头，同步拦截高波/成长类趋势买单防二八分化陷阱）
     if all_signals:
         try:
             from services.signal_service import get_market_regime
             regime_info = get_market_regime(end_date)
             regime = regime_info.get("regime", "RANGE")
+            growth_regime = "RANGE"
+            if respect_market_regime and regime != "BEAR" and any(s.direction == "BUY" for s in all_signals):
+                try:
+                    growth_info = get_market_regime(end_date, index_code="399006.SZ")
+                    growth_regime = growth_info.get("regime", "RANGE")
+                except TypeError:
+                    growth_regime = "RANGE"
+
             bear_blocked_buy_strats = {
                 "ma_cross", "signal_combo", "ma_bullish", "ma60_breakout",
                 "volume_price_breakout", "turtle", "donchian_breakout",
@@ -642,6 +651,21 @@ def scan_signals(universe: list = None, strategy_names: list = None,
                         sig.score = round(max(sig.score - 0.05, 0.10), 2)
                     elif not respect_market_regime and is_trend_bear_block:
                         sig.score = round(max(sig.score - 0.08, 0.10), 2)
+                elif sig.direction == "BUY" and respect_market_regime and is_trend_bear_block and growth_regime == "BEAR":
+                    is_growth_sym = sig.ts_code.startswith(("300", "301", "688"))
+                    if not is_growth_sym:
+                        try:
+                            from services.valuation_service import _estimate_causal_atr_and_close
+                            atr_pct, _ = _estimate_causal_atr_and_close(sig.ts_code, get_daily)
+                            is_growth_sym = atr_pct >= 2.2
+                        except Exception:
+                            is_growth_sym = False
+                    if is_growth_sym:
+                        logger.info(
+                            f"创业板空头分化拦截成长/高波趋势买单: {sig.ts_code} {sig.strategy} "
+                            f"(score={sig.score:.2f})"
+                        )
+                        continue
                 elif sig.direction == "BUY" and regime == "BULL" and sig.strategy in trend_strats:
                     sig.score = round(min(sig.score + 0.03, 0.99), 2)
                 after_regime.append(sig)

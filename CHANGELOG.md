@@ -1,5 +1,21 @@
 # Changelog
 
+## [v0.6.0] - 2026-11-25
+
+### Added & Fixed (P0–P2 执行层·组合风控·闭环复盘全面升级)
+- **P0-1 有条件僵持时间止损 (`engine/risk_manager.py`, `services/position_service.py`)**:
+  - `RiskManager` 新增 `max_holding_pnl_cap`（仅当持仓天数超限且浮盈低于该阈值时触发时间止损），`kdj_cross` / `bollinger_reversal` 预设升级为 `max_holding_days=60, max_holding_pnl_cap=2.0`，保留趋势红利单、只清阴跌僵持单；同步对齐持仓诊断提示。
+- **P0-2 推荐器小样本盈亏比贝叶斯平滑与样本外偏弱兜底 (`services/strategy_recommender.py`)**:
+  - 训练期盈亏比改为向 `1.0` 收缩的贝叶斯平滑（`sample_trust = min(1.0, sells / 8.0)`），防止 1~2 笔大胜率扭曲排序；样本外平仓不足 3 笔但期间亏损达 `-3.0%` 以上时同步熔断为 `⛔ 暂不适配·观望`。
+- **P0-3 & P2-7 双指数共振择时、盘中池隔离与过期数据自动补采 (`services/signal_service.py`, `services/valuation_service.py`, `engine/scanner.py`, `scheduler/__init__.py`, `scripts/`)**:
+  - `get_market_regime` 在 `000300.SH` 滞后于 `000001.SH` 时自动切换至最新主板指数；新增 `get_dual_market_regime()` 联动 `399006.SZ` 创业板指。
+  - `scan_signals()` 在创业板指走熊时自动拦截创业板(`300/301`)/科创板(`688`)及高波动(`ATR%>=2.2%`)个股逆势买入；定时扫描隔离 `ETF轮动池`（仅跑动量轮动）与普通个股池；新增 7 天过期估值自动补采与未评级标的推荐自动回填；`init_data.py` 新增失败/滞后标的与指数重采。
+- **P1-4 实盘持仓合并加减仓与交易复盘账本 (`data/storage.py`, `services/position_service.py`, `app/signal.py`, `app/portfolio.py`)**:
+  - 数据库 schema v7 新增 `real_trade_journal` 表，提供 `upsert_position_buy()`（同股多笔加仓加权合并均价）、`reduce_position()`（FIFO 分批/全部减仓并精确计算 A 股手续费/滑点/净盈亏）与 `summarize_trade_journal()` 分策略归因统计。
+- **P1-5 & P2-6 组合级风控、执行价差护栏与统一自适应组合回测 (`engine/backtester.py`, `app/backtest.py`, `app/signal.py`)**:
+  - `Backtester` 新增次日高开缺口过滤（`max_open_gap_pct`）、组合净值回撤半仓降速器（`drawdown_brake_pct`）、同申万行业持仓上限（`max_sector_positions`）、因果 60 日高相关个股拦截（`max_correlation`）、双指数择时（`dual_index_regime`），并支持 `strategy_router` + `risk_manager="auto"` 共享资金池多策略协同回测。
+  - 网格搜索与 Walk-Forward 改为使用 `RiskManager.for_strategy(..., use_atr_stop=True)`；修复 `app/signal.py` 信号验证 `future_idx` off-by-one 偏差；新增前端「🚀 统一组合自适应回测」模式。
+
 ## [v0.5.0] - 2026-11-25
 
 ### 🚀 全栈量化策略、自适应风控与实盘闭环全面改造

@@ -2,6 +2,8 @@
 import logging
 from typing import Optional, List, Dict
 
+import pandas as pd
+
 from engine.scanner import scan_signals
 from data.storage import get_signals, save_signals_batch, get_index_daily, get_daily
 from data.indicators import apply_indicators
@@ -34,13 +36,14 @@ STRATEGY_CREDIBILITY_WEIGHTS: Dict[str, float] = {
 }
 
 
-def get_market_regime(end_date: str = "") -> dict:
-    """识别当前大盘所处环境（多头进攻 / 震荡均衡 / 空头防守）并给出仓位与风格建议"""
+def get_market_regime(end_date: str = "", index_code: str = "000300.SH") -> dict:
+    """识别当前大盘或成长板块指数环境（多头进攻 / 震荡均衡 / 空头防守）并给出仓位与风格建议。"""
+    target_code = str(index_code or "000300.SH").strip() or "000300.SH"
     default_regime = {
         "regime": "RANGE",
         "label": "🟡 震荡均衡",
         "max_position_pct": 50,
-        "index_code": "000300.SH",
+        "index_code": target_code,
         "close": 0.0,
         "ma20": 0.0,
         "rsi14": 50.0,
@@ -48,12 +51,25 @@ def get_market_regime(end_date: str = "") -> dict:
         "advice": "大盘处于震荡区间，建议总仓位控制在 50% 以内，优选多策略共振与回踩企稳标的，严禁追高。",
     }
     try:
-        df = get_index_daily("000300.SH", limit=80)
-        idx_code = "000300.SH"
+        df = get_index_daily(target_code, limit=80)
+        idx_code = target_code
+        # 若默认的沪深300(000300.SH)最新交易日落后于上证指数，自动告警并回退到更及时的上证指数
+        if target_code == "000300.SH":
+            df_sh = get_index_daily("000001.SH", limit=80)
+            if df_sh is not None and len(df_sh) >= 25:
+                sh_sub = df_sh[df_sh["trade_date"] <= end_date] if end_date else df_sh
+                hs_sub = df[df["trade_date"] <= end_date] if (df is not None and not df.empty and end_date) else df
+                sh_max = str(sh_sub["trade_date"].iloc[-1]) if not sh_sub.empty else ""
+                hs_max = str(hs_sub["trade_date"].iloc[-1]) if (hs_sub is not None and not hs_sub.empty) else ""
+                if sh_max and (not hs_max or sh_max > hs_max):
+                    logger.warning(f"000300.SH 数据滞后({hs_max} < {sh_max})，大盘择时自动切换至 000001.SH")
+                    df = df_sh
+                    idx_code = "000001.SH"
+
         if df is None or len(df) < 25:
             df = get_index_daily("000001.SH", limit=80)
             idx_code = "000001.SH"
-        if df is None or len(df) < 25:
+        if (df is None or len(df) < 25) and target_code == "000300.SH":
             df = get_daily("510310.SH", end_date=end_date, limit=80)
             idx_code = "510310.SH"
         if df is None or df.empty or len(df) < 20:
@@ -70,7 +86,8 @@ def get_market_regime(end_date: str = "") -> dict:
         ma20 = float(latest.get("ma20", close) or close)
         prev_ma20 = float(df["ma20"].iloc[-3]) if ("ma20" in df.columns and len(df) >= 3 and df["ma20"].iloc[-3] == df["ma20"].iloc[-3]) else ma20
         ma60 = float(latest.get("ma60", ma20) or ma20)
-        rsi14 = float(latest.get("rsi14", 50.0) or 50.0)
+        raw_rsi = latest.get("rsi14", None)
+        rsi14 = float(raw_rsi) if (raw_rsi is not None and pd.notna(raw_rsi)) else 50.0
         close_5d_ago = float(df["close"].iloc[-6]) if len(df) >= 6 else float(df["close"].iloc[0])
         chg_5d = ((close / close_5d_ago) - 1.0) * 100.0 if close_5d_ago > 0 else 0.0
 
@@ -104,6 +121,37 @@ def get_market_regime(end_date: str = "") -> dict:
     except Exception as e:
         logger.warning(f"大盘环境识别异常: {e}")
         return default_regime
+
+
+def get_dual_market_regime(end_date: str = "") -> dict:
+    """双指数风格择时：大盘蓝筹看沪深300(000300.SH)，成长/高波看创业板指(399006.SZ)。
+
+    防止「银行高股息拉盘护住沪深300、但成长中小盘普跌」的二八分化假安全假象。
+    """
+    large = get_market_regime(end_date=end_date, index_code="000300.SH")
+    try:
+        growth = get_market_regime(end_date=end_date, index_code="399006.SZ")
+    except TypeError:
+        growth = large
+
+    large_allow = large.get("regime", "RANGE") != "BEAR"
+    growth_allow = large_allow and (growth.get("regime", "RANGE") != "BEAR")
+
+    if not large_allow:
+        combined_regime = "BEAR"
+    elif not growth_allow:
+        combined_regime = "GROWTH_BEAR"
+    else:
+        combined_regime = large.get("regime", "RANGE")
+
+    return {
+        "large_cap": large,
+        "growth": growth,
+        "large_allow_buy": large_allow,
+        "growth_allow_buy": growth_allow,
+        "combined_regime": combined_regime,
+        "summary": f"权重({large.get('index_code')}): {large.get('label')} | 成长(399006.SZ): {growth.get('label')}",
+    }
 
 
 class SignalService:

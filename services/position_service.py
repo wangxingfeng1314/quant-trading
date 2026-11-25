@@ -84,7 +84,8 @@ def diagnose_position_action(
     if is_reversal:
         sl_pct = round(max(4.5, min(10.0, atr_pct * 3.0)), 1)
         tp_pct = round(max(6.0, min(14.0, sl_pct * 1.4)), 1)
-        max_hold_limit = 35
+        max_hold_limit = 60
+        max_hold_pnl_cap = 2.0
         enable_be = False
         be_trigger = 999.0
         be_buffer = 0.0
@@ -94,6 +95,7 @@ def diagnose_position_action(
         sl_pct = float(plan.get("sl_pct", 5.0))
         tp_pct = float(plan.get("tp_pct", 10.0))
         max_hold_limit = 0
+        max_hold_pnl_cap = None
         enable_be = True
         be_trigger = 5.0
         be_buffer = 0.5
@@ -162,8 +164,8 @@ def diagnose_position_action(
     elif recent_sell_str:
         action = f"⚠️ 触发卖出信号({recent_sell_str})·建议减仓/离场"
         level = "warning"
-    elif max_hold_limit > 0 and holding_days >= max_hold_limit:
-        action = f"⏱️ 持仓已达{holding_days}天(超{max_hold_limit}天)·建议时间止损调仓"
+    elif max_hold_limit > 0 and holding_days >= max_hold_limit and (max_hold_pnl_cap is None or pnl_pct < max_hold_pnl_cap):
+        action = f"⏱️ 持仓已达{holding_days}天仍无起色(超{max_hold_limit}天且盈亏{pnl_pct:+.1f}%)·建议时间止损调仓"
         level = "warning"
     elif pnl_pct >= tp_pct:
         action = f"🎯 达到目标止盈(+{tp_pct:.1f}%)·可分批止盈"
@@ -278,4 +280,78 @@ def build_position_risk_report(
         "total_pnl_pct": total_pnl_pct,
         "urgent_alerts": urgent_alerts,
         "profit_alerts": profit_alerts,
+    }
+
+
+def summarize_trade_journal(journal_df=None) -> dict:
+    """汇总实盘账本已实现盈亏、胜率、滑点损耗及按策略归因统计。"""
+    import pandas as pd
+    if journal_df is None:
+        from data.storage import get_trade_journal
+        journal_df = get_trade_journal(limit=1000)
+
+    if journal_df is None or journal_df.empty:
+        return {
+            "closed_count": 0,
+            "buy_count": 0,
+            "win_count": 0,
+            "loss_count": 0,
+            "win_rate": 0.0,
+            "total_pnl": 0.0,
+            "avg_pnl_pct": 0.0,
+            "avg_holding_days": 0.0,
+            "avg_slippage_pct": 0.0,
+            "by_strategy": [],
+        }
+
+    buy_df = journal_df[journal_df["direction"] == "BUY"]
+    sell_df = journal_df[journal_df["direction"] == "SELL"]
+    slip_valid = journal_df[journal_df["signal_price"].fillna(0) > 0]
+    avg_slip = float(slip_valid["slippage_pct"].mean()) if not slip_valid.empty else 0.0
+
+    if sell_df.empty:
+        return {
+            "closed_count": 0,
+            "buy_count": int(len(buy_df)),
+            "win_count": 0,
+            "loss_count": 0,
+            "win_rate": 0.0,
+            "total_pnl": 0.0,
+            "avg_pnl_pct": 0.0,
+            "avg_holding_days": 0.0,
+            "avg_slippage_pct": round(avg_slip, 3),
+            "by_strategy": [],
+        }
+
+    wins = sell_df[sell_df["pnl"] > 0]
+    losses = sell_df[sell_df["pnl"] <= 0]
+    closed_cnt = int(len(sell_df))
+
+    by_strategy = []
+    sell_work = sell_df.copy()
+    sell_work["strat_key"] = sell_work["strategy"].fillna("").replace("", "手动/未标注")
+    for s_key, grp in sell_work.groupby("strat_key"):
+        w_cnt = int((grp["pnl"] > 0).sum())
+        n_cnt = int(len(grp))
+        by_strategy.append({
+            "策略": _format_strategy_cn_safe(str(s_key)),
+            "平仓笔数": n_cnt,
+            "胜率%": round(w_cnt / n_cnt * 100.0, 1) if n_cnt > 0 else 0.0,
+            "累计盈亏(元)": round(float(grp["pnl"].sum()), 2),
+            "平均盈亏%": round(float(grp["pnl_pct"].mean()), 2),
+            "平均持有天": round(float(grp["holding_days"].mean()), 1),
+        })
+    by_strategy.sort(key=lambda r: r["累计盈亏(元)"], reverse=True)
+
+    return {
+        "closed_count": closed_cnt,
+        "buy_count": int(len(buy_df)),
+        "win_count": int(len(wins)),
+        "loss_count": int(len(losses)),
+        "win_rate": round(len(wins) / closed_cnt * 100.0, 1),
+        "total_pnl": round(float(sell_df["pnl"].sum()), 2),
+        "avg_pnl_pct": round(float(sell_df["pnl_pct"].mean()), 2),
+        "avg_holding_days": round(float(sell_df["holding_days"].mean()), 1),
+        "avg_slippage_pct": round(avg_slip, 3),
+        "by_strategy": by_strategy,
     }

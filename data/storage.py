@@ -375,6 +375,15 @@ _MIGRATIONS = (
              "dividend_yield REAL, roe REAL, market_cap_yi REAL, "
              "pe_percentile REAL, next_report_date TEXT DEFAULT '', "
              "updated_at TEXT)"]),
+    (7, [], ["CREATE TABLE IF NOT EXISTS real_trade_journal ("
+             "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+             "ts_code TEXT NOT NULL, direction TEXT NOT NULL, "
+             "trade_date TEXT NOT NULL, price REAL NOT NULL, "
+             "shares INTEGER NOT NULL, signal_price REAL DEFAULT 0.0, "
+             "slippage_pct REAL DEFAULT 0.0, strategy TEXT DEFAULT '', "
+             "pnl REAL DEFAULT 0.0, pnl_pct REAL DEFAULT 0.0, "
+             "holding_days INTEGER DEFAULT 0, note TEXT DEFAULT '', "
+             "created_at TEXT)"]),
 )
 
 
@@ -593,6 +602,25 @@ def init_db():
                 next_report_date TEXT DEFAULT '',  -- 下次财报日期 YYYYMMDD
                 updated_at       TEXT              -- 更新时间
             );
+
+            -- 实盘成交复盘账本（记录加仓/分批减仓/清仓净盈亏与实盘滑点归因）
+            CREATE TABLE IF NOT EXISTS real_trade_journal (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts_code      TEXT NOT NULL,
+                direction    TEXT NOT NULL,
+                trade_date   TEXT NOT NULL,
+                price        REAL NOT NULL,
+                shares       INTEGER NOT NULL,
+                signal_price REAL DEFAULT 0.0,
+                slippage_pct REAL DEFAULT 0.0,
+                strategy     TEXT DEFAULT '',
+                pnl          REAL DEFAULT 0.0,
+                pnl_pct      REAL DEFAULT 0.0,
+                holding_days INTEGER DEFAULT 0,
+                note         TEXT DEFAULT '',
+                created_at   TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_journal_date ON real_trade_journal(trade_date);
         """)
 
         # 执行版本化迁移（新增列已全部由 _MIGRATIONS 声明式覆盖，
@@ -1684,6 +1712,184 @@ def clear_positions():
     """清空所有模拟持仓"""
     with get_conn() as conn:
         conn.execute("DELETE FROM position")
+
+
+def _calc_holding_calendar_days(buy_date: str, sell_date: str) -> int:
+    try:
+        b_s = str(buy_date or "").replace("-", "").replace("/", "").strip()[:8]
+        s_s = str(sell_date or "").replace("-", "").replace("/", "").strip()[:8]
+        if len(b_s) == 8 and len(s_s) == 8:
+            return max(0, (datetime.strptime(s_s, "%Y%m%d") - datetime.strptime(b_s, "%Y%m%d")).days)
+    except ValueError:
+        pass
+    return 0
+
+
+def upsert_position_buy(
+    ts_code: str,
+    buy_price: float,
+    shares: int,
+    buy_date: str,
+    note: str = "",
+    signal_price: float = 0.0,
+    strategy: str = "",
+) -> int:
+    """实盘/模拟买入入账：同股自动加权合并均价与股数，并写入 real_trade_journal。"""
+    code = str(ts_code or "").strip()
+    px = float(buy_price or 0.0)
+    qty = int(shares or 0)
+    if not code or px <= 0 or qty <= 0:
+        raise ValueError("买入代码、价格和股数必须为正")
+    b_date = str(buy_date or "").replace("-", "").replace("/", "").strip()[:8] or datetime.now().strftime("%Y%m%d")
+    sig_px = float(signal_price or 0.0)
+    # 正值表示买入成本高于信号参考价（不利滑点）
+    slip_pct = round(((px / sig_px) - 1.0) * 100.0, 3) if sig_px > 0 else 0.0
+    now = datetime.now().isoformat()
+
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT id, buy_price, shares, buy_date, note FROM position WHERE ts_code = ? ORDER BY id ASC",
+            (code,),
+        ).fetchall()
+        if rows:
+            first_id = rows[0][0]
+            old_shares = sum(int(r[2] or 0) for r in rows)
+            old_cost_amt = sum(float(r[1] or 0.0) * int(r[2] or 0) for r in rows)
+            total_shares = old_shares + qty
+            new_avg = round((old_cost_amt + px * qty) / total_shares, 4)
+            dates = [str(r[3] or "").replace("-", "").strip()[:8] for r in rows if r[3]] + [b_date]
+            earliest_date = min(d for d in dates if d) if dates else b_date
+            old_note = next((str(r[4]) for r in rows if r[4]), "")
+            merged_note = note or old_note
+            conn.execute(
+                "UPDATE position SET buy_price = ?, shares = ?, buy_date = ?, note = ?, updated_at = ? WHERE id = ?",
+                (new_avg, total_shares, earliest_date, merged_note, now, first_id),
+            )
+            if len(rows) > 1:
+                dup_ids = [r[0] for r in rows[1:]]
+                ph = ",".join("?" * len(dup_ids))
+                conn.execute(f"DELETE FROM position WHERE id IN ({ph})", dup_ids)
+            pos_id = first_id
+        else:
+            cur = conn.execute(
+                "INSERT INTO position (ts_code, direction, buy_price, shares, buy_date, note, created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (code, "BUY", px, qty, b_date, note, now, now),
+            )
+            pos_id = cur.lastrowid
+
+        conn.execute(
+            "INSERT INTO real_trade_journal "
+            "(ts_code, direction, trade_date, price, shares, signal_price, slippage_pct, strategy, pnl, pnl_pct, holding_days, note, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (code, "BUY", b_date, px, qty, sig_px, slip_pct, str(strategy or ""), 0.0, 0.0, 0, note, now),
+        )
+    return pos_id
+
+
+def reduce_position(
+    ts_code: str,
+    sell_shares: int,
+    sell_price: float,
+    sell_date: str = "",
+    strategy: str = "",
+    signal_price: float = 0.0,
+    note: str = "",
+    position_id: Optional[int] = None,
+) -> dict:
+    """实盘/模拟部分减仓或清仓：更新 position 余仓、计算A股真实税费后净盈亏并写入账本。"""
+    code = str(ts_code or "").strip()
+    px = float(sell_price or 0.0)
+    req_qty = int(sell_shares or 0)
+    s_date = str(sell_date or "").replace("-", "").replace("/", "").strip()[:8] or datetime.now().strftime("%Y%m%d")
+    sig_px = float(signal_price or 0.0)
+    # 正值表示卖出实际价格低于信号价（不利滑点）
+    slip_pct = round((1.0 - (px / sig_px)) * 100.0, 3) if (sig_px > 0 and px > 0) else 0.0
+    now = datetime.now().isoformat()
+
+    with get_conn() as conn:
+        if position_id is not None:
+            rows = conn.execute(
+                "SELECT id, ts_code, buy_price, shares, buy_date FROM position WHERE id = ?",
+                (position_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id, ts_code, buy_price, shares, buy_date FROM position WHERE ts_code = ? ORDER BY buy_date ASC, id ASC",
+                (code,),
+            ).fetchall()
+        if not rows:
+            return {"sold_shares": 0, "remaining_shares": 0, "pnl": 0.0, "pnl_pct": 0.0}
+
+        code = code or str(rows[0][1])
+        total_avail = sum(int(r[3] or 0) for r in rows)
+        to_sell = total_avail if req_qty <= 0 else min(req_qty, total_avail)
+        if to_sell <= 0 or px <= 0:
+            return {"sold_shares": 0, "remaining_shares": total_avail, "pnl": 0.0, "pnl_pct": 0.0}
+
+        remaining_to_sell = to_sell
+        sold_cost_principal = 0.0
+        earliest_buy_date = str(rows[0][4] or "")
+        for rid, _rc, r_buy_px, r_shares, _r_bdate in rows:
+            if remaining_to_sell <= 0:
+                break
+            r_sh = int(r_shares or 0)
+            take = min(remaining_to_sell, r_sh)
+            sold_cost_principal += float(r_buy_px or 0.0) * take
+            remaining_to_sell -= take
+            new_sh = r_sh - take
+            if new_sh <= 0:
+                conn.execute("DELETE FROM position WHERE id = ?", (rid,))
+            else:
+                conn.execute(
+                    "UPDATE position SET shares = ?, updated_at = ? WHERE id = ?",
+                    (new_sh, now, rid),
+                )
+
+        avg_buy_px = sold_cost_principal / to_sell if to_sell > 0 else 0.0
+        from engine.commission import calc_cost
+        buy_fee = calc_cost(avg_buy_px, to_sell, "BUY", ts_code=code)["total"]
+        sell_fee = calc_cost(px, to_sell, "SELL", ts_code=code)["total"]
+        cost_basis = sold_cost_principal + buy_fee
+        net_proceeds = px * to_sell - sell_fee
+        realized_pnl = round(net_proceeds - cost_basis, 2)
+        pnl_pct = round((realized_pnl / cost_basis) * 100.0, 2) if cost_basis > 0 else 0.0
+        hold_days = _calc_holding_calendar_days(earliest_buy_date, s_date)
+
+        conn.execute(
+            "INSERT INTO real_trade_journal "
+            "(ts_code, direction, trade_date, price, shares, signal_price, slippage_pct, strategy, pnl, pnl_pct, holding_days, note, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (code, "SELL", s_date, px, to_sell, sig_px, slip_pct, str(strategy or ""), realized_pnl, pnl_pct, hold_days, note, now),
+        )
+
+    return {
+        "ts_code": code,
+        "sold_shares": to_sell,
+        "remaining_shares": total_avail - to_sell,
+        "sell_price": px,
+        "avg_cost": round(avg_buy_px, 4),
+        "pnl": realized_pnl,
+        "pnl_pct": pnl_pct,
+        "holding_days": hold_days,
+        "slippage_pct": slip_pct,
+    }
+
+
+def get_trade_journal(limit: int = 200, strategy: str = "") -> pd.DataFrame:
+    """获取实盘成交复盘账本流水（按成交日倒序）。"""
+    sql = "SELECT * FROM real_trade_journal"
+    params = []
+    if strategy:
+        sql += " WHERE strategy = ?"
+        params.append(strategy)
+    sql += " ORDER BY trade_date DESC, id DESC LIMIT ?"
+    params.append(int(limit))
+    try:
+        with get_conn() as conn:
+            return pd.read_sql(sql, conn, params=params)
+    except Exception:
+        return pd.DataFrame()
 
 
 # ============================================================

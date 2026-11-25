@@ -66,21 +66,60 @@ def scan_and_notify(force: bool = False):
     else:
         job_key = None
 
-    # ---------- 1. 扫描自选股信号并推送 ----------
+    # ---------- 1. 按自选分组隔离扫描信号并推送 ----------
     scan_ok = False
     try:
+        from strategies import STRATEGY_REGISTRY
         watchlist = get_watchlist()
         if not watchlist.empty:
-            stocks = watchlist["ts_code"].tolist()
-            logger.info(f"开始扫描 {len(stocks)} 只自选股信号...")
-            signals = scan_signals(
-                universe=stocks,
-                save=True,
-                force_refresh=True,
-                respect_market_regime=True,
-                respect_watchlist_strategy=True,
-                anti_whipsaw=True,
-            )
+            has_group = "group_name" in watchlist.columns
+            has_rec = "recommended_strategy" in watchlist.columns
+            rotation_stocks, regular_stocks = [], []
+            for _, row in watchlist.iterrows():
+                code = str(row["ts_code"]).strip()
+                if not code:
+                    continue
+                grp = str(row["group_name"]).strip() if has_group and row.get("group_name") is not None else ""
+                rec = str(row["recommended_strategy"]).strip() if has_rec and row.get("recommended_strategy") is not None else ""
+                if grp == "ETF轮动池" or "动量轮动" in rec or "momentum_rotation" in rec.lower():
+                    rotation_stocks.append(code)
+                else:
+                    regular_stocks.append(code)
+
+            # 若轮动池不足2只，并入常规扫描以避免横截面空跑
+            if len(rotation_stocks) == 1:
+                regular_stocks.extend(rotation_stocks)
+                rotation_stocks = []
+
+            single_strats = [
+                n for n, cls in STRATEGY_REGISTRY.items()
+                if not getattr(cls, "is_cross_sectional", False)
+            ]
+            signals = []
+            if regular_stocks:
+                logger.info(f"开始扫描 {len(regular_stocks)} 只常规自选股信号...")
+                signals.extend(scan_signals(
+                    universe=regular_stocks,
+                    strategy_names=single_strats or None,
+                    save=True,
+                    force_refresh=True,
+                    respect_market_regime=True,
+                    respect_watchlist_strategy=True,
+                    anti_whipsaw=True,
+                ))
+            if len(rotation_stocks) >= 2 and "momentum_rotation" in STRATEGY_REGISTRY:
+                logger.info(f"开始独立扫描 {len(rotation_stocks)} 只 ETF 轮动池...")
+                signals.extend(scan_signals(
+                    universe=rotation_stocks,
+                    strategy_names=["momentum_rotation"],
+                    save=True,
+                    force_refresh=True,
+                    respect_market_regime=False,
+                    respect_watchlist_strategy=False,
+                    anti_whipsaw=True,
+                ))
+
+            signals.sort(key=lambda s: s.score, reverse=True)
             logger.info(f"信号扫描完成：共 {len(signals)} 条信号")
 
             # 推送信号通知
@@ -140,6 +179,15 @@ def update_data_job():
             # ---------- Step 1: 更新数据 ----------
             run_update(days=5, watchlist=True)
             logger.info("定时任务完成：数据更新成功")
+
+            # ---------- Step 1.5: 自动补齐缺失估值缓存与新增自选推荐策略 ----------
+            try:
+                from services.valuation_service import refresh_watchlist_valuations_if_stale
+                from services.strategy_recommender import batch_update_watchlist_recommendations
+                refresh_watchlist_valuations_if_stale(max_age_days=7)
+                batch_update_watchlist_recommendations(force=False)
+            except Exception as sync_err:
+                logger.warning(f"定时估值/策略标签自动补齐跳过: {sync_err}")
 
             # ---------- Step 2: 扫描信号 + 推送通知 ----------
             scan_and_notify()

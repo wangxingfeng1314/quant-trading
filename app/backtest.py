@@ -55,15 +55,43 @@ def _render_backtest_options(prefix: str) -> dict:
                 key=f"{prefix}_risk_pct",
             )
             regime = st.checkbox("大盘牛熊择时", value=False, key=f"{prefix}_regime")
-        index_code = st.text_input(
-            "择时基准指数", value="000300.SH", key=f"{prefix}_index",
-        )
+        c1, c2 = st.columns(2)
+        with c1:
+            index_code = st.text_input(
+                "择时基准指数", value="000300.SH", key=f"{prefix}_index",
+            )
+            max_gap = st.number_input(
+                "次日高开缺口上限 (% , 0=不限)", min_value=0.0, max_value=15.0, value=0.0, step=0.5,
+                key=f"{prefix}_max_gap",
+            )
+            max_sec = st.number_input(
+                "同申万行业持仓上限 (0=不限)", min_value=0, max_value=10, value=0, step=1,
+                key=f"{prefix}_max_sec",
+            )
+        with c2:
+            dual_regime = st.checkbox(
+                "双指数共振择时 (+创业板指)", value=False, key=f"{prefix}_dual_regime",
+                disabled=not regime,
+            )
+            dd_brake = st.number_input(
+                "组合回撤降速阈值 (% , 0=不限)", min_value=0.0, max_value=30.0, value=0.0, step=1.0,
+                key=f"{prefix}_dd_brake",
+            )
+            max_corr = st.number_input(
+                "高相关个股拦截阈值 (0=不限)", min_value=0.0, max_value=0.99, value=0.0, step=0.05,
+                key=f"{prefix}_max_corr",
+            )
     return build_backtest_options(
         max_active_positions=int(max_pos),
         position_sizing=pos_sizing,
         risk_per_trade=float(risk_pct) / 100.0,
         market_regime_filter=bool(regime),
         market_index=(index_code or "").strip() or "000300.SH",
+        max_open_gap_pct=float(max_gap),
+        drawdown_brake_pct=float(dd_brake),
+        max_sector_positions=int(max_sec),
+        max_correlation=float(max_corr),
+        dual_index_regime=bool(regime and dual_regime),
     )
 
 
@@ -227,12 +255,16 @@ def _show_run_backtest():
             else:
                 wl_eval_mode = st.radio(
                     "自选股回测策略分配",
-                    ["⭐ 智能自适应匹配 (推荐·每只标的采用AI专属最高胜率策略)", "统一策略回测 (所有自选股均使用左侧选定策略)"],
+                    [
+                        "🚀 统一组合自适应回测 (推荐·共享资金池，各股路由专属策略与风控)",
+                        "⭐ 智能自适应逐股对比 (每只标的单独回测统计胜率)",
+                        "统一策略回测 (所有自选股均使用左侧选定策略)",
+                    ],
                     index=0,
                     key="bt_wl_eval_mode",
-                    help="智能自适应模式下，系统会为每只自选股自动匹配其专属胜率最高的量化策略（如白马匹配布林反转、成长股匹配双均线趋势），并叠加牛熊择时与保本止损，实现最高胜率与最低回撤。"
+                    help="「统一组合自适应回测」把全部活跃自选股放入同一资金池按适配策略协同交易，直观看到真实账户净值、组合回撤、行业分散度与降速器保护效应。",
                 )
-                st.caption(f"📊 将对 {len(universe)} 只自选股逐只回测并呈现全维度胜率与收益分析")
+                st.caption(f"📊 当前自选池共 {len(universe)} 只标的")
         else:
             all_codes = stock_df_data["ts_code"].tolist()
             name_map = dict(zip(stock_df_data["ts_code"], stock_df_data["name"]))
@@ -355,6 +387,13 @@ def _show_run_backtest():
                 key="bt_enable_regime",
                 help="当沪深300指数处于60日均线下方且处于空头下行时自动禁止开多仓。趋势策略（双均线/多因子共振）建议开启以压降回撤；超卖反转策略（KDJ/布林）如需捕捉大盘急跌末端反弹可按需关闭。"
             )
+            dual_index_regime = st.checkbox(
+                "🔭 双指数共振择时 (沪深300 + 创业板指联动，创业板走熊拦截高波动成长股)",
+                value=True,
+                key="bt_dual_index_regime",
+                disabled=not enable_regime,
+                help="开启后，创业板指处于空头防守期时额外拦截创业板(300/301)/科创板(688)及高波动(ATR%≥2.2%)个股的逆势开仓。",
+            )
 
             enable_rm = st.checkbox("启用独立出场风控管理器 (RiskManager)", value=True, key="bt_enable_rm")
             rm_stop_loss = -5.0
@@ -439,6 +478,27 @@ def _show_run_backtest():
             )
             pos_sizing = "atr_risk" if "atr_risk" in pos_sizing_opt else "score"
 
+            st.markdown("##### 🛡️ 实盘执行防线与组合集中度风控")
+            g1, g2 = st.columns(2)
+            with g1:
+                max_open_gap_pct = st.number_input(
+                    "次日高开缺口上限 (% , 0=不限)", value=3.0, min_value=0.0, max_value=15.0, step=0.5,
+                    key="bt_max_gap", help="next_open 模式下次日高开超过前收该比例则弃单不追高",
+                )
+                max_sector_positions = st.number_input(
+                    "同申万行业最大持仓数 (0=不限)", value=2, min_value=0, max_value=10, step=1,
+                    key="bt_max_sector", help="防止同板块多股共振暴跌放大回撤",
+                )
+            with g2:
+                drawdown_brake_pct = st.number_input(
+                    "组合回撤降速阈值 (% , 0=不限)", value=8.0, min_value=0.0, max_value=30.0, step=1.0,
+                    key="bt_dd_brake", help="账户净值较历史峰值回撤达该阈值时自动将新开单仓位减半",
+                )
+                max_correlation = st.number_input(
+                    "高相关个股拦截阈值 (0=不限)", value=0.75, min_value=0.0, max_value=0.99, step=0.05,
+                    key="bt_max_corr", help="候选股与当前持仓股过去60个交易日收益率相关性高于该阈值时放弃开仓",
+                )
+
     if st.button("🚀 运行回测", type="primary", width='stretch'):
         if not universe:
             st.error("请选择至少一只股票")
@@ -462,47 +522,48 @@ def _show_run_backtest():
 
         # 批量回测自选股模式
         if mode == "全部自选股":
-            results = []
-            skipped_no_trade = []
-            progress_bar = st.progress(0)
-            status_text = st.empty()
+            from services.strategy_recommender import (
+                evaluate_stock_strategy, parse_recommended_strategy_key,
+                is_no_trade_recommendation,
+            )
             watchlist = get_watchlist()
-            wl_dict = dict(zip(watchlist["ts_code"], watchlist["recommended_strategy"])) if not watchlist.empty and "recommended_strategy" in watchlist.columns else {}
+            wl_dict = (
+                dict(zip(watchlist["ts_code"], watchlist["recommended_strategy"]))
+                if not watchlist.empty and "recommended_strategy" in watchlist.columns else {}
+            )
+            inst_df = cached_instrument_list()
+            inst_map = (
+                inst_df.set_index("ts_code")[["name", "industry"]].to_dict("index")
+                if not inst_df.empty else {}
+            )
 
-            for i, ts_code in enumerate(universe):
-                status_text.text(f"回测中 {i+1}/{len(universe)}: {ts_code}")
-                # 判定采用的策略类与参数
+            eval_mode_val = wl_eval_mode if "wl_eval_mode" in locals() else ""
+            is_unified_adaptive = eval_mode_val.startswith("🚀")
+            is_per_stock_adaptive = eval_mode_val.startswith("⭐")
+            use_adaptive_routing = is_unified_adaptive or is_per_stock_adaptive
+
+            routed_entries = []
+            skipped_no_trade = []
+            for ts_code in universe:
                 cur_strategy_cls = strategy_cls
                 cur_params = params
                 cur_strat_label = format_strategy_cn(strategy_cls.name)
-                cur_rm = clone_risk_manager(rm_instance)
+                matched_key = None
 
-                if 'wl_eval_mode' in locals() and wl_eval_mode.startswith("⭐"):
-                    # 智能自适应匹配模式
-                    from services.strategy_recommender import (
-                        evaluate_stock_strategy, parse_recommended_strategy_key,
-                        is_no_trade_recommendation,
-                    )
+                if use_adaptive_routing:
                     rec_str = wl_dict.get(ts_code, "")
                     if is_no_trade_recommendation(rec_str):
                         skipped_no_trade.append((ts_code, rec_str))
-                        progress_bar.progress((i + 1) / len(universe))
                         continue
-
                     matched_key = parse_recommended_strategy_key(rec_str) or None
-
                     if not matched_key:
-                        inst_df = cached_instrument_list()
-                        nm = ""
-                        ind = ""
-                        if not inst_df.empty and ts_code in inst_df["ts_code"].values:
-                            r = inst_df[inst_df["ts_code"] == ts_code].iloc[0]
-                            nm = r.get("name", "")
-                            ind = r.get("industry", "")
-                        ev = evaluate_stock_strategy(ts_code, name=nm, industry=ind, start_date=start_date, end_date=end_date)
+                        meta = inst_map.get(ts_code, {})
+                        ev = evaluate_stock_strategy(
+                            ts_code, name=meta.get("name", ""), industry=meta.get("industry", ""),
+                            start_date=start_date, end_date=end_date,
+                        )
                         if ev.get("is_oos") and ev.get("oos_passed") is False:
                             skipped_no_trade.append((ts_code, ev.get("tag", "样本外暂不适配")))
-                            progress_bar.progress((i + 1) / len(universe))
                             continue
                         matched_key = ev.get("strategy", "kdj_cross")
 
@@ -510,8 +571,81 @@ def _show_run_backtest():
                         cur_strategy_cls = STRATEGY_REGISTRY[matched_key]
                         cur_params = {k: v.get("default", 0) for k, v in cur_strategy_cls.param_schema.items()}
                         cur_strat_label = format_strategy_cn(matched_key)
-                        if enable_rm and follow_strategy_rm:
-                            cur_rm = RiskManager.for_strategy(matched_key, use_atr_stop=use_atr_stop)
+
+                routed_entries.append((ts_code, cur_strategy_cls, cur_params, cur_strat_label, matched_key))
+
+            if skipped_no_trade:
+                skip_txt = "、".join(f"{c}({t})" for c, t in skipped_no_trade)
+                st.info(f"⛔ 以下 {len(skipped_no_trade)} 只自选股被样本外风控熔断为「暂不适配·观望」，已跳过交易：{skip_txt}")
+
+            if is_unified_adaptive:
+                if not routed_entries:
+                    st.warning("所有自选股均处于观望熔断或无有效路由策略")
+                    return
+
+                strategy_router = {
+                    code: (s_cls, s_params)
+                    for code, s_cls, s_params, _, _ in routed_entries
+                }
+                routed_codes = [code for code, _, _, _, _ in routed_entries]
+                pooled_max_pos = int(max_pos_val) if int(max_pos_val) > 0 else 5
+                pooled_rm = ("auto" if follow_strategy_rm else rm_instance) if enable_rm else None
+
+                with st.expander(f"🔀 查看自选股专属策略路由明细 ({len(routed_codes)} 只入池)", expanded=False):
+                    route_rows = [
+                        {
+                            "股票": f"{code} {inst_map.get(code, {}).get('name', '')}".strip(),
+                            "行业": inst_map.get(code, {}).get("industry", ""),
+                            "路由策略": s_label,
+                            "独立风控预设": "自动匹配 (RiskManager.for_strategy)" if pooled_rm == "auto" else ("自定义" if pooled_rm else "关闭"),
+                        }
+                        for code, _, _, s_label, _ in routed_entries
+                    ]
+                    st.dataframe(pd.DataFrame(route_rows), hide_index=True, width="stretch")
+
+                with st.spinner(f"正在运行统一组合自适应回测（{len(routed_codes)} 只标的共享资金池）..."):
+                    bt = Backtester(
+                        strategy_cls=None,
+                        params={},
+                        universe=routed_codes,
+                        start_date=start_date,
+                        end_date=end_date,
+                        initial_capital=float(capital),
+                        execution_mode=exec_mode,
+                        risk_manager=pooled_rm,
+                        max_active_positions=pooled_max_pos,
+                        position_sizing=pos_sizing,
+                        market_regime_filter=enable_regime,
+                        max_open_gap_pct=float(max_open_gap_pct),
+                        drawdown_brake_pct=float(drawdown_brake_pct),
+                        max_sector_positions=int(max_sector_positions),
+                        max_correlation=float(max_correlation),
+                        dual_index_regime=bool(enable_regime and dual_index_regime),
+                        strategy_router=strategy_router,
+                    )
+                    result = bt.run(save=True)
+
+                if not result.equity_curve:
+                    st.warning("统一组合回测无交易产生，请放宽日期或检查风控拦截参数")
+                    return
+
+                st.success(
+                    f"🚀 统一组合自适应回测完成！入池 {len(routed_codes)} 只（最大并发 {pooled_max_pos} 只，"
+                    f"同业上限 {max_sector_positions or '不限'}，高开上限 {max_open_gap_pct:.1f}%，回撤降速 {drawdown_brake_pct:.1f}%）"
+                )
+                benchmark_curve = _get_benchmark_curve(start_date, end_date) if show_benchmark else None
+                _display_result(result, benchmark_curve=benchmark_curve)
+                return
+
+            results = []
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            total_run = max(len(routed_entries), 1)
+            for i, (ts_code, cur_strategy_cls, cur_params, cur_strat_label, matched_key) in enumerate(routed_entries):
+                status_text.text(f"回测中 {i+1}/{len(routed_entries)}: {ts_code}")
+                cur_rm = clone_risk_manager(rm_instance)
+                if is_per_stock_adaptive and matched_key and enable_rm and follow_strategy_rm:
+                    cur_rm = RiskManager.for_strategy(matched_key, use_atr_stop=use_atr_stop)
 
                 bt = Backtester(
                     strategy_cls=cur_strategy_cls, params=cur_params,
@@ -523,6 +657,9 @@ def _show_run_backtest():
                     max_active_positions=1,
                     position_sizing=pos_sizing,
                     market_regime_filter=enable_regime,
+                    max_open_gap_pct=float(max_open_gap_pct),
+                    drawdown_brake_pct=float(drawdown_brake_pct),
+                    dual_index_regime=bool(enable_regime and dual_index_regime),
                 )
                 result = bt.run(save=False)
                 if result.equity_curve:
@@ -531,14 +668,10 @@ def _show_run_backtest():
                         "strategy_name": cur_strat_label,
                         "result": result,
                     })
-                progress_bar.progress((i + 1) / len(universe))
+                progress_bar.progress((i + 1) / total_run)
 
             progress_bar.empty()
             status_text.empty()
-
-            if skipped_no_trade:
-                skip_txt = "、".join(f"{c}({t})" for c, t in skipped_no_trade)
-                st.info(f"⛔ 以下 {len(skipped_no_trade)} 只自选股被样本外风控熔断为「暂不适配·观望」，已跳过交易：{skip_txt}")
 
             if not results:
                 st.warning("所有自选股均无交易产生")
@@ -615,6 +748,11 @@ def _show_run_backtest():
                 max_active_positions=int(max_pos_val),
                 position_sizing=pos_sizing,
                 market_regime_filter=enable_regime,
+                max_open_gap_pct=float(max_open_gap_pct),
+                drawdown_brake_pct=float(drawdown_brake_pct),
+                max_sector_positions=int(max_sector_positions),
+                max_correlation=float(max_correlation),
+                dual_index_regime=bool(enable_regime and dual_index_regime),
             )
             result = bt.run(save=True)
 
@@ -832,7 +970,10 @@ def _show_grid_search():
         )
         gs_exec_mode = "next_open" if "next_open" in gs_exec_mode_label else "current_close"
     with gs_opt_c2:
-        gs_enable_rm = st.checkbox("同步开启出场风控 (RiskManager: -6%止损 / +12%回撤4%止盈)", value=True, key="gs_enable_rm")
+        gs_enable_rm = st.checkbox(
+            "同步开启出场风控 (按所选策略自动匹配 RiskManager.for_strategy + ATR 止损)",
+            value=True, key="gs_enable_rm",
+        )
     gs_options = _render_backtest_options("gs")
     st.caption(f"参数组合数: {total_combos}")
 
@@ -851,7 +992,7 @@ def _show_grid_search():
         gs_rm = None
         if gs_enable_rm:
             from engine.risk_manager import RiskManager
-            gs_rm = RiskManager(stop_loss_pct=-6.0, trailing_stop_activation=12.0, trailing_stop_callback=4.0)
+            gs_rm = RiskManager.for_strategy(selected_strategy, use_atr_stop=True)
 
         results = grid_search(
             strategy_cls=strategy_cls,
@@ -1031,7 +1172,7 @@ def _show_validation():
                                 help="首折训练段占整段历史的比例，之后每折向前滚动一个测试窗宽度")
     with o3:
         wf_enable_rm = st.checkbox("出场风控", value=True, key="wf_enable_rm",
-                                   help="-6% 止损 / +12% 启动 4% 回撤止盈")
+                                   help="按所选策略自动匹配 RiskManager.for_strategy + ATR 止损预设")
 
     wf_options = _render_backtest_options("wf")
     st.caption(
@@ -1057,9 +1198,7 @@ def _show_validation():
         risk_manager = None
         if wf_enable_rm:
             from engine.risk_manager import RiskManager
-            risk_manager = RiskManager(stop_loss_pct=-6.0,
-                                       trailing_stop_activation=12.0,
-                                       trailing_stop_callback=4.0)
+            risk_manager = RiskManager.for_strategy(selected_strategy, use_atr_stop=True)
 
         try:
             report = walk_forward(

@@ -243,22 +243,24 @@ def evaluate_stock_strategy(ts_code: str, name: str = "", industry: str = "",
         }
 
     # 综合效用评分（仅在训练段上选策略）：
-    # 综合考量满仓总收益、夏普、盈亏比与回撤，并叠加滚动 ATR% 风格先验，避免高胜率低期望策略霸榜
+    # 综合考量满仓总收益、夏普、小样本收缩后的盈亏比与回撤，并叠加滚动 ATR% 风格先验
     best_s, best_score = None, -1e12
     for s_name, m in stats.items():
         if m["sells"] == 0 and m["trades"] == 0:
             score = -1e9
         else:
-            pf = min(max(float(m.get("profit_factor", 1.0)), 0.0), 5.0)
+            raw_pf = min(max(float(m.get("profit_factor", 1.0)), 0.0), 3.0)
+            sample_trust = min(1.0, max(0.0, float(m.get("sells", 0))) / 8.0)
+            eff_pf = 1.0 + (raw_pf - 1.0) * sample_trust
             style_prior = 0.0
             if atr_bucket == "low" and s_name in ("kdj_cross", "bollinger_reversal"):
                 style_prior = 4.0
             elif atr_bucket == "high" and s_name in ("ma_cross", "signal_combo"):
                 style_prior = 4.0
             score = (
-                m["total_return"] * 0.8
+                m["total_return"] * 0.85
                 + m["sharpe"] * 12.0
-                + (pf - 1.0) * 10.0
+                + (eff_pf - 1.0) * 8.0
                 + (m["win_rate"] - 45.0) * 0.15
                 - m["mdd"] * 0.6
                 + style_prior
@@ -277,7 +279,7 @@ def evaluate_stock_strategy(ts_code: str, name: str = "", industry: str = "",
         oos = dict(empty_stats)
 
     # 胜率仅由已平仓卖单计算，因此样本外必须满足最低平仓笔数 (sells >= OOS_MIN_TRADES)
-    # 若样本外收益<=0或盈亏比<1.05，强制触发「暂不适配·观望」熔断，防止硬打适配标签误导买单
+    # 若样本外收益<=0或盈亏比<1.05，或虽不足3笔平仓但已显著亏损(<=-3%)，强制触发「暂不适配·观望」熔断
     oos_passed = False
     if oos["sells"] >= OOS_MIN_TRADES:
         has_pf = bool(oos.get("has_pf", False))
@@ -289,6 +291,8 @@ def evaluate_stock_strategy(ts_code: str, name: str = "", industry: str = "",
                 tag = f"{prefix} (样本外{oos['total_return']:+.1f}%/回撤{oos['mdd']:.1f}%)"
         else:
             tag = f"⛔ 暂不适配·观望 ({prefix} 样本外{oos['total_return']:+.1f}%/回撤{oos['mdd']:.1f}%)"
+    elif oos["sells"] >= 1 and oos["total_return"] <= -3.0:
+        tag = f"⛔ 暂不适配·观望 ({prefix} 样本外交易不足且偏弱{oos['total_return']:+.1f}%)"
     else:
         tag = f"{prefix} (样本外交易不足)"
 

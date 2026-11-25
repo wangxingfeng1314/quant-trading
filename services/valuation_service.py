@@ -124,6 +124,43 @@ def fetch_and_cache_valuations(ts_codes: list[str]) -> dict:
     return get_valuation_map(clean_codes)
 
 
+def refresh_watchlist_valuations_if_stale(
+    ts_codes: Optional[list[str]] = None,
+    max_age_days: int = 7,
+) -> dict:
+    """定时任务轻量刷新：仅在估值缓存缺失或超过 max_age_days 天时才联网更新，避免每次重复拉全市场快照。"""
+    if ts_codes is None:
+        try:
+            from data.storage import get_watchlist
+            wl = get_watchlist()
+            ts_codes = wl["ts_code"].tolist() if (wl is not None and not wl.empty) else []
+        except Exception:
+            ts_codes = []
+    stock_codes = [str(c).strip() for c in (ts_codes or []) if str(c).strip() and not _is_etf_code(str(c))]
+    if not stock_codes:
+        return {}
+
+    existing = get_valuation_map(stock_codes)
+    cutoff = datetime.now() - timedelta(days=max(1, int(max_age_days)))
+    need_refresh = []
+    for code in stock_codes:
+        info = existing.get(code)
+        if not info or not info.get("updated_at"):
+            need_refresh.append(code)
+            continue
+        try:
+            dt_upd = datetime.fromisoformat(str(info["updated_at"])[:19])
+            if dt_upd < cutoff:
+                need_refresh.append(code)
+        except ValueError:
+            need_refresh.append(code)
+
+    if need_refresh:
+        logger.info(f"自动刷新 {len(need_refresh)} 只自选股估值缓存（超过 {max_age_days} 天或缺失）...")
+        return fetch_and_cache_valuations(need_refresh)
+    return existing
+
+
 def evaluate_valuation_guard(
     ts_code: str,
     val_info: Optional[dict] = None,

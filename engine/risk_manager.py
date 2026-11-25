@@ -24,7 +24,8 @@ class RiskManager:
             "stop_loss_pct": -10.0,
             "trailing_stop_activation": 12.0,
             "trailing_stop_callback": 3.5,
-            "max_holding_days": 35,
+            "max_holding_days": 60,
+            "max_holding_pnl_cap": 2.0,
             "enable_break_even": False,
             "atr_stop_mult": 3.5,
             "atr_min_sl_pct": 5.0,
@@ -34,7 +35,8 @@ class RiskManager:
             "stop_loss_pct": -10.0,
             "trailing_stop_activation": 12.0,
             "trailing_stop_callback": 3.5,
-            "max_holding_days": 35,
+            "max_holding_days": 60,
+            "max_holding_pnl_cap": 2.0,
             "enable_break_even": False,
             "atr_stop_mult": 3.5,
             "atr_min_sl_pct": 5.0,
@@ -92,7 +94,8 @@ class RiskManager:
                  atr_max_sl_pct: float = 12.0,
                  atr_trailing_mult: float = 0.0,
                  partial_tp_pct: float = 0.0,
-                 partial_tp_ratio: float = 0.5):
+                 partial_tp_ratio: float = 0.5,
+                 max_holding_pnl_cap: Optional[float] = None):
         """
         Args:
             stop_loss_pct: 固定止损百分比，如 -5.0 代表亏损5%止损
@@ -111,6 +114,7 @@ class RiskManager:
             atr_trailing_mult: ATR 移动止盈回撤倍数（>0 时替代固定 trailing_stop_callback）
             partial_tp_pct: 分批止盈触发浮盈（%），>0 且持仓>=200股时先兑现部分仓位
             partial_tp_ratio: 分批止盈减仓比例（默认 0.5 即减半）
+            max_holding_pnl_cap: 条件僵尸止损浮盈上限（%），仅当持仓到期且浮盈低于该阈值才强制退出；None=到期无条件平仓
         """
         if trailing_stop_pct is not None:
             trailing_stop_activation = trailing_stop_pct
@@ -152,6 +156,7 @@ class RiskManager:
         self.atr_trailing_mult = max(0.0, float(atr_trailing_mult))
         self.partial_tp_pct = max(0.0, float(partial_tp_pct))
         self.partial_tp_ratio = min(max(float(partial_tp_ratio), 0.1), 1.0)
+        self.max_holding_pnl_cap = float(max_holding_pnl_cap) if max_holding_pnl_cap is not None else None
 
         # 跟踪每个持仓标的的最高价: {ts_code: highest_price}
         self.highest_prices: Dict[str, float] = {}
@@ -368,14 +373,20 @@ class RiskManager:
                     b_dt = datetime.strptime(b_str, "%Y%m%d")
                     c_dt = datetime.strptime(c_str, "%Y%m%d")
                     holding_days = (c_dt - b_dt).days
-                    if holding_days >= self.max_holding_days:
+                    if holding_days >= self.max_holding_days and (
+                        self.max_holding_pnl_cap is None or pnl_pct < self.max_holding_pnl_cap
+                    ):
+                        cap_desc = (
+                            f"且浮盈({pnl_pct:+.1f}%)长期滞涨(<+{self.max_holding_pnl_cap:g}%)"
+                            if self.max_holding_pnl_cap is not None else ""
+                        )
                         risk_signals.append(Signal(
                             ts_code=ts_code,
                             trade_date=trade_date,
                             strategy="risk_manager",
                             direction="SELL",
                             score=0.9,
-                            reason=f"风控持仓到期: 已持有 {holding_days} 天超过上限 ({self.max_holding_days}天)",
+                            reason=f"风控持仓到期: 已持有 {holding_days} 天超过上限 ({self.max_holding_days}天){cap_desc}",
                             price_ref=price,
                             created_at=trade_date,
                             context_snapshot={
@@ -383,6 +394,7 @@ class RiskManager:
                                 "buy_date": pos.buy_date,
                                 "holding_days": holding_days,
                                 "max_holding_days": self.max_holding_days,
+                                "pnl_pct": round(pnl_pct, 2),
                             }
                         ))
                         continue
@@ -416,6 +428,7 @@ def clone_risk_manager(risk_manager):
             atr_trailing_mult=getattr(risk_manager, "atr_trailing_mult", 0.0),
             partial_tp_pct=getattr(risk_manager, "partial_tp_pct", 0.0),
             partial_tp_ratio=getattr(risk_manager, "partial_tp_ratio", 0.5),
+            max_holding_pnl_cap=getattr(risk_manager, "max_holding_pnl_cap", None),
         )
     except Exception as e:  # pragma: no cover - 风控结构变化时的兜底
         logger.warning(f"风控实例克隆失败，退回共享实例: {e}")

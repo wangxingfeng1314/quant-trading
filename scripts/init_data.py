@@ -184,6 +184,7 @@ def main():
         success_count = 0  # 成功更新数
         skip_count = 0     # 跳过数（已是最新）
         fail_count = 0     # 失败数
+        failed_targets = []  # 失败待重试标的列表 (ts_code, name, fetch_start)
         total = len(stock_df)
 
         # ---------- 遍历每只股票拉取增量数据 ----------
@@ -217,12 +218,14 @@ def main():
                 df = fetch_instrument_daily(ts_code, fetch_start, end_date)
                 if df.empty:
                     fail_count += 1
+                    failed_targets.append((ts_code, name, fetch_start))
                     continue    # 所有数据源均无数据，记录失败并跳过
 
                 # 数据清洗（OHLC验证、停牌处理、去重等）
                 df = clean_daily(df)
                 if df.empty:
                     fail_count += 1
+                    failed_targets.append((ts_code, name, fetch_start))
                     continue
                 # 落库前对齐历史成交量单位，防止数据源切换造成 100 倍断层
                 df = align_volume_unit(ts_code, df)
@@ -233,6 +236,7 @@ def main():
                     logger.warning(f"[{ts_code}] 检测到前复权基准迁移，执行安全全量重同步...")
                     if not resync_full_history(ts_code, end_date):
                         fail_count += 1
+                        failed_targets.append((ts_code, name, fetch_start))
                         continue
                 else:
                     # 写入数据库（INSERT OR REPLACE，安全重复执行）
@@ -245,16 +249,60 @@ def main():
 
             except Exception as e:
                 fail_count += 1
+                failed_targets.append((ts_code, name, fetch_start))
                 logger.warning(f"[{i}/{total}] {ts_code} {name} 更新失败: {e}")
+
+        # ---------- 失败/滞后标的自动二次重试 ----------
+        if failed_targets:
+            logger.info(f"对 {len(failed_targets)} 只失败标的执行二次重试...")
+            time.sleep(2.0)
+            still_failed = []
+            for ts_code, name, f_start in failed_targets:
+                try:
+                    df_retry = fetch_instrument_daily(ts_code, f_start, end_date)
+                    if df_retry is not None and not df_retry.empty:
+                        df_retry = clean_daily(df_retry)
+                        if not df_retry.empty:
+                            df_retry = align_volume_unit(ts_code, df_retry)
+                            if check_split_dividend_anomaly(ts_code, df_retry):
+                                if resync_full_history(ts_code, end_date):
+                                    success_count += 1
+                                    fail_count = max(0, fail_count - 1)
+                                    continue
+                            else:
+                                save_daily(df_retry)
+                                success_count += 1
+                                fail_count = max(0, fail_count - 1)
+                                continue
+                    still_failed.append(f"{ts_code}({name})")
+                except Exception:
+                    still_failed.append(f"{ts_code}({name})")
+            if still_failed:
+                logger.warning(f"二次重试仍未成功的标的: {', '.join(still_failed)}")
 
         logger.info("=" * 50)
         logger.info(f"增量更新完成！成功: {success_count}, 失败: {fail_count}")
 
-        # ---------- 同步更新大盘指数数据 ----------
+        # ---------- 同步更新大盘指数数据（含滞后指数补拉与健康告警） ----------
         logger.info("同步更新大盘指数数据...")
         try:
             idx_count = update_all_indices(start_date, end_date)
             logger.info(f"指数更新完成，共 {idx_count} 条")
+            with get_conn() as conn:
+                idx_rows = conn.execute(
+                    "SELECT ts_code, MAX(trade_date) FROM index_daily "
+                    "WHERE ts_code IN ('000001.SH','399001.SZ','399006.SZ','000300.SH') "
+                    "GROUP BY ts_code"
+                ).fetchall()
+            if idx_rows:
+                idx_max_map = {str(c): str(d or "") for c, d in idx_rows}
+                top_idx_dt = max(idx_max_map.values())
+                for idx_c, dt_v in idx_max_map.items():
+                    if top_idx_dt and dt_v < top_idx_dt:
+                        logger.warning(f"指数 {idx_c} 数据滞后({dt_v} < {top_idx_dt})，尝试补拉...")
+                        df_idx = fetch_index_daily(idx_c, start_date, end_date)
+                        if df_idx is not None and not df_idx.empty:
+                            save_index_daily(df_idx)
         except Exception as e:
             logger.warning(f"指数更新失败: {e}")
 

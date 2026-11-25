@@ -10,7 +10,8 @@ from data.storage import (get_watchlist, add_to_watchlist, remove_from_watchlist
                           save_daily, get_positions, add_position, remove_position,
                           clear_positions, get_instrument_list, batch_get_latest,
                           clean_non_watchlist_data, align_volume_unit,
-                          check_split_dividend_anomaly)
+                          check_split_dividend_anomaly, upsert_position_buy,
+                          reduce_position, get_trade_journal)
 from notifier.push import calc_atr_stops_and_sizing
 from data.fetcher import fetch_daily, fetch_instrument_daily
 from data.cleaner import clean_daily
@@ -375,10 +376,10 @@ def _show_portfolio():
         with col4:
             buy_date = chinese_date_picker("买入日期", key="buy_date")
 
-        if st.form_submit_button("添加"):
+        if st.form_submit_button("添加（同股自动合并均价并记入账本）"):
             if code_input and buy_price > 0 and shares > 0:
                 code_str = normalize_stock_code(code_input)
-                add_position(code_str, buy_price, shares, buy_date)
+                upsert_position_buy(code_str, buy_price, shares, buy_date, note="手动买入")
                 st.rerun()
 
     positions = get_positions()
@@ -443,7 +444,7 @@ def _show_portfolio():
     c3.metric("总盈亏", f"{total_pnl_sign}¥{abs(total_pnl):,.0f}")
     c4.metric("收益率", f"{total_pnl_pct:+.2f}%")
 
-    col_del1, col_del2 = st.columns([1, 1])
+    col_del1, col_del2, col_del3 = st.columns([1, 1, 1])
     with col_del1:
         if st.button("🗑️ 清空所有持仓", type="secondary"):
             clear_positions()
@@ -463,6 +464,56 @@ def _show_portfolio():
                     remove_position(del_pos_choice["_id"])
                     st.toast(f"已移除 {del_pos_choice['ts_code']} 持仓", icon="✅")
                     st.rerun()
+    with col_del3:
+        with st.popover("📤 分批卖出/平仓记账"):
+            sell_pos_choice = st.selectbox(
+                "选择卖出标的",
+                positions,
+                format_func=lambda p: f"{p['ts_code']} {name_map.get(p['ts_code'], '')} ({p['shares']}股 @ ¥{p['buy_price']:.2f})",
+                key="reduce_pos_select",
+            )
+            if sell_pos_choice:
+                max_sh = int(sell_pos_choice["shares"])
+                sell_sh = st.number_input("卖出股数", min_value=1, max_value=max_sh, value=max_sh, step=100, key="reduce_shares")
+                def_px = next((d["current_price"] for p, d in zip(positions, [diagnose_position_action(x["ts_code"], x["buy_price"], x.get("buy_date", "")) for x in positions]) if p["_id"] == sell_pos_choice["_id"]), float(sell_pos_choice["buy_price"]))
+                sell_px = st.number_input("成交价格(元)", min_value=0.01, value=round(float(def_px), 2), step=0.01, key="reduce_price")
+                sell_dt = chinese_date_picker("卖出日期", key="reduce_date")
+                sell_strat = st.text_input("关联策略(可选)", value="", placeholder="如 kdj_cross / risk_manager", key="reduce_strat")
+                if st.button("确认平仓记账", type="primary", key="confirm_reduce_pos"):
+                    r_out = reduce_position(
+                        ts_code=sell_pos_choice["ts_code"],
+                        sell_shares=int(sell_sh),
+                        sell_price=float(sell_px),
+                        sell_date=sell_dt,
+                        strategy=sell_strat.strip(),
+                        position_id=sell_pos_choice["_id"],
+                    )
+                    st.toast(f"✅ 已平仓 {r_out['sold_shares']}股，净盈亏 ¥{r_out['pnl']:+.2f} ({r_out['pnl_pct']:+.2f}%)", icon="📒")
+                    st.rerun()
+
+    # 实盘交易复盘账本 & 分策略归因
+    st.markdown("---")
+    with st.expander("📒 实盘交易复盘账本 & 分策略归因", expanded=False):
+        from services.position_service import summarize_trade_journal
+        j_df = get_trade_journal(limit=300)
+        summary = summarize_trade_journal(j_df)
+        if j_df.empty:
+            st.info("暂无实盘流水记录。可通过上方买入或信号中心一键回填积累实盘归因数据。")
+        else:
+            jc1, jc2, jc3, jc4 = st.columns(4)
+            jc1.metric("已平仓笔数", f"{summary['closed_count']} 笔", f"买入 {summary['buy_count']} 笔")
+            jc2.metric("实盘真胜率", f"{summary['win_rate']:.1f}%")
+            jc3.metric("累计已实现盈亏", f"¥{summary['total_pnl']:+,.2f}", f"平均 {summary['avg_pnl_pct']:+.2f}%")
+            jc4.metric("实盘平均滑点", f"{summary['avg_slippage_pct']:+.3f}%", f"平均持仓 {summary['avg_holding_days']:.1f}天")
+
+            if summary["by_strategy"]:
+                st.markdown("**📊 分策略实盘归因**")
+                chinese_dataframe(pd.DataFrame(summary["by_strategy"]), height=200)
+
+            st.markdown("**📋 最近实盘成交流水**")
+            disp_j = j_df[["trade_date", "ts_code", "direction", "price", "shares", "slippage_pct", "strategy", "pnl", "pnl_pct", "holding_days", "note"]].copy()
+            disp_j.columns = ["日期", "代码", "方向", "成交价", "股数", "滑点%", "策略", "净盈亏", "盈亏%", "持仓天", "备注"]
+            chinese_dataframe(disp_j, height=280)
 
 
 def _show_auto_trade():

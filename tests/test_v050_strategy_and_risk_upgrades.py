@@ -32,7 +32,7 @@ def test_risk_manager_atr_stop_partial_tp_and_clone():
     # 验证预设差异：反转类允许更宽止损与时间止损，趋势类启用保本与较紧止损
     rm_rev = RiskManager.for_strategy("bollinger_reversal", use_atr_stop=True)
     rm_trend = RiskManager.for_strategy("ma_cross", use_atr_stop=True)
-    assert rm_rev.stop_loss_pct == -10.0 and rm_rev.max_holding_days == 35
+    assert rm_rev.stop_loss_pct == -10.0 and rm_rev.max_holding_days == 60 and rm_rev.max_holding_pnl_cap == 2.0
     assert rm_trend.stop_loss_pct == -6.0 and rm_trend.enable_break_even is True
 
     # 验证 ATR 动态止损：ATR%=4.0, atr_stop_mult=2.5 => 止损线 = -10.0%

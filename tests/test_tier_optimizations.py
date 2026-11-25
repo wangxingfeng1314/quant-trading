@@ -538,20 +538,31 @@ def test_scanner_min_days_after_end_date_filter(monkeypatch):
     assert sigs == []
 
 
-def test_storage_get_index_daily_range():
+def test_storage_get_index_daily_range(tmp_path, monkeypatch):
     """验证 storage.get_index_daily_range 正确支持日期区间过滤与升序排列"""
-    from data.storage import get_conn, get_index_daily_range
+    import data.storage as st_mod
 
-    test_code = "TEST_IDX.SH"
-    with get_conn() as conn:
-        conn.execute("CREATE TABLE IF NOT EXISTS index_daily (ts_code TEXT, trade_date TEXT, open REAL, high REAL, low REAL, close REAL, volume REAL, amount REAL, PRIMARY KEY (ts_code, trade_date))")
-        conn.execute("INSERT OR REPLACE INTO index_daily VALUES (?, '20260101', 3800, 3850, 3790, 3820, 1000, 2000)", (test_code,))
-        conn.execute("INSERT OR REPLACE INTO index_daily VALUES (?, '20260105', 3820, 3860, 3810, 3850, 1000, 2000)", (test_code,))
-        conn.execute("INSERT OR REPLACE INTO index_daily VALUES (?, '20260110', 3850, 3880, 3840, 3870, 1000, 2000)", (test_code,))
+    db_file = tmp_path / "idx_range_test.db"
+    monkeypatch.setattr(st_mod, "DB_PATH", db_file)
+    if getattr(st_mod._thread_local, "conn", None) is not None:
+        st_mod._thread_local.conn.close()
+        st_mod._thread_local.conn = None
 
-    df = get_index_daily_range(test_code, "20260102", "20260108")
-    assert len(df) == 1
-    assert df.iloc[0]["trade_date"] == "20260105"
+    try:
+        st_mod.init_db()
+        test_code = "TEST_IDX.SH"
+        with st_mod.get_conn() as conn:
+            conn.execute("INSERT OR REPLACE INTO index_daily VALUES (?, '20260101', 3800, 3850, 3790, 3820, 1000, 2000)", (test_code,))
+            conn.execute("INSERT OR REPLACE INTO index_daily VALUES (?, '20260105', 3820, 3860, 3810, 3850, 1000, 2000)", (test_code,))
+            conn.execute("INSERT OR REPLACE INTO index_daily VALUES (?, '20260110', 3850, 3880, 3840, 3870, 1000, 2000)", (test_code,))
+
+        df = st_mod.get_index_daily_range(test_code, "20260102", "20260108")
+        assert len(df) == 1
+        assert df.iloc[0]["trade_date"] == "20260105"
+    finally:
+        if getattr(st_mod._thread_local, "conn", None) is not None:
+            st_mod._thread_local.conn.close()
+            st_mod._thread_local.conn = None
 
 
 def test_backtest_service_options_passthrough():

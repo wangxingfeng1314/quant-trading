@@ -34,6 +34,8 @@ logger = logging.getLogger(__name__)
 BACKTEST_OPTION_KEYS = (
     "max_active_positions", "position_sizing", "risk_per_trade",
     "market_regime_filter", "market_index",
+    "max_open_gap_pct", "drawdown_brake_pct",
+    "max_sector_positions", "max_correlation", "dual_index_regime",
 )
 
 
@@ -41,7 +43,12 @@ def build_backtest_options(max_active_positions: int = 0,
                            position_sizing: str = "score",
                            risk_per_trade: float = 0.015,
                            market_regime_filter: bool = False,
-                           market_index: str = "000300.SH") -> dict:
+                           market_index: str = "000300.SH",
+                           max_open_gap_pct: float = 0.0,
+                           drawdown_brake_pct: float = 0.0,
+                           max_sector_positions: int = 0,
+                           max_correlation: float = 0.0,
+                           dual_index_regime: bool = False) -> dict:
     """把影响撮合结果的引擎配置打包，交给 grid_search / walk_forward 复用。"""
     return {
         "max_active_positions": int(max_active_positions),
@@ -49,6 +56,11 @@ def build_backtest_options(max_active_positions: int = 0,
         "risk_per_trade": float(risk_per_trade),
         "market_regime_filter": bool(market_regime_filter),
         "market_index": market_index,
+        "max_open_gap_pct": float(max_open_gap_pct),
+        "drawdown_brake_pct": float(drawdown_brake_pct),
+        "max_sector_positions": int(max_sector_positions),
+        "max_correlation": float(max_correlation),
+        "dual_index_regime": bool(dual_index_regime),
     }
 
 
@@ -95,6 +107,7 @@ def _resolve_sell_volume(avail_before: int, sig, ref_volume: float) -> tuple[int
 # ============================================================
 
 _ST_CACHE = {"ts": 0.0, "lookup": {}}
+_INDUSTRY_CACHE = {"ts": 0.0, "lookup": {}}
 
 
 def get_st_lookup(force_refresh: bool = False) -> dict:
@@ -136,10 +149,35 @@ def get_st_lookup(force_refresh: bool = False) -> dict:
     return lookup
 
 
+def get_industry_lookup(force_refresh: bool = False) -> dict:
+    """获取 {ts_code: industry} 行业分类缓存映射，供同板块持仓上限使用。"""
+    now = time.time()
+    if (not force_refresh and _INDUSTRY_CACHE["lookup"]
+            and now - _INDUSTRY_CACHE["ts"] < BACKTEST_ST_CACHE_TTL):
+        return _INDUSTRY_CACHE["lookup"]
+
+    from data.storage import get_instrument_list
+    lookup: dict = {}
+    try:
+        instruments = get_instrument_list()
+        if instruments is not None and not instruments.empty and "industry" in instruments.columns:
+            codes = instruments["ts_code"].tolist()
+            inds = instruments["industry"].fillna("").astype(str).str.strip().tolist()
+            lookup = {str(c): ind for c, ind in zip(codes, inds) if ind}
+    except Exception as e:
+        logger.debug(f"行业映射加载失败，跳过行业分散度限制: {e}")
+
+    _INDUSTRY_CACHE["lookup"] = lookup
+    _INDUSTRY_CACHE["ts"] = now
+    return lookup
+
+
 def clear_backtester_cache():
     """清空引擎级缓存（标的信息变更后调用，测试亦可用它隔离状态）"""
     _ST_CACHE["lookup"] = {}
     _ST_CACHE["ts"] = 0.0
+    _INDUSTRY_CACHE["lookup"] = {}
+    _INDUSTRY_CACHE["ts"] = 0.0
     get_benchmark_returns.cache_clear()
     _preload_cached.cache_clear()
 
@@ -211,6 +249,105 @@ class _StockArrays:
         return default if v != v else float(v)
 
 
+class _SubPortfolioView:
+    """按标的子集隔离暴露 positions 的轻量视图（供多策略路由风控分桶使用）。"""
+    __slots__ = ("positions",)
+
+    def __init__(self, portfolio: Portfolio, allowed_codes: set):
+        self.positions = {
+            c: p for c, p in portfolio.positions.items()
+            if c in allowed_codes and not p.is_empty
+        }
+
+
+def _build_index_regime_map(index_code: str, start_date: str, end_date: str, fallback_sh: bool = False) -> dict:
+    """加载指数并构建 {trade_date: allow_buy} 牛熊映射表。"""
+    regime_map: dict = {}
+    try:
+        from data.storage import get_index_daily_range
+        from datetime import datetime, timedelta
+        idx_warmup = start_date
+        if start_date:
+            try:
+                idx_dt = datetime.strptime(start_date, "%Y%m%d")
+                idx_warmup = (idx_dt - timedelta(days=180)).strftime("%Y%m%d")
+            except Exception:
+                idx_warmup = start_date
+        bm_df = get_index_daily_range(index_code, idx_warmup, end_date)
+        if fallback_sh and (bm_df.empty or len(bm_df) < 20):
+            bm_df = get_index_daily_range("000001.SH", idx_warmup, end_date)
+        if not bm_df.empty and len(bm_df) >= 20:
+            bm_df = clean_daily(bm_df)
+            bm_df = apply_indicators(bm_df, ["ma", "macd"])
+            for _, row in bm_df.iterrows():
+                d_str = str(row["trade_date"]).replace("-", "").strip()
+                c = float(row["close"])
+                m60 = float(row.get("ma60", c) or c)
+                m20 = float(row.get("ma20", c) or c)
+                is_bear = (c < m60) and (c < m20 or m20 < m60)
+                regime_map[d_str] = not is_bear
+    except Exception as e:
+        logger.warning(f"指数 {index_code} 择时映射初始化失败: {e}")
+    return regime_map
+
+
+def _exceeds_correlation_limit(
+    ts_code: str,
+    cutoff_date: str,
+    portfolio: Portfolio,
+    fast_data: dict,
+    max_corr: float,
+    lookback: int = 60,
+) -> bool:
+    """检测拟新开仓标的截至 cutoff_date 的近60日收益与当前已有持仓是否存在超限同向共振。"""
+    import bisect
+    import numpy as np
+
+    if max_corr <= 0 or not cutoff_date:
+        return False
+    held_codes = [c for c, p in portfolio.positions.items() if not p.is_empty and c != ts_code]
+    if not held_codes:
+        return False
+    fa_cand = fast_data.get(ts_code)
+    if fa_cand is None:
+        return False
+
+    def _ret_dict(fa) -> dict:
+        end_i = bisect.bisect_right(fa.dates, cutoff_date) - 1
+        if end_i < 20:
+            return {}
+        start_i = max(0, end_i - lookback)
+        closes = fa._store.array("close")[start_i:end_i + 1]
+        ds = fa.dates[start_i:end_i + 1]
+        out = {}
+        for k in range(1, len(closes)):
+            c0, c1 = float(closes[k - 1]), float(closes[k])
+            if c0 > 0 and c1 == c1 and c0 == c0:
+                out[ds[k]] = (c1 / c0) - 1.0
+        return out
+
+    cand_rets = _ret_dict(fa_cand)
+    if len(cand_rets) < 20:
+        return False
+
+    for h_code in held_codes:
+        fa_h = fast_data.get(h_code)
+        if fa_h is None:
+            continue
+        h_rets = _ret_dict(fa_h)
+        common_dates = [d for d in cand_rets if d in h_rets]
+        if len(common_dates) < 20:
+            continue
+        x = np.array([cand_rets[d] for d in common_dates], dtype=float)
+        y = np.array([h_rets[d] for d in common_dates], dtype=float)
+        sx, sy = np.std(x), np.std(y)
+        if sx > 1e-9 and sy > 1e-9:
+            corr = float(np.corrcoef(x, y)[0, 1])
+            if corr == corr and corr > max_corr:
+                return True
+    return False
+
+
 class Backtester:
     """回测引擎
 
@@ -219,8 +356,8 @@ class Backtester:
         result = bt.run()
     """
 
-    def __init__(self, strategy_cls, params: dict,
-                 universe: list, start_date: str, end_date: str,
+    def __init__(self, strategy_cls, params: dict = None,
+                 universe: list = None, start_date: str = "", end_date: str = "",
                  initial_capital: float = 100000,
                  execution_mode: str = "current_close",
                  risk_manager = None,
@@ -229,27 +366,39 @@ class Backtester:
                  position_sizing: str = "score",
                  risk_per_trade: float = 0.015,
                  market_regime_filter: bool = False,
-                 market_index: str = "000300.SH"):
+                 market_index: str = "000300.SH",
+                 max_open_gap_pct: float = 0.0,
+                 drawdown_brake_pct: float = 0.0,
+                 max_sector_positions: int = 0,
+                 max_correlation: float = 0.0,
+                 dual_index_regime: bool = False,
+                 strategy_router: dict = None):
         """
         Args:
-            strategy_cls: 策略类（不是实例）
+            strategy_cls: 策略类（不是实例；使用 strategy_router 时可传 None 或兜底策略类）
             params: 策略参数字典
             universe: 股票代码列表 ['000001.SZ', '600519.SH', ...]
             start_date: 回测开始日期 'YYYYMMDD'
             end_date: 回测结束日期 'YYYYMMDD'
             initial_capital: 初始资金
             execution_mode: 撮合模式，"current_close"（当日收盘价撮合）或 "next_open"（次日开盘价撮合，更贴近真实实盘）
-            risk_manager: 可选的 RiskManager 风控拦截器实例
+            risk_manager: 可选的 RiskManager 风控拦截器实例，或传入 ``"auto"`` 按路由策略自动匹配专属风控
             preloaded_data: 预先加载并计算好指标的数据字典 {ts_code: DataFrame}，用于网格搜索加速
             max_active_positions: 最大并发持仓股票只数，0 表示不限制
             position_sizing: 仓位分配模式，"score"（按信号评分阶梯分配）或 "atr_risk"（按ATR波动率风险平价定仓）
             risk_per_trade: ATR风险平价模式下单笔交易最大风险占总净值比例（默认 1.5%）
             market_regime_filter: 是否开启大盘牛熊择时网关（熊市防守期自动拦截逆势买入，减少假突破磨损）
             market_index: 大盘基准指数代码，默认沪深300 '000300.SH'
+            max_open_gap_pct: next_open 下开盘高开跳空过滤阈值（%，如 3.0 代表高开 >3% 不追买，0=关闭）
+            drawdown_brake_pct: 组合净值回撤降速器触发线（%，如 8.0 代表回撤>=8%时新开仓减半，0=关闭）
+            max_sector_positions: 同行业最大并发持仓数上限（0=不限）
+            max_correlation: 已有持仓近60日收益相关性上限（如 0.75，0=不限）
+            dual_index_regime: 是否叠加创业板指(399006.SZ)构建双指数风格择时（防成长股普跌误判）
+            strategy_router: 多策略路由字典 ``{ts_code: strategy_name_or_cls}``，支持单资金池统一自适应组合回测
         """
         self.strategy_cls = strategy_cls
-        self.params = params
-        self.universe = universe
+        self.params = params or {}
+        self.universe = universe or []
         self.start_date = start_date
         self.end_date = end_date
         self.initial_capital = initial_capital
@@ -261,6 +410,49 @@ class Backtester:
         self.risk_per_trade = risk_per_trade
         self.market_regime_filter = market_regime_filter
         self.market_index = market_index
+        self.max_open_gap_pct = max(0.0, float(max_open_gap_pct or 0.0))
+        self.drawdown_brake_pct = max(0.0, float(drawdown_brake_pct or 0.0))
+        self.max_sector_positions = max(0, int(max_sector_positions or 0))
+        self.max_correlation = max(0.0, float(max_correlation or 0.0))
+        self.dual_index_regime = bool(dual_index_regime)
+        self.strategy_router = dict(strategy_router) if strategy_router else None
+
+    def _is_buy_regime_allowed(self, date: str, ts_code: str, allow_bear_buy: bool,
+                               fa=None, decision_idx: int = None) -> bool:
+        """统一判断指定标的在当日大盘/双指数环境下是否允许开多仓。"""
+        if allow_bear_buy or not self.market_regime_filter:
+            return True
+        if not self.market_regime_lookup.get(date, True):
+            return False
+        if self.dual_index_regime and not getattr(self, "growth_regime_lookup", {}).get(date, True):
+            is_cy = fa.is_cy if fa is not None else ts_code.startswith(("300", "301", "688"))
+            atr_v = fa.val("atr_pct", decision_idx, 0.0) if (fa is not None and decision_idx is not None) else 0.0
+            if is_cy or (atr_v is not None and atr_v >= 2.2):
+                return False
+        return True
+
+    def _can_open_position(self, ts_code: str, portfolio: Portfolio,
+                           cutoff_date: str, fast_data: dict) -> bool:
+        """检查组合层级的仓位上限、行业分散度与高相关性防抱团约束。"""
+        curr_pos = portfolio.get_position(ts_code)
+        is_new_pos = (curr_pos is None or curr_pos.is_empty)
+        if not is_new_pos:
+            return True
+        if self.max_active_positions > 0 and portfolio.active_position_count >= self.max_active_positions:
+            return False
+        if self.max_sector_positions > 0:
+            sec = getattr(self, "industry_lookup", {}).get(ts_code, "")
+            if sec:
+                sec_cnt = sum(
+                    1 for c, p in portfolio.positions.items()
+                    if not p.is_empty and getattr(self, "industry_lookup", {}).get(c, "") == sec
+                )
+                if sec_cnt >= self.max_sector_positions:
+                    return False
+        if self.max_correlation > 0:
+            if _exceeds_correlation_limit(ts_code, cutoff_date, portfolio, fast_data, self.max_correlation):
+                return False
+        return True
 
     def run(self, save: bool = True) -> BacktestResult:
         """执行回测
@@ -268,9 +460,10 @@ class Backtester:
         Returns:
             BacktestResult对象
         """
-        # 1. 初始化 ST 标的缓存 (解决 is_st 判定失效问题)
-        #    进程内带 TTL 缓存：网格搜索 N 个组合不再重复解析标的列表
+        # 1. 初始化 ST 与行业缓存
         self.st_lookup = get_st_lookup()
+        self.industry_lookup = get_industry_lookup() if self.max_sector_positions > 0 else {}
+        strat_label = self.strategy_cls.name if self.strategy_cls is not None else "adaptive_router"
 
         # 2. 加载并预处理所有股票数据（若已传入 preloaded_data 则免重复 I/O）
         if self.preloaded_data is not None and self.preloaded_data:
@@ -306,7 +499,7 @@ class Backtester:
         if not stock_data:
             logger.error("没有可用数据")
             return BacktestResult(
-                strategy=self.strategy_cls.name, params=json.dumps(self.params),
+                strategy=strat_label, params=json.dumps(self.params),
                 start_date=self.start_date, end_date=self.end_date,
                 initial_capital=self.initial_capital, final_capital=self.initial_capital,
             )
@@ -324,8 +517,81 @@ class Backtester:
                        if self.start_date <= d <= self.end_date]
         logger.info(f"交易日数: {len(trade_dates)}")
 
-        # 3. 初始化策略和组合
-        strategy = self.strategy_cls(**self.params)
+        # 3. 初始化策略（单策略 或 按标的路由的多策略分组）和组合
+        strategy = self.strategy_cls(**self.params) if (self.strategy_cls is not None and not self.strategy_router) else None
+        router_groups: dict = {}
+        code_strategy_key: dict = {}
+        if self.strategy_router:
+            from strategies import STRATEGY_REGISTRY
+            import json as _json
+            for code in stock_data:
+                spec = self.strategy_router.get(code)
+                s_params = {}
+                if spec is None:
+                    if self.strategy_cls is None:
+                        continue
+                    s_cls = self.strategy_cls
+                    s_params = dict(self.params)
+                    s_name = getattr(s_cls, "name", "custom")
+                elif isinstance(spec, (tuple, list)) and len(spec) == 2:
+                    s_spec, raw_p = spec
+                    s_params = dict(raw_p or {})
+                    if isinstance(s_spec, str):
+                        if s_spec not in STRATEGY_REGISTRY:
+                            continue
+                        s_cls = STRATEGY_REGISTRY[s_spec]
+                        s_name = s_spec
+                    else:
+                        s_cls = s_spec
+                        s_name = getattr(s_cls, "name", str(s_cls))
+                elif isinstance(spec, str):
+                    if spec not in STRATEGY_REGISTRY:
+                        continue
+                    s_cls = STRATEGY_REGISTRY[spec]
+                    s_name = spec
+                else:
+                    s_cls = spec
+                    s_name = getattr(s_cls, "name", str(s_cls))
+
+                # 默认参数相同复用同一策略实例；若同策略传了不同参数字典则拆分为独立组
+                g_key = s_name
+                if s_name in router_groups and s_params:
+                    param_sig = _json.dumps(s_params, sort_keys=True, default=str)
+                    cand_key = f"{s_name}:{param_sig}"
+                    if getattr(router_groups[s_name][0], "_router_param_sig", "") != param_sig:
+                        g_key = cand_key
+
+                code_strategy_key[code] = g_key
+                if g_key not in router_groups:
+                    s_inst = s_cls(**s_params)
+                    if s_params:
+                        try:
+                            s_inst._router_param_sig = _json.dumps(s_params, sort_keys=True, default=str)
+                        except Exception:
+                            pass
+                    router_groups[g_key] = (s_inst, [])
+                router_groups[g_key][1].append(code)
+            if not router_groups and self.strategy_cls is not None:
+                strategy = self.strategy_cls(**self.params)
+
+        # 自动匹配风控实例（当 risk_manager == "auto" 时按路由策略或主策略生成独立风控）
+        active_risk_manager = self.risk_manager
+        auto_rm_groups: dict = {}
+        self.auto_rm_groups = auto_rm_groups
+        if self.risk_manager == "auto":
+            from engine.risk_manager import RiskManager
+            if router_groups:
+                rm_buckets: dict = {}
+                for _g_key, (s_inst, codes) in router_groups.items():
+                    base_name = getattr(s_inst, "name", str(_g_key).split(":")[0])
+                    if base_name not in rm_buckets:
+                        rm_buckets[base_name] = (RiskManager.for_strategy(base_name, use_atr_stop=True), set())
+                    rm_buckets[base_name][1].update(codes)
+                auto_rm_groups.update(rm_buckets)
+                active_risk_manager = None
+            else:
+                active_risk_manager = RiskManager.for_strategy(strat_label, use_atr_stop=True)
+
         portfolio = Portfolio(self.initial_capital)
 
         # 预先按日期索引数据（加速查找）
@@ -345,51 +611,36 @@ class Backtester:
 
         pending_signals = []
 
-        # 初始化大盘牛熊择时网关环境映射表
+        # 初始化大盘牛熊择时网关（含可选双指数创业板成长择时）
         self.market_regime_lookup = {}
+        self.growth_regime_lookup = {}
         if self.market_regime_filter:
-            try:
-                from data.storage import get_index_daily_range
-                idx_warmup = ""
-                if self.start_date:
-                    try:
-                        from datetime import datetime, timedelta
-                        idx_dt = datetime.strptime(self.start_date, "%Y%m%d")
-                        idx_warmup = (idx_dt - timedelta(days=180)).strftime("%Y%m%d")
-                    except Exception:
-                        idx_warmup = self.start_date
-
-                bm_df = get_index_daily_range(self.market_index, idx_warmup, self.end_date)
-                if bm_df.empty or len(bm_df) < 20:
-                    bm_df = get_index_daily_range("000001.SH", idx_warmup, self.end_date)
-                if not bm_df.empty and len(bm_df) >= 20:
-                    bm_df = clean_daily(bm_df)
-                    bm_df = apply_indicators(bm_df, ["ma", "macd"])
-                    for _, row in bm_df.iterrows():
-                        d_str = str(row["trade_date"]).replace("-", "").strip()
-                        c = float(row["close"])
-                        m60 = float(row.get("ma60", c) or c)
-                        m20 = float(row.get("ma20", c) or c)
-                        # 熊市防守判定: 指数在MA60下方且在MA20下方，确立空头下行趋势
-                        is_bear = (c < m60) and (c < m20 or m20 < m60)
-                        self.market_regime_lookup[d_str] = not is_bear
-            except Exception as e:
-                logger.warning(f"大盘牛熊择时网关初始化失败: {e}")
+            self.market_regime_lookup = _build_index_regime_map(
+                self.market_index, self.start_date, self.end_date, fallback_sh=True
+            )
+            if self.dual_index_regime:
+                self.growth_regime_lookup = _build_index_regime_map(
+                    "399006.SZ", self.start_date, self.end_date, fallback_sh=False
+                )
 
         # 4. 逐日迭代
-        # current_close 模式下一字跌停卖单失败后需要跨日重试；next_open 仍保持
-        # 「当日合并进 signals、次日开盘重试」的原有节奏，两者不能共用同一队列。
-        # 超卖反转/多资产轮动等显式声明 allow_bear_buy=True 的策略不受熊市买单硬拦截误杀。
-        effective_regime_filter = self.market_regime_filter and not bool(
-            getattr(strategy, "allow_bear_buy", False)
-        )
+        single_allow_bear = bool(getattr(strategy, "allow_bear_buy", False)) if strategy is not None else False
         pending_deferred_sells = []
+        equity_peak = float(self.initial_capital)
+        brake_active = False
         for date in trade_dates:
             # 每日开盘前触发持仓日结（T+1结转）
             portfolio.on_new_day(date)
 
-            # 大盘环境检查：熊市防守期禁止趋势追涨逆势开仓
-            market_allow_buy = self.market_regime_lookup.get(date, True) if effective_regime_filter else True
+            # 更新因果账户回撤降速器状态（严格基于昨日已收盘净值，零未来函数）
+            if self.drawdown_brake_pct > 0:
+                last_eq = portfolio.equity_curve[-1]["equity"] if portfolio.equity_curve else float(self.initial_capital)
+                equity_peak = max(equity_peak, last_eq)
+                curr_dd = ((equity_peak - last_eq) / equity_peak * 100.0) if equity_peak > 0 else 0.0
+                if not brake_active and curr_dd >= self.drawdown_brake_pct:
+                    brake_active = True
+                elif brake_active and curr_dd <= self.drawdown_brake_pct * 0.5:
+                    brake_active = False
 
             # 收集当日价格与 ATR%
             prices = {}
@@ -413,8 +664,6 @@ class Backtester:
                 continue
 
             # next_open 模式：次日开盘时撮合前一交易日生成的 pending_signals
-            # deferred_sells 是「昨日遗留、今天要重新挂出」的卖单；
-            # pending_deferred_sells 收集「今天失败、明天再试」的卖单。
             deferred_sells = list(pending_deferred_sells)
             pending_deferred_sells = []
             if self.execution_mode == "next_open" and pending_signals:
@@ -431,34 +680,40 @@ class Backtester:
                     fa = fast_data[ts_code]
                     open_price = fa.val("open", curr_idx, 0.0)
                     prev_close = fa.val("close", curr_idx - 1, 0.0)
-                    # 当日最低/最高价：用于区分「一字板封死」与「触板但盘中打开」
                     bar_low = fa.val("low", curr_idx)
                     bar_high = fa.val("high", curr_idx)
-                    # 开盘撮合时点能看到的最后一根**已收盘**K线是前一行（信号日）。
-                    # ATR14 含当日 high-low、close 更是收盘价，用执行日的这两列
-                    # 定仓位属于未来函数，必须回退一行。
                     decision_idx = curr_idx - 1 if curr_idx and curr_idx > 0 else None
-                    # 开盘撮合时只能用信号日已收盘的成交量/波动率
                     ref_volume, ref_volatility = _liquidity_context(fa, decision_idx)
                     is_st, is_cy, is_bj = fa.is_st, fa.is_cy, fa.is_bj
                     snapshot = self._build_snapshot(sig, df_stock, curr_idx, fast=fa)
 
                     if sig.direction == "BUY":
-                        # 大盘空头防守：禁止逆势建仓
-                        if not market_allow_buy:
+                        # 路由或单策略大盘择时二次确认
+                        sig_allow_bear = single_allow_bear
+                        if router_groups and ts_code in code_strategy_key:
+                            s_inst = router_groups[code_strategy_key[ts_code]][0]
+                            sig_allow_bear = bool(getattr(s_inst, "allow_bear_buy", False))
+                        if not self._is_buy_regime_allowed(date, ts_code, sig_allow_bear, fa=fa, decision_idx=decision_idx):
                             continue
 
-                        # 最大持仓只数控制：若非已有持仓且已达上限，则跳过
-                        curr_pos = portfolio.get_position(ts_code)
-                        if self.max_active_positions > 0 and (curr_pos is None or curr_pos.is_empty):
-                            if portfolio.active_position_count >= self.max_active_positions:
+                        # 跳空高开过滤（与实盘推送一致：高开超过 max_open_gap_pct 不追高）
+                        if self.max_open_gap_pct > 0 and prev_close > 0 and open_price > 0:
+                            gap_pct = (open_price / prev_close - 1.0) * 100.0
+                            if gap_pct > self.max_open_gap_pct:
                                 continue
+
+                        # 组合持仓上限 / 行业上限 / 相关性防抱团检查
+                        cutoff_dt = fa.dates[decision_idx] if decision_idx is not None else date
+                        if not self._can_open_position(ts_code, portfolio, cutoff_dt, fast_data):
+                            continue
 
                         if open_price <= 0:
                             continue
                         budget = self._calc_buy_budget(
                             portfolio, sig, df_stock=df_stock,
                             curr_idx=decision_idx, fast=fa)
+                        if brake_active:
+                            budget *= 0.5
                         volume = cap_order_volume(
                             int(budget / open_price) // 100 * 100, ref_volume)
                         if volume > 0:
@@ -505,25 +760,56 @@ class Backtester:
                                 deferred_sells.append(sig)
                 pending_signals = []
 
-            # 策略产生信号
-            signals = strategy.on_bar(date, data_slice, portfolio)
+            # 策略产生信号（支持路由分组多策略共享资金池）
+            signals = []
+            if router_groups:
+                for _s_name, (s_inst, codes) in router_groups.items():
+                    sub_slice = {c: data_slice[c] for c in codes if c in data_slice}
+                    if not sub_slice:
+                        continue
+                    sub_sigs = s_inst.on_bar(date, sub_slice, portfolio)
+                    if not sub_sigs:
+                        continue
+                    s_allow_bear = bool(getattr(s_inst, "allow_bear_buy", False))
+                    for sig in sub_sigs:
+                        if sig.direction == "BUY":
+                            fa_s = fast_data.get(sig.ts_code)
+                            s_idx = date_index.get(sig.ts_code, {}).get(date)
+                            if not self._is_buy_regime_allowed(date, sig.ts_code, s_allow_bear, fa=fa_s, decision_idx=s_idx):
+                                continue
+                        signals.append(sig)
+            elif strategy is not None:
+                raw_sigs = strategy.on_bar(date, data_slice, portfolio)
+                for sig in raw_sigs:
+                    if sig.direction == "BUY":
+                        fa_s = fast_data.get(sig.ts_code)
+                        s_idx = date_index.get(sig.ts_code, {}).get(date)
+                        if not self._is_buy_regime_allowed(date, sig.ts_code, single_allow_bear, fa=fa_s, decision_idx=s_idx):
+                            continue
+                    signals.append(sig)
 
-            # 大盘空头防守期：拦截逆势买入信号，防止假突破磨损
-            if not market_allow_buy and signals:
-                signals = [s for s in signals if s.direction != "BUY"]
-
-            # 风控拦截器检查（止损/跟踪止盈/保本/分批止盈/到期强制平仓）
-            if self.risk_manager is not None:
+            # 风控拦截器检查（单策略风控 或 按路由策略独立风控分桶）
+            risk_signals = []
+            if auto_rm_groups:
+                for _s_name, (rm_inst, allowed_codes) in auto_rm_groups.items():
+                    sub_view = _SubPortfolioView(portfolio, allowed_codes)
+                    sub_prices = {c: prices[c] for c in allowed_codes if c in prices}
+                    sub_atr = {c: atr_pct_map[c] for c in allowed_codes if c in atr_pct_map}
+                    r_sigs = rm_inst.check_risks(date, sub_view, sub_prices, current_atr_pct=sub_atr)
+                    if r_sigs:
+                        risk_signals.extend(r_sigs)
+            elif active_risk_manager is not None:
                 try:
-                    risk_signals = self.risk_manager.check_risks(
+                    risk_signals = active_risk_manager.check_risks(
                         date, portfolio, prices, current_atr_pct=atr_pct_map
                     )
                 except TypeError:
-                    risk_signals = self.risk_manager.check_risks(date, portfolio, prices)
-                if risk_signals:
-                    risk_sell_codes = {s.ts_code for s in risk_signals}
-                    filtered_signals = [s for s in signals if s.ts_code not in risk_sell_codes]
-                    signals = risk_signals + filtered_signals
+                    risk_signals = active_risk_manager.check_risks(date, portfolio, prices)
+
+            if risk_signals:
+                risk_sell_codes = {s.ts_code for s in risk_signals}
+                filtered_signals = [s for s in signals if s.ts_code not in risk_sell_codes]
+                signals = risk_signals + filtered_signals
 
             # 合并前日跌停未成交顺延的卖出单
             if deferred_sells:
@@ -563,19 +849,22 @@ class Backtester:
                     snapshot = self._build_snapshot(sig, df_stock, curr_idx, fast=fa)
 
                     if sig.direction == "BUY":
-                        # 大盘空头防守：禁止逆势建仓
-                        if not market_allow_buy:
+                        sig_allow_bear = single_allow_bear
+                        if router_groups and ts_code in code_strategy_key:
+                            s_inst = router_groups[code_strategy_key[ts_code]][0]
+                            sig_allow_bear = bool(getattr(s_inst, "allow_bear_buy", False))
+                        if not self._is_buy_regime_allowed(date, ts_code, sig_allow_bear, fa=fa, decision_idx=curr_idx):
                             continue
 
-                        # 最大持仓只数控制
-                        curr_pos = portfolio.get_position(ts_code)
-                        if self.max_active_positions > 0 and (curr_pos is None or curr_pos.is_empty):
-                            if portfolio.active_position_count >= self.max_active_positions:
-                                continue
+                        cutoff_dt = fa.dates[curr_idx - 1] if (fa is not None and curr_idx > 0) else date
+                        if not self._can_open_position(ts_code, portfolio, cutoff_dt, fast_data):
+                            continue
 
                         if sig.price_ref <= 0:
                             continue
                         budget = self._calc_buy_budget(portfolio, sig, df_stock=df_stock, curr_idx=curr_idx, fast=fa)
+                        if brake_active:
+                            budget *= 0.5
                         volume = cap_order_volume(
                             int(budget / sig.price_ref) // 100 * 100, ref_volume)
                         if volume > 0:
@@ -633,7 +922,7 @@ class Backtester:
         )
 
         result = BacktestResult(
-            strategy=strategy.name,
+            strategy=strat_label,
             params=json.dumps(self.params, ensure_ascii=False),
             start_date=self.start_date,
             end_date=self.end_date,
@@ -665,7 +954,7 @@ class Backtester:
             logger.info(f"回测结果已保存, ID={bt_id}")
 
         logger.info(
-            f"回测完成: {strategy.name} | "
+            f"回测完成: {strat_label} | "
             f"总收益 {result.total_return:.2f}% | "
             f"年化 {result.annual_return:.2f}% | "
             f"最大回撤 {result.max_drawdown:.2f}% | "
@@ -683,6 +972,7 @@ class Backtester:
                   避免在高维宽表上构造整行 Series（原本每次撮合都构造一次）。
         """
         snap = {
+            "strategy": getattr(sig, "strategy", ""),
             "score": getattr(sig, "score", 0.0),
             "reason": getattr(sig, "reason", ""),
             "execution_mode": self.execution_mode,
