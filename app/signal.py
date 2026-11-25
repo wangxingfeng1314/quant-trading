@@ -40,19 +40,33 @@ def _show_scan():
     """实时信号扫描"""
     st.subheader("今日信号扫描")
 
-    # 大盘环境风控横幅
+    # 双指数大盘环境风控横幅
     try:
-        from services.signal_service import get_market_regime
-        regime_info = get_market_regime()
-        reg_type = regime_info.get("regime", "RANGE")
-        reg_text = (
-            f"**大盘风控温度计：{regime_info['label']}** ｜ "
-            f"**建议总仓位上限：≤ {regime_info['max_position_pct']}%** ｜ "
-            f"{regime_info['advice']}"
-        )
+        from services.signal_service import get_dual_market_regime, get_market_regime
+        try:
+            dual = get_dual_market_regime()
+            regime_info = dual.get("large_cap", {})
+            growth_info = dual.get("growth", {})
+            combined = dual.get("combined_regime", regime_info.get("regime", "RANGE"))
+            reg_type = "BEAR" if combined == "BEAR" else ("GROWTH_BEAR" if combined == "GROWTH_BEAR" else regime_info.get("regime", "RANGE"))
+            warn_extra = " ｜ ⚠️ 创业板走熊分化·高波成长股已拦截" if combined == "GROWTH_BEAR" else ""
+            reg_text = (
+                f"**大盘风控温度计：{regime_info.get('label', '🟡 震荡均衡')}** ｜ "
+                f"**创业板：{growth_info.get('label', '')}**{warn_extra} ｜ "
+                f"**建议总仓位上限：≤ {regime_info.get('max_position_pct', 50)}%** ｜ "
+                f"{regime_info.get('advice', '')}"
+            )
+        except Exception:
+            regime_info = get_market_regime()
+            reg_type = regime_info.get("regime", "RANGE")
+            reg_text = (
+                f"**大盘风控温度计：{regime_info['label']}** ｜ "
+                f"**建议总仓位上限：≤ {regime_info['max_position_pct']}%** ｜ "
+                f"{regime_info['advice']}"
+            )
         if reg_type == "BULL":
             st.success(reg_text)
-        elif reg_type == "BEAR":
+        elif reg_type in ("BEAR", "GROWTH_BEAR"):
             st.warning(reg_text)
         else:
             st.info(reg_text)
@@ -285,7 +299,8 @@ def build_deduplicated_broker_orders(signals: list, capital: float = 100000.0,
                                      max_pos_pct: float = 20.0, price_offset_pct: float = 0.0,
                                      stop_loss_pct: float = 0.0, stock_map: dict = None,
                                      held_map: dict = None,
-                                     min_buy_score: float = 0.0) -> tuple:
+                                     min_buy_score: float = 0.0,
+                                     skip_held_buys: bool = True) -> tuple:
     """将原始信号列表去重聚合为安全的单股单笔券商委托单（剔除同股多空冲突与同向重复下单）
 
     Args:
@@ -313,8 +328,10 @@ def build_deduplicated_broker_orders(signals: list, capital: float = 100000.0,
             buy_by_code.setdefault(sig.ts_code, []).append(sig)
 
     merged_signals = []
-    # 处理买入：剔除同日存在同级或更强卖出信号的冲突标的，同股多策略合并为1笔委托并应用最低评分门槛
+    # 处理买入：剔除同日存在同级或更强卖出信号的冲突标的，跳过已持仓防重复买，同股多策略合并为1笔委托
     for code, b_list in buy_by_code.items():
+        if skip_held_buys and int(held_map.get(code, 0) or 0) > 0:
+            continue
         s_list = sell_by_code.get(code, [])
         best_buy = max(b_list, key=lambda x: x.score)
         if best_buy.score < float(min_buy_score):
@@ -409,6 +426,10 @@ def _render_broker_order_sheet(signals: list, scan_date_str: str, stock_map: dic
         with col4:
             stop_loss_pct = st.number_input("硬止损% (0=ATR动态止损)", value=0.0, step=0.5, min_value=0.0)
 
+        skip_held_buys = st.checkbox(
+            "🛡️ 跳过已持仓标的买入委托 (防重复超买)", value=True, key="broker_skip_held_buys",
+            help="勾选后若账户当前已持有该标的，只生成止盈/卖出委托，不重复导出买入委托单",
+        )
         held_map = {p["ts_code"]: p["shares"] for p in get_positions() if p.get("shares", 0) > 0}
         order_rows, txt_lines = build_deduplicated_broker_orders(
             signals=signals,
@@ -419,6 +440,7 @@ def _render_broker_order_sheet(signals: list, scan_date_str: str, stock_map: dic
             stock_map=stock_map,
             held_map=held_map,
             min_buy_score=SCANNER_MIN_BUY_SCORE,
+            skip_held_buys=skip_held_buys,
         )
 
         if not order_rows:

@@ -384,6 +384,7 @@ _MIGRATIONS = (
              "pnl REAL DEFAULT 0.0, pnl_pct REAL DEFAULT 0.0, "
              "holding_days INTEGER DEFAULT 0, note TEXT DEFAULT '', "
              "created_at TEXT)"]),
+    (8, [("position", "strategy", "TEXT DEFAULT ''")], []),
 )
 
 
@@ -579,6 +580,7 @@ def init_db():
                 buy_price   REAL NOT NULL,         -- 买入价
                 shares      INTEGER NOT NULL,       -- 持仓数量
                 buy_date    TEXT NOT NULL,          -- 买入日期
+                strategy    TEXT DEFAULT '',        -- 建仓触发策略
                 note        TEXT DEFAULT '',        -- 备注
                 created_at  TEXT,                   -- 创建时间
                 updated_at  TEXT                    -- 更新时间
@@ -1668,10 +1670,9 @@ def get_stocks_with_data(min_days: int = 1) -> list:
 
 def get_positions() -> list:
     """获取所有模拟持仓记录"""
-    from datetime import datetime
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT id, ts_code, direction, buy_price, shares, buy_date, note "
+            "SELECT id, ts_code, direction, buy_price, shares, buy_date, note, strategy "
             "FROM position ORDER BY buy_date DESC"
         ).fetchall()
         return [
@@ -1682,6 +1683,7 @@ def get_positions() -> list:
                 "shares": r[4],
                 "buy_date": r[5],
                 "note": r[6] or "",
+                "strategy": r[7] or "",
                 "_id": r[0],
             }
             for r in rows
@@ -1689,15 +1691,15 @@ def get_positions() -> list:
 
 
 def add_position(ts_code: str, buy_price: float, shares: int,
-                 buy_date: str, note: str = "") -> int:
+                 buy_date: str, note: str = "", strategy: str = "") -> int:
     """添加一条模拟持仓记录"""
     from datetime import datetime
     now = datetime.now().isoformat()
     with get_conn() as conn:
         cur = conn.execute(
             "INSERT INTO position (ts_code, direction, buy_price, shares, "
-            "buy_date, note, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
-            (ts_code, "BUY", buy_price, shares, buy_date, note, now, now)
+            "buy_date, strategy, note, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (ts_code, "BUY", buy_price, shares, buy_date, str(strategy or ""), note, now, now)
         )
         return cur.lastrowid
 
@@ -1748,7 +1750,7 @@ def upsert_position_buy(
 
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT id, buy_price, shares, buy_date, note FROM position WHERE ts_code = ? ORDER BY id ASC",
+            "SELECT id, buy_price, shares, buy_date, note, strategy FROM position WHERE ts_code = ? ORDER BY id ASC",
             (code,),
         ).fetchall()
         if rows:
@@ -1761,9 +1763,11 @@ def upsert_position_buy(
             earliest_date = min(d for d in dates if d) if dates else b_date
             old_note = next((str(r[4]) for r in rows if r[4]), "")
             merged_note = note or old_note
+            old_strat = next((str(r[5]) for r in rows if len(r) > 5 and r[5]), "")
+            merged_strat = str(strategy or "").strip() or old_strat
             conn.execute(
-                "UPDATE position SET buy_price = ?, shares = ?, buy_date = ?, note = ?, updated_at = ? WHERE id = ?",
-                (new_avg, total_shares, earliest_date, merged_note, now, first_id),
+                "UPDATE position SET buy_price = ?, shares = ?, buy_date = ?, strategy = ?, note = ?, updated_at = ? WHERE id = ?",
+                (new_avg, total_shares, earliest_date, merged_strat, merged_note, now, first_id),
             )
             if len(rows) > 1:
                 dup_ids = [r[0] for r in rows[1:]]
@@ -1772,9 +1776,9 @@ def upsert_position_buy(
             pos_id = first_id
         else:
             cur = conn.execute(
-                "INSERT INTO position (ts_code, direction, buy_price, shares, buy_date, note, created_at, updated_at) "
-                "VALUES (?,?,?,?,?,?,?,?)",
-                (code, "BUY", px, qty, b_date, note, now, now),
+                "INSERT INTO position (ts_code, direction, buy_price, shares, buy_date, strategy, note, created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (code, "BUY", px, qty, b_date, str(strategy or ""), note, now, now),
             )
             pos_id = cur.lastrowid
 

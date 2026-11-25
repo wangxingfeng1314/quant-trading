@@ -34,6 +34,84 @@ def _is_etf_code(ts_code: str) -> bool:
     return code.startswith(("51", "56", "58", "15", "16"))
 
 
+def _to_baostock_code(ts_code: str) -> str:
+    code = str(ts_code or "").strip().upper()
+    if "." not in code:
+        return ""
+    sym, exch = code.split(".", 1)
+    if exch == "SH":
+        return f"sh.{sym}"
+    if exch == "SZ":
+        return f"sz.{sym}"
+    return ""
+
+
+def _fetch_valuations_baostock(stock_codes: list[str], now_iso: str) -> dict[str, dict]:
+    """通过 Baostock 单股日频指标通道毫秒级拉取 PE-TTM 与 PB-MRQ（避开 59 页全市场爬虫）。"""
+    out: dict[str, dict] = {}
+    targets = [(c, _to_baostock_code(c)) for c in stock_codes]
+    targets = [(c, b) for c, b in targets if b]
+    if not targets:
+        return out
+
+    try:
+        import baostock as bs
+    except Exception as e:
+        logger.debug(f"Baostock 未安装，跳过估值抓取: {e}")
+        return out
+
+    start_str = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+    end_str = datetime.now().strftime("%Y-%m-%d")
+    lg = None
+    try:
+        lg = bs.login()
+        if getattr(lg, "error_code", "") != "0":
+            logger.debug(f"Baostock 登录失败: {getattr(lg, 'error_msg', '')}")
+            return out
+        for ts_code, bs_code in targets:
+            try:
+                rs = bs.query_history_k_data_plus(
+                    bs_code,
+                    "date,close,peTTM,pbMRQ,psTTM",
+                    start_date=start_str,
+                    end_date=end_str,
+                    frequency="d",
+                )
+                if getattr(rs, "error_code", "") != "0":
+                    continue
+                last_valid = None
+                while rs.next():
+                    row = rs.get_row_data()
+                    if row and len(row) >= 4:
+                        pe_v = _to_float(row[2])
+                        pb_v = _to_float(row[3])
+                        if pe_v is not None or pb_v is not None:
+                            last_valid = (pe_v, pb_v)
+                if last_valid is not None:
+                    out[ts_code] = {
+                        "ts_code": ts_code,
+                        "pe_ttm": round(last_valid[0], 2) if last_valid[0] is not None else None,
+                        "pb": round(last_valid[1], 2) if last_valid[1] is not None else None,
+                        "dividend_yield": None,
+                        "roe": None,
+                        "market_cap_yi": None,
+                        "pe_percentile": None,
+                        "next_report_date": "",
+                        "updated_at": now_iso,
+                    }
+            except Exception as e_item:
+                logger.debug(f"Baostock 估值获取跳过 {ts_code}: {e_item}")
+    except Exception as e:
+        logger.debug(f"Baostock 估值会话异常: {e}")
+    finally:
+        try:
+            if lg is not None and getattr(lg, "error_code", "") == "0":
+                bs.logout()
+        except Exception:
+            pass
+    return out
+
+
 def fetch_and_cache_valuations(ts_codes: list[str]) -> dict:
     """尽力抓取并缓存标的估值快照（离线或限流时自动降级返回已有缓存）。"""
     clean_codes = list(dict.fromkeys(str(c).strip() for c in (ts_codes or []) if str(c).strip()))
@@ -83,7 +161,12 @@ def fetch_and_cache_valuations(ts_codes: list[str]) -> dict:
         except Exception as e:
             logger.debug(f"Tushare 获取估值快照跳过: {e}")
 
-    # 2. AKShare 东方财富全市场实时估值快照补缺
+    # 2. Baostock 轻量化逐股快速通道（2秒完成自选股估值，避免触发全市场 59 页爬虫限流）
+    missing_codes = [c for c in stock_codes if c not in fetched_rows]
+    if missing_codes:
+        fetched_rows.update(_fetch_valuations_baostock(missing_codes, now_iso))
+
+    # 3. AKShare 东方财富全市场实时估值快照兜底补缺
     missing_codes = [c for c in stock_codes if c not in fetched_rows]
     if missing_codes:
         try:

@@ -97,6 +97,7 @@ EXPECTED_TABLES = {
             "shares": "INTEGER",
             "buy_date": "TEXT",
             "note": "TEXT",
+            "strategy": "TEXT",
         },
         "pk": "id",
     },

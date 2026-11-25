@@ -233,6 +233,7 @@ def build_position_risk_report(
             ts_code=ts_code,
             buy_price=buy_price,
             buy_date=buy_date,
+            strategy_hint=str(pos.get("strategy") or "").strip(),
             get_daily_fn=get_daily_fn,
             get_signals_fn=get_signals_fn,
         )

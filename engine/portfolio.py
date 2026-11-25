@@ -260,6 +260,13 @@ class Portfolio:
             self.cash = round(self.cash + cash_dividend, 2)
         return cash_dividend
 
+    def accrue_cash_yield(self, annual_rate_pct: float):
+        """按交易日（年化252天）计提闲置现金的无风险收益（如货币基金/国债逆回购模拟）。"""
+        if not annual_rate_pct or annual_rate_pct <= 0 or self.cash <= 0:
+            return
+        daily_r = (float(annual_rate_pct) / 100.0) / 252.0
+        self.cash = round(self.cash + self.cash * daily_r, 2)
+
     def record_equity(self, trade_date: str, prices: dict):
         """记录当日权益"""
         mv = self.market_value(prices)

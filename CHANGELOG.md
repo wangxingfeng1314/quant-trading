@@ -1,5 +1,29 @@
 # Changelog
 
+## [v0.8.0] - 2026-11-25
+
+### ✨ 新增功能与核心优化
+
+1. **Baostock 高速个股估值渠道 (`services/valuation_service.py`)**
+   - 新增 `_fetch_valuations_baostock` 单股精准估值拉取通道（单股 <1 秒返回 `peTTM / pbMRQ / psTTM`），优先于 AKShare 全市场 59 页爬虫执行，彻底解决自选股估值表长期为空与频繁超时的问题。
+   - 多数据源自动兜底（Baostock → AKShare → Tushare `daily_basic`），并落库持久化 `stock_valuation`。
+
+2. **真实连续跨期滚动回测引擎 (`engine/backtester.py`)**
+   - `run_rolling_adaptive_backtest` 重构为单一连续账户 `Backtester(..., router_schedule=...)` 热切换机制：年度/周期换仓切换策略路由时保留上期未了结持仓，直至触发原策略卖出信号或风控止损，消除人为强平摩擦并支持跨期策略信号连续性。
+   - 新增 **熊市双弱半仓降速 (`bear_position_scale`)**：双指数共振择时处于全弱区间时可按系数（滚动组合默认 `0.5`）降低新开仓位，替代机械全空仓。
+   - 新增 **闲置现金货币基金计息 (`cash_yield_annual` & `Portfolio.accrue_cash_yield`)**：每日按年化收益率/252 给账户未占用现金计提理财收益。
+
+3. **策略对齐 ATR 风险平价与 UI 默认升级 (`engine/backtester.py`, `app/backtest.py`)**
+   - `atr_risk` 模式在策略路由（`strategy_router` / `router_schedule`）与持仓风控协同场景下，自动按当前标的归属策略的 `RiskManager.for_strategy(..., use_atr_stop=True)` 止损倍数为基准测算单笔等风险头寸，使下单规模与动态止损幅度严格匹配。
+   - 多只/自选股组合回测默认启用 `atr_risk`（ATR 波动率风险平价定仓），UI 显式暴露 `bear_position_scale` 与 `cash_yield_annual` 参数，并透传至选参及滚动回测引擎。
+
+4. **持仓策略归属持久化与信号实盘防线 (`data/storage.py`, `services/position_service.py`, `app/signal.py`)**
+   - 数据库升级至 **Schema v8**：`position` 表新增 `strategy` 字段并在建仓/加仓时持久化，持仓风控体检通过 `strategy_hint` 精准对齐对应策略止损线。
+   - 今日信号页面顶部大盘择时升级为 **双指数共振 (`get_dual_market_regime`)** 展示；委托汇总清单默认开启 `skip_held_buys=True`，自动跳过已持仓标的的重复买入信号防止误超买。
+
+5. **基本面选股器与自选股一键入池 (`app/screener.py`)**
+   - 选股器新增 **「💰 估值因子」** 标签页（支持剔除亏损股 `PE-TTM > 0`、PE-TTM 上限与 PB 上限筛选），结果表直接展示 `PE-TTM / PB` 并支持跨刷新保留及勾选 **一键批量加入自选股**。
+
 ## [v0.7.0] - 2026-11-25
 
 ### Added & Fixed (P0–P2 回测实盘口径零分歧·推荐器去伪存真·零前视滚动组合·实盘护栏与数据健康告警)

@@ -69,6 +69,11 @@ def _render_backtest_options(prefix: str) -> dict:
                 "同申万行业持仓上限 (0=不限)", min_value=0, max_value=10, value=0, step=1,
                 key=f"{prefix}_max_sec",
             )
+            bear_scale = st.number_input(
+                "熊市双弱降仓系数 (0~1, 1=满仓)", min_value=0.0, max_value=1.0, value=1.0, step=0.1,
+                key=f"{prefix}_bear_scale",
+                disabled=not regime,
+            )
         with c2:
             dual_regime = st.checkbox(
                 "双指数共振择时 (+创业板指)", value=False, key=f"{prefix}_dual_regime",
@@ -82,6 +87,10 @@ def _render_backtest_options(prefix: str) -> dict:
                 "高相关个股拦截阈值 (0=不限)", min_value=0.0, max_value=0.99, value=0.0, step=0.05,
                 key=f"{prefix}_max_corr",
             )
+            cash_yield = st.number_input(
+                "闲置现金年化收益 (%, 如货基 1.8)", min_value=0.0, max_value=10.0, value=0.0, step=0.2,
+                key=f"{prefix}_cash_yield",
+            )
     return build_backtest_options(
         max_active_positions=int(max_pos),
         position_sizing=pos_sizing,
@@ -93,6 +102,8 @@ def _render_backtest_options(prefix: str) -> dict:
         max_sector_positions=int(max_sec),
         max_correlation=float(max_corr),
         dual_index_regime=bool(regime and dual_regime),
+        bear_position_scale=float(bear_scale if regime else 1.0),
+        cash_yield_annual=float(cash_yield),
     )
 
 
@@ -489,10 +500,11 @@ def _show_run_backtest():
             default_max_pos = 1 if (mode == "单只股票" or len(universe) <= 1) else 4
             max_pos_val = st.number_input("最大并发持仓股票数 (0=不限)", value=default_max_pos, min_value=0, max_value=50, step=1, key="bt_max_pos", help="单只标的回测请保持1以全额使用资金，多只股票组合建议设为3~5只")
 
+            default_sizing_idx = 0 if (mode == "单只股票" or len(universe) <= 1) else 1
             pos_sizing_opt = st.radio(
                 "仓位分配模型",
                 ["按信号评分阶梯定仓 (score)", "ATR波动率风险平价定仓 (atr_risk，高波动少买/低波动多买)"],
-                index=0,
+                index=default_sizing_idx,
                 horizontal=True,
                 key="bt_pos_sizing",
             )
@@ -509,6 +521,12 @@ def _show_run_backtest():
                     "同申万行业最大持仓数 (0=不限)", value=2, min_value=0, max_value=10, step=1,
                     key="bt_max_sector", help="防止同板块多股共振暴跌放大回撤",
                 )
+                bear_position_scale = st.number_input(
+                    "熊市反转降仓系数 (空头期反转买单仓位倍率)", value=0.5, min_value=0.0, max_value=1.0, step=0.1,
+                    key="bt_bear_scale",
+                    help="启用大盘牛熊择时且处于空头期时，对策略放行的超卖反转买单按该系数缩放仓位（0.5=半仓，1.0=不缩放）",
+                    disabled=not enable_regime,
+                )
             with g2:
                 drawdown_brake_pct = st.number_input(
                     "组合回撤降速阈值 (% , 0=不限)", value=8.0, min_value=0.0, max_value=30.0, step=1.0,
@@ -517,6 +535,10 @@ def _show_run_backtest():
                 max_correlation = st.number_input(
                     "高相关个股拦截阈值 (0=不限)", value=0.75, min_value=0.0, max_value=0.99, step=0.05,
                     key="bt_max_corr", help="候选股与当前持仓股过去60个交易日收益率相关性高于该阈值时放弃开仓",
+                )
+                cash_yield_annual = st.number_input(
+                    "闲置现金年化收益 (%, 如银华日利 1.8)", value=0.0, min_value=0.0, max_value=8.0, step=0.2,
+                    key="bt_cash_yield", help="每日按年化利率/252为未占用现金计提货币基金理财收益",
                 )
 
     if st.button("🚀 运行回测", type="primary", width='stretch'):
@@ -592,6 +614,8 @@ def _show_run_backtest():
                     max_sector_positions=int(max_sector_positions),
                     max_correlation=float(max_correlation),
                     dual_index_regime=bool(enable_regime and dual_index_regime),
+                    bear_position_scale=float(bear_position_scale if enable_regime else 1.0),
+                    cash_yield_annual=float(cash_yield_annual),
                 )
                 roll_pb.empty()
                 roll_txt.empty()
@@ -677,6 +701,7 @@ def _show_run_backtest():
                     ]
                     st.dataframe(pd.DataFrame(route_rows), hide_index=True, width="stretch")
 
+                bear_scale_val = float(bear_position_scale if enable_regime else 1.0)
                 with st.spinner(f"正在运行统一组合自适应回测（{len(routed_codes)} 只标的共享资金池）..."):
                     bt = Backtester(
                         strategy_cls=None,
@@ -695,6 +720,8 @@ def _show_run_backtest():
                         max_sector_positions=int(max_sector_positions),
                         max_correlation=float(max_correlation),
                         dual_index_regime=bool(enable_regime and dual_index_regime),
+                        bear_position_scale=bear_scale_val,
+                        cash_yield_annual=float(cash_yield_annual),
                         strategy_router=strategy_router,
                     )
                     result = bt.run(save=True)
@@ -715,6 +742,7 @@ def _show_run_backtest():
             progress_bar = st.progress(0)
             status_text = st.empty()
             total_run = max(len(routed_entries), 1)
+            bear_scale_val = float(bear_position_scale if enable_regime else 1.0)
             for i, (ts_code, cur_strategy_cls, cur_params, cur_strat_label, matched_key) in enumerate(routed_entries):
                 status_text.text(f"回测中 {i+1}/{len(routed_entries)}: {ts_code}")
                 cur_rm = clone_risk_manager(rm_instance)
@@ -734,6 +762,8 @@ def _show_run_backtest():
                     max_open_gap_pct=float(max_open_gap_pct),
                     drawdown_brake_pct=float(drawdown_brake_pct),
                     dual_index_regime=bool(enable_regime and dual_index_regime),
+                    bear_position_scale=bear_scale_val,
+                    cash_yield_annual=float(cash_yield_annual),
                 )
                 result = bt.run(save=False)
                 if result.equity_curve:
@@ -810,6 +840,7 @@ def _show_run_backtest():
             return
 
         # 单只/多只模式
+        bear_scale_val = float(bear_position_scale if enable_regime else 1.0)
         with st.spinner("正在回测中..."):
             bt = Backtester(
                 strategy_cls=strategy_cls,
@@ -827,6 +858,8 @@ def _show_run_backtest():
                 max_sector_positions=int(max_sector_positions),
                 max_correlation=float(max_correlation),
                 dual_index_regime=bool(enable_regime and dual_index_regime),
+                bear_position_scale=bear_scale_val,
+                cash_yield_annual=float(cash_yield_annual),
             )
             result = bt.run(save=True)
 
