@@ -375,20 +375,9 @@ def _send_feishu(title: str, content: str) -> bool:
 
 
 def calc_atr_stops_and_sizing(ts_code: str, price: float, score: float = 0.7,
-                              base_capital: float = 100000.0) -> dict:
-    """基于标的最近14日真实波幅(ATR14)计算动态止损止盈位与风险平价建议股数
-
-    返回:
-        {
-            "sl_pct": 动态止损百分比 (如 3.5 表示 -3.5%),
-            "tp_pct": 动态止盈百分比 (如 7.0 表示 +7.0%),
-            "stop_loss": 止损价,
-            "take_profit": 止盈价,
-            "shares": 建议买入整百股数,
-            "est_cost": 预估金额,
-            "atr_pct": 日均真实波幅百分比,
-        }
-    """
+                              base_capital: float = 100000.0,
+                              strategy: str = "") -> dict:
+    """基于标的最近14日真实波幅(ATR14)与策略风格预设，计算动态止损止盈位与风险平价建议股数"""
     price = max(float(price or 0.0), 0.01)
     atr_pct = 2.5  # 默认日均振幅 2.5% -> 2*ATR = 5% 止损
     try:
@@ -406,10 +395,24 @@ def calc_atr_stops_and_sizing(ts_code: str, price: float, score: float = 0.7,
     except Exception:
         pass
 
-    # 2.0 倍 ATR 止损，限制在 [3.0%, 8.0%] 区间（低波ETF/银行3%止损，高弹性科技股最高8%防洗盘）
+    trail_activation = 0.0
+    trail_callback = 0.0
+    break_even_trigger = 0.0
+    strat_key = str(strategy or "").strip()
     sl_pct = round(max(3.0, min(8.0, atr_pct * 2.0)), 1)
-    # 2:1 盈亏比目标止盈，限制在 [6.0%, 16.0%]
     tp_pct = round(max(6.0, min(16.0, sl_pct * 2.0)), 1)
+    if strat_key:
+        try:
+            from engine.risk_manager import RiskManager
+            if strat_key in RiskManager.STRATEGY_PRESETS:
+                rm = RiskManager.for_strategy(strat_key, use_atr_stop=True)
+                sl_pct = round(max(rm.atr_min_sl_pct, min(rm.atr_max_sl_pct, atr_pct * rm.atr_stop_mult)), 1)
+                trail_activation = float(rm.trailing_stop_activation or 0.0)
+                trail_callback = float(rm.trailing_stop_callback or 0.0)
+                break_even_trigger = float(rm.break_even_trigger_pct) if rm.enable_break_even else 0.0
+                tp_pct = round(max(sl_pct * 1.4, trail_activation if trail_activation > 0 else sl_pct * 2.0), 1)
+        except Exception:
+            pass
 
     stop_loss = round(price * (1.0 - sl_pct / 100.0), 2)
     take_profit = round(price * (1.0 + tp_pct / 100.0), 2)
@@ -430,6 +433,10 @@ def calc_atr_stops_and_sizing(ts_code: str, price: float, score: float = 0.7,
         "shares": shares,
         "est_cost": est_cost,
         "atr_pct": round(atr_pct, 2),
+        "trail_activation": trail_activation,
+        "trail_callback": trail_callback,
+        "break_even_trigger": break_even_trigger,
+        "strategy": strat_key,
     }
 
 
@@ -483,14 +490,33 @@ def notify_signals(signals, strategy_names: list = None, min_buy_score: float = 
 
     title = f"📊 量化信号日报 - {today}"
 
-    # 获取大盘风控环境
+    # 获取大盘与创业板双指数风控环境
     regime_line = ""
     try:
-        from services.signal_service import get_market_regime
-        regime_info = get_market_regime()
-        regime_line = f"**大盘风控**: {regime_info['label']}（建议总仓位 ≤ {regime_info['max_position_pct']}%）\n"
+        from services.signal_service import get_dual_market_regime, get_market_regime
+        try:
+            dual = get_dual_market_regime()
+            large_cap = dual.get("large_cap", {})
+            growth = dual.get("growth", {})
+            combined = dual.get("combined_regime", large_cap.get("regime", "RANGE"))
+            warn_suffix = " ｜ ⚠️ 创业板走熊分化·警惕高波成长追高" if combined == "GROWTH_BEAR" else ""
+            regime_line = (
+                f"**大盘风控**: {large_cap.get('label', '🟡 震荡')}（建议总仓位 ≤ {large_cap.get('max_position_pct', 50)}%）"
+                f" ｜ 创业板: {growth.get('label', '')}{warn_suffix}\n"
+            )
+        except Exception:
+            regime_info = get_market_regime()
+            regime_line = f"**大盘风控**: {regime_info['label']}（建议总仓位 ≤ {regime_info['max_position_pct']}%）\n"
     except Exception:
         pass
+
+    # 结合真实持仓对买入信号标注组合护栏
+    guard_meta = {}
+    try:
+        from engine.scanner import annotate_portfolio_guardrails
+        signals, guard_meta = annotate_portfolio_guardrails(signals)
+    except Exception:
+        guard_meta = {}
 
     content = f"""## 📊 量化交易信号日报
 **日期**: {today}
@@ -538,25 +564,44 @@ def notify_signals(signals, strategy_names: list = None, min_buy_score: float = 
     buy_signals = sorted(high_buys, key=lambda item: item[0].score, reverse=True)[:5]
 
     if buy_signals:
+        if guard_meta.get("at_capacity"):
+            content += (
+                f"> ⚠️ 当前实盘/模拟持仓已达上限（{guard_meta.get('position_count', 0)}/"
+                f"{guard_meta.get('max_active_positions', 5)} 只），下列新买入信号仅作调仓替换参考。\n\n"
+            )
         content += (
-            "| 股票 | 策略 | 评分 | 参考价 | 建议股数 | 预估金额 | 建议止损 | 目标止盈 | 触发原因 |\n"
+            "| 股票 | 策略 | 评分 | 参考价 | 建议股数 | 预估金额 | 建议止损 | 目标止盈/风控 | 触发原因 |\n"
             "|------|------|------|--------|----------|----------|----------|----------|----------|\n"
         )
         for sig, strat_cn in buy_signals:
             price = max(sig.price_ref, 0.01)
-            plan = calc_atr_stops_and_sizing(sig.ts_code, price, sig.score, base_capital)
+            try:
+                plan = calc_atr_stops_and_sizing(
+                    sig.ts_code, price, sig.score, base_capital, strategy=sig.strategy
+                )
+            except TypeError:
+                plan = calc_atr_stops_and_sizing(sig.ts_code, price, sig.score, base_capital)
             shares = plan["shares"]
             est_cost = plan["est_cost"]
             stop_loss = plan["stop_loss"]
             take_profit = plan["take_profit"]
             sl_pct = plan["sl_pct"]
             tp_pct = plan["tp_pct"]
+            trail_act = float(plan.get("trail_activation", 0.0) or 0.0)
+            trail_cb = float(plan.get("trail_callback", 0.0) or 0.0)
+            be_trig = float(plan.get("break_even_trigger", 0.0) or 0.0)
+            rm_notes = []
+            if trail_act > 0 and trail_cb > 0:
+                rm_notes.append(f"回撤{trail_cb:g}%止盈")
+            if be_trig > 0:
+                rm_notes.append(f"浮盈{be_trig:g}%保本")
+            rm_suffix = f" ({'/'.join(rm_notes)})" if rm_notes else ""
             shares_text = f"{shares}股" if shares > 0 else "资金不足1手"
             cost_text = f"¥{est_cost:,.0f}" if shares > 0 else "-"
             safe_reason = (sig.reason or "").replace("|", "/")
             content += (
                 f"| {_label(sig)} | {strat_cn} | {sig.score:.2f} | ¥{price:.2f} | {shares_text} | {cost_text} "
-                f"| ¥{stop_loss:.2f} (-{sl_pct:g}%) | ¥{take_profit:.2f} (+{tp_pct:g}%) | {safe_reason} |\n"
+                f"| ¥{stop_loss:.2f} (-{sl_pct:g}%) | ¥{take_profit:.2f} (+{tp_pct:g}%{rm_suffix}) | {safe_reason} |\n"
             )
     else:
         extra_msg = f"，已自动拦截 {filtered_low_buy_count} 条低分弱信号" if filtered_low_buy_count > 0 else ""
@@ -583,12 +628,21 @@ def notify_signals(signals, strategy_names: list = None, min_buy_score: float = 
     else:
         content += "> 暂无卖出信号。\n"
 
+    health_line = ""
+    try:
+        from services.signal_service import get_data_health_summary
+        health = get_data_health_summary()
+        if health.get("has_issues") and health.get("summary_text"):
+            health_line = f"> 3. **⚠️ 数据健康提醒**：{health['summary_text']}。\n"
+    except Exception:
+        pass
+
     content += f"""
 ---
 > 💡 **量化执行提示**：
 > 1. 建议股数与金额基于基准资金 **¥{base_capital:,.0f}** 计算，可根据自身实际账户等比缩放。
 > 2. 建议次日 9:25 集合竞价或开盘后分批择机成交；如遇跳空高开超 3% 不建议盲目追涨。
-"""
+{health_line}"""
 
     return send_notification(title, content)
 

@@ -57,6 +57,37 @@ def show():
     else:
         st.warning("⚠️ 数据库为空，请先运行数据初始化: `python scripts/init_data.py --stocks 300`")
 
+    # 数据健康度与估值新鲜度联动告警条
+    try:
+        from services.signal_service import get_data_health_summary
+        health = get_data_health_summary()
+        if health.get("has_issues"):
+            hc1, hc2 = st.columns([4, 1.3])
+            with hc1:
+                st.warning(f"⚠️ **数据健康度告警**：{health['summary_text']}")
+            with hc2:
+                if st.button("🔄 一键补采估值与滞后行情", key="dash_fix_health", width="stretch"):
+                    with st.spinner("正在补采自选股估值与滞后行情..."):
+                        try:
+                            from services.valuation_service import refresh_watchlist_valuations_if_stale
+                            refresh_watchlist_valuations_if_stale(max_age_days=0)
+                        except Exception:
+                            pass
+                        lag_codes = [x["ts_code"] for x in health.get("lagging_stocks", [])]
+                        if lag_codes or health.get("lagging_indices"):
+                            try:
+                                from data.storage import update_lock
+                                from scripts.init_data import run_update
+                                with update_lock(timeout=5) as acq:
+                                    if acq:
+                                        run_update(watchlist=True, days=15)
+                            except Exception:
+                                pass
+                    st.cache_data.clear()
+                    st.rerun()
+    except Exception:
+        pass
+
     col1, col2 = st.columns([2, 1])
 
     with col1:
@@ -328,7 +359,7 @@ def _show_system_status():
                     clear_backtester_cache()
                     st.rerun()
     with col_b:
-        st.markdown("🏷️ 版本: v0.6.0 | 🗄️ `data/quant.db`")
+        st.markdown("🏷️ 版本: v0.7.0 | 🗄️ `data/quant.db`")
     with col_c:
         import json
         report = {

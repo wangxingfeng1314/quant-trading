@@ -222,6 +222,20 @@ def _show_scan():
             st.info("今日无交易信号（或均已被大盘择时/适配策略/防洗盘/流动性风控拦截）")
             return
 
+        # 结合真实持仓标注组合级防线（已持仓/同业集中/高相关）
+        try:
+            from engine.scanner import annotate_portfolio_guardrails
+            signals, guard_meta = annotate_portfolio_guardrails(signals)
+            if guard_meta.get("at_capacity"):
+                st.warning(
+                    f"⚠️ 当前实盘/模拟持仓已达上限（{guard_meta['position_count']}/"
+                    f"{guard_meta['max_active_positions']} 只），新买入信号建议仅作换股参考。"
+                )
+            elif guard_meta.get("flagged_count", 0) > 0:
+                st.info(f"🛡️ 已结合当前持仓对 {guard_meta['flagged_count']} 条买入信号自动标注重复持仓/同业集中/高相关护栏标签。")
+        except Exception:
+            pass
+
         st.success(f"扫描完成，发现 {len(signals)} 条有效交易信号")
 
         # 推送通知（如果配置了推送通道）
@@ -331,7 +345,12 @@ def build_deduplicated_broker_orders(signals: list, capital: float = 100000.0,
             shares = int(single_budget / (order_price * 1.0003)) // 100 * 100
             est_amount = round(shares * order_price, 2)
             if stop_loss_pct <= 0:
-                atr_plan = calc_atr_stops_and_sizing(sig.ts_code, order_price, sig.score, capital)
+                try:
+                    atr_plan = calc_atr_stops_and_sizing(
+                        sig.ts_code, order_price, sig.score, capital, strategy=sig.strategy
+                    )
+                except TypeError:
+                    atr_plan = calc_atr_stops_and_sizing(sig.ts_code, order_price, sig.score, capital)
                 stop_price = atr_plan["stop_loss"]
                 sl_tag = f"¥{stop_price:.2f} (-{atr_plan['sl_pct']:g}% ATR)"
             else:

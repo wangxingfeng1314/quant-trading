@@ -17,6 +17,7 @@ from app.st_utils import (
 from strategies import STRATEGY_REGISTRY, list_strategies
 from engine.backtester import (
     Backtester, grid_search, preload_backtest_data, build_backtest_options,
+    run_rolling_adaptive_backtest,
 )
 from data.storage import (
     get_instrument_list, get_daily, get_backtest_results, get_backtest_trades,
@@ -257,13 +258,32 @@ def _show_run_backtest():
                     "自选股回测策略分配",
                     [
                         "🚀 统一组合自适应回测 (推荐·共享资金池，各股路由专属策略与风控)",
+                        "🧪 严格零前视滚动组合回测 (按期历史选优外推，杜绝选策略前视偏差)",
                         "⭐ 智能自适应逐股对比 (每只标的单独回测统计胜率)",
                         "统一策略回测 (所有自选股均使用左侧选定策略)",
                     ],
                     index=0,
                     key="bt_wl_eval_mode",
-                    help="「统一组合自适应回测」把全部活跃自选股放入同一资金池按适配策略协同交易，直观看到真实账户净值、组合回撤、行业分散度与降速器保护效应。",
+                    help="「统一组合」按当前冻结推荐表快速评估；「🧪 严格零前视滚动组合」每期仅用过去历史重选策略路由并冻结外推下一期，完全杜绝选策略前视偏差。",
                 )
+                rolling_rebalance_months = 12
+                rolling_train_years = 3
+                if wl_eval_mode.startswith("🚀"):
+                    st.caption("💡 当前按最新推荐标签快速评估；若要验证严格无前视外推能力，建议切换到「🧪 严格零前视滚动组合回测」。")
+                elif wl_eval_mode.startswith("🧪"):
+                    rc1, rc2 = st.columns(2)
+                    with rc1:
+                        rolling_rebalance_months = st.selectbox(
+                            "滚动重估周期", [12, 6], index=0,
+                            format_func=lambda m: f"每 {m} 个月重估策略路由",
+                            key="bt_roll_months",
+                        )
+                    with rc2:
+                        rolling_train_years = st.selectbox(
+                            "训练回看窗口", [3, 2], index=0,
+                            format_func=lambda y: f"过去 {y} 年历史选优",
+                            key="bt_roll_years",
+                        )
                 st.caption(f"📊 当前自选池共 {len(universe)} 只标的")
         else:
             all_codes = stock_df_data["ts_code"].tolist()
@@ -538,6 +558,60 @@ def _show_run_backtest():
             )
 
             eval_mode_val = wl_eval_mode if "wl_eval_mode" in locals() else ""
+            if eval_mode_val.startswith("🧪"):
+                grp_map = (
+                    dict(zip(watchlist["ts_code"], watchlist["group_name"].fillna("")))
+                    if (watchlist is not None and not watchlist.empty and "group_name" in watchlist.columns)
+                    else {}
+                )
+                roll_codes = [c for c in universe if str(grp_map.get(c, "")) != "ETF轮动池"] or list(universe)
+                pooled_max_pos = int(max_pos_val) if int(max_pos_val) > 0 else 5
+                pooled_rm = ("auto" if follow_strategy_rm else rm_instance) if enable_rm else None
+                roll_pb = st.progress(0.0)
+                roll_txt = st.empty()
+
+                def _on_roll(done_s, tot_s):
+                    roll_pb.progress(min(1.0, done_s / max(tot_s, 1)))
+                    roll_txt.text(f"滚动样本外重估进度: {done_s}/{tot_s} 期")
+
+                roll_out = run_rolling_adaptive_backtest(
+                    universe=roll_codes,
+                    start_date=start_date,
+                    end_date=end_date,
+                    rebalance_months=int(rolling_rebalance_months if "rolling_rebalance_months" in locals() else 12),
+                    train_lookback_years=int(rolling_train_years if "rolling_train_years" in locals() else 3),
+                    initial_capital=float(capital),
+                    progress_callback=_on_roll,
+                    execution_mode=exec_mode,
+                    risk_manager=pooled_rm,
+                    max_active_positions=pooled_max_pos,
+                    position_sizing=pos_sizing,
+                    market_regime_filter=enable_regime,
+                    max_open_gap_pct=float(max_open_gap_pct),
+                    drawdown_brake_pct=float(drawdown_brake_pct),
+                    max_sector_positions=int(max_sector_positions),
+                    max_correlation=float(max_correlation),
+                    dual_index_regime=bool(enable_regime and dual_index_regime),
+                )
+                roll_pb.empty()
+                roll_txt.empty()
+                roll_res = roll_out["result"]
+                roll_periods = roll_out["periods"]
+                if not roll_res.equity_curve:
+                    st.warning("严格零前视滚动回测无有效净值数据，请扩大日期范围（建议至少包含 2 年历史训练数据）")
+                    return
+                st.success(
+                    f"🧪 严格零前视滚动组合回测完成！共 {len(roll_periods)} 个样本外周期 "
+                    f"(总收益 {roll_res.total_return:+.2f}% | 最大回撤 {roll_res.max_drawdown:.2f}% | "
+                    f"胜率 {roll_res.win_rate:.1f}%)"
+                )
+                if roll_periods:
+                    with st.expander(f"📅 逐期零前视路由演化明细 ({len(roll_periods)} 期)", expanded=True):
+                        st.dataframe(pd.DataFrame(roll_periods), hide_index=True, width="stretch")
+                benchmark_curve = _get_benchmark_curve(start_date, end_date) if show_benchmark else None
+                _display_result(roll_res, benchmark_curve=benchmark_curve)
+                return
+
             is_unified_adaptive = eval_mode_val.startswith("🚀")
             is_per_stock_adaptive = eval_mode_val.startswith("⭐")
             use_adaptive_routing = is_unified_adaptive or is_per_stock_adaptive

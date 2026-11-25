@@ -1,5 +1,24 @@
 # Changelog
 
+## [v0.7.0] - 2026-11-25
+
+### Added & Fixed (P0–P2 回测实盘口径零分歧·推荐器去伪存真·零前视滚动组合·实盘护栏与数据健康告警)
+- **P0-1 策略可信度重校与 `signal_combo` 推送通道解锁 (`services/signal_service.py`, `strategies/signal_combo.py`)**:
+  - 清理过期失效策略权重并将 `STRATEGY_CREDIBILITY_WEIGHTS` 对齐 5 大活跃策略（`signal_combo=1.08`, `ma_cross=1.05`, `momentum_rotation=1.05`, `kdj_cross=1.02`, `bollinger_reversal=0.92`）；同步将 `SignalComboStrategy` 买入基础分从 `0.55` 校准至 `0.62~0.90`，消除样本外均收益第 1 的 `signal_combo` 因 `0.70×0.82=0.57 < 0.60` 永远无法推送的数学锁死。
+- **P0-2 回测与实盘大盘牛熊择时单源统一 (`services/signal_service.py`, `engine/backtester.py`)**:
+  - 新增统一判别函数 `classify_index_regime()`，消除原回测引擎与实盘扫描之间 `12.2%` 的交易日牛熊分歧，实现 `Backtester._build_index_regime_map` 与 `get_market_regime` 100% 口径一致。
+- **P0-3 实盘推送与信号中心策略专属风控/双指数/真实持仓组合护栏 (`notifier/push.py`, `engine/scanner.py`, `app/signal.py`)**:
+  - `calc_atr_stops_and_sizing(..., strategy="")` 接入 `RiskManager.for_strategy` 生成策略专属止损、移动止盈与保本提示（无 `strategy` 参数保持向后兼容）。
+  - 新增 `annotate_portfolio_guardrails()` 结合真实 `position` 表对买入信号自动标注 `[📦已持仓·勿重复追买]`、`[⚠️同业集中:...]`、`[⚠️高相关:...]` 与持仓满额警戒；`notify_signals()` 升级展示双指数风控与数据健康提醒。
+- **P0-4 推荐器全维度小样本收缩与低样本惩罚 (`services/strategy_recommender.py`)**:
+  - 训练期按 `sample_trust = min(1.0, sells / 6.0)` 对总收益、夏普、盈亏比与胜率同步收缩，并设置低平仓数惩罚（`sells < 3` 扣 `12` 分、`sells == 3` 扣 `4` 分），温和下调风格先验为 `+2.0`，挽回低暴露假胜率误判导致的京东方A/云南白药/中国平安错配熔断。
+- **P1-5 布林中期空头防接飞刀、动量轮动实盘防刷屏与严格零前视滚动组合回测 (`strategies/bollinger_reversal.py`, `strategies/momentum_rotation.py`, `engine/backtester.py`, `app/backtest.py`)**:
+  - `BollingerReversalStrategy` 在 `close < ma20 < ma60` 中期空头下行期间将超卖门槛从 `RSI < 42` 收紧至 `RSI < 30`。
+  - `MomentumRotationStrategy` 实盘扫描对已持有且留榜标的标注 `[持仓续持·无需加仓]` 并降权防每日刷屏追买。
+  - 新增 `run_rolling_adaptive_backtest()` 与回测页「🧪 严格零前视滚动组合回测」模式，按周期严格只用历史数据定策略路由并复利拼接样本外净值。
+- **P2-6 数据健康度监控与联动补采 (`services/signal_service.py`, `app/dashboard.py`)**:
+  - 新增 `get_data_health_summary()` 检测滞后个股、滞后指数与空/过期 `stock_valuation` 表，在 Dashboard 顶部与每日推送展示告警并提供一键补采入口。
+
 ## [v0.6.0] - 2026-11-25
 
 ### Added & Fixed (P0–P2 执行层·组合风控·闭环复盘全面升级)

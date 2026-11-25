@@ -131,7 +131,7 @@ class SignalComboStrategy(BaseStrategy):
 
             # 买入: 边沿触发（昨日未达阈值、今日首次共振达标，且处于 MA60*0.96 中期安全线之上）
             if not has_position and trend_floor_ok and total >= self.buy_threshold and prev_total < self.buy_threshold and candle_ok:
-                score = round(min(0.55 + (total - self.buy_threshold) * 0.15, 0.88), 2)
+                score = round(min(0.62 + (total - self.buy_threshold) * 0.16, 0.90), 2)
                 signals.append(Signal(
                     ts_code=ts_code, trade_date=trade_date,
                     strategy=self.name, direction="BUY",

@@ -735,3 +735,117 @@ def scan_signals(universe: list = None, strategy_names: list = None,
 
     logger.info(f"扫描完成，共 {len(all_signals)} 条信号")
     return all_signals
+
+
+def annotate_portfolio_guardrails(
+    signals: list,
+    max_active_positions: int = 5,
+    max_sector_positions: int = 2,
+    max_correlation: float = 0.75,
+) -> tuple:
+    """结合真实 position 表，对买入信号附加组合级防线提示标签（不丢弃信号）。"""
+    meta = {
+        "held_codes": set(),
+        "position_count": 0,
+        "max_active_positions": int(max_active_positions),
+        "at_capacity": False,
+        "flagged_count": 0,
+    }
+    if not signals:
+        return signals, meta
+
+    try:
+        from data.storage import get_positions
+        positions = get_positions() or []
+        held_codes = {
+            str(p.get("ts_code", "")).strip()
+            for p in positions
+            if p.get("ts_code") and int(p.get("shares", 0) or 0) > 0
+        }
+        meta["held_codes"] = held_codes
+        meta["position_count"] = len(held_codes)
+        meta["at_capacity"] = bool(max_active_positions > 0 and len(held_codes) >= max_active_positions)
+        if not held_codes:
+            return signals, meta
+
+        try:
+            inst_df = get_instrument_list()
+            ind_map = (
+                dict(zip(inst_df["ts_code"], inst_df["industry"].fillna("")))
+                if (inst_df is not None and not inst_df.empty and "industry" in inst_df.columns)
+                else {}
+            )
+        except Exception:
+            ind_map = {}
+
+        held_sec_counts: dict = {}
+        for hc in held_codes:
+            sec = str(ind_map.get(hc, "") or "").strip()
+            if sec:
+                held_sec_counts[sec] = held_sec_counts.get(sec, 0) + 1
+
+        ret_cache: dict = {}
+
+        def _ret_map(code: str) -> dict:
+            if code in ret_cache:
+                return ret_cache[code]
+            out = {}
+            try:
+                df_c = get_daily(code, limit=80)
+                if df_c is not None and len(df_c) >= 21 and "close" in df_c.columns and "trade_date" in df_c.columns:
+                    sub = df_c.sort_values("trade_date").tail(61)
+                    ds = sub["trade_date"].astype(str).tolist()
+                    cs = sub["close"].astype(float).tolist()
+                    for idx_k in range(1, len(cs)):
+                        if cs[idx_k - 1] > 0:
+                            out[ds[idx_k]] = (cs[idx_k] / cs[idx_k - 1]) - 1.0
+            except Exception:
+                pass
+            ret_cache[code] = out
+            return out
+
+        import numpy as np
+        buy_guard_cache: dict = {}
+        flagged = 0
+        for sig in signals:
+            if getattr(sig, "direction", "") != "BUY":
+                continue
+            code = sig.ts_code
+            if code not in buy_guard_cache:
+                tags = []
+                if code in held_codes:
+                    tags.append("[📦已持仓·勿重复追买]")
+                else:
+                    sec = str(ind_map.get(code, "") or "").strip()
+                    if sec and max_sector_positions > 0 and held_sec_counts.get(sec, 0) >= max_sector_positions:
+                        tags.append(f"[⚠️同业集中:{sec}]")
+                    if max_correlation > 0:
+                        cand_r = _ret_map(code)
+                        if len(cand_r) >= 20:
+                            best_hc, best_corr = "", 0.0
+                            for hc in sorted(held_codes):
+                                h_r = _ret_map(hc)
+                                common = [d for d in cand_r if d in h_r]
+                                if len(common) < 20:
+                                    continue
+                                x = np.array([cand_r[d] for d in common], dtype=float)
+                                y = np.array([h_r[d] for d in common], dtype=float)
+                                if np.std(x) > 1e-9 and np.std(y) > 1e-9:
+                                    corr = float(np.corrcoef(x, y)[0, 1])
+                                    if corr == corr and corr > best_corr:
+                                        best_corr, best_hc = corr, hc
+                            if best_corr > max_correlation and best_hc:
+                                tags.append(f"[⚠️高相关:{best_hc} r={best_corr:.2f}]")
+                buy_guard_cache[code] = tags
+
+            tags = buy_guard_cache[code]
+            if tags:
+                prefix = " ".join(t for t in tags if t not in (sig.reason or ""))
+                if prefix:
+                    sig.reason = f"{prefix} {sig.reason}".strip()
+                    flagged += 1
+        meta["flagged_count"] = flagged
+    except Exception as e:
+        logger.debug(f"组合护栏标注降级跳过: {e}")
+
+    return signals, meta

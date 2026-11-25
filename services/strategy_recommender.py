@@ -86,7 +86,8 @@ def _split_oos_window(dates: list):
 
 
 def evaluate_stock_strategy(ts_code: str, name: str = "", industry: str = "",
-                            start_date: str = "2023-01-01", end_date: str = "") -> dict:
+                            start_date: str = "2023-01-01", end_date: str = "",
+                            preloaded_data: dict = None) -> dict:
     """评估单只股票/ETF最匹配的交易策略
 
     参数:
@@ -116,7 +117,7 @@ def evaluate_stock_strategy(ts_code: str, name: str = "", industry: str = "",
     if not end_date:
         end_date = datetime.now().strftime("%Y%m%d")
 
-    df = get_daily(ts_code)
+    df = preloaded_data[ts_code] if (preloaded_data and ts_code in preloaded_data) else get_daily(ts_code)
     # 若数据不足60日线，采用行业特征启发式推荐
     if df.empty or len(df) < 60:
         feature_text = f"{name} {industry} {ts_code}".upper()
@@ -175,7 +176,10 @@ def evaluate_stock_strategy(ts_code: str, name: str = "", industry: str = "",
 
     try:
         # 一次预加载覆盖训练段+测试段，测试段首日的长周期指标已在训练段数据上预热
-        preloaded = preload_backtest_data([ts_code], train_start, test_end)
+        if preloaded_data and ts_code in preloaded_data:
+            preloaded = preloaded_data
+        else:
+            preloaded = preload_backtest_data([ts_code], train_start, test_end)
     except Exception as e:
         logger.warning(f"预加载标的 {ts_code} 数据失败: {e}")
         preloaded = None
@@ -243,27 +247,33 @@ def evaluate_stock_strategy(ts_code: str, name: str = "", industry: str = "",
         }
 
     # 综合效用评分（仅在训练段上选策略）：
-    # 综合考量满仓总收益、夏普、小样本收缩后的盈亏比与回撤，并叠加滚动 ATR% 风格先验
+    # 全维度小样本贝叶斯收缩（抑制 1~3 笔偶然高胜率/低暴露虚假高分），并温和叠加 ATR% 风格先验
     best_s, best_score = None, -1e12
     for s_name, m in stats.items():
-        if m["sells"] == 0 and m["trades"] == 0:
+        sells = int(m.get("sells", 0) or 0)
+        if sells == 0 and m["trades"] == 0:
             score = -1e9
         else:
             raw_pf = min(max(float(m.get("profit_factor", 1.0)), 0.0), 3.0)
-            sample_trust = min(1.0, max(0.0, float(m.get("sells", 0))) / 8.0)
+            sample_trust = min(1.0, max(0.0, float(sells)) / 6.0)
             eff_pf = 1.0 + (raw_pf - 1.0) * sample_trust
+            eff_ret = float(m["total_return"]) * sample_trust
+            eff_sharpe = float(m["sharpe"]) * sample_trust
+            eff_win_delta = (float(m["win_rate"]) - 45.0) * sample_trust
+            low_sample_pen = -12.0 if sells < 3 else (-4.0 if sells == 3 else 0.0)
             style_prior = 0.0
             if atr_bucket == "low" and s_name in ("kdj_cross", "bollinger_reversal"):
-                style_prior = 4.0
+                style_prior = 2.0
             elif atr_bucket == "high" and s_name in ("ma_cross", "signal_combo"):
-                style_prior = 4.0
+                style_prior = 2.0
             score = (
-                m["total_return"] * 0.85
-                + m["sharpe"] * 12.0
+                eff_ret * 0.85
+                + eff_sharpe * 12.0
                 + (eff_pf - 1.0) * 8.0
-                + (m["win_rate"] - 45.0) * 0.15
-                - m["mdd"] * 0.6
+                + eff_win_delta * 0.15
+                - float(m["mdd"]) * 0.55
                 + style_prior
+                + low_sample_pen
             )
         if score > best_score:
             best_score, best_s = score, s_name
@@ -279,8 +289,9 @@ def evaluate_stock_strategy(ts_code: str, name: str = "", industry: str = "",
         oos = dict(empty_stats)
 
     # 胜率仅由已平仓卖单计算，因此样本外必须满足最低平仓笔数 (sells >= OOS_MIN_TRADES)
-    # 若样本外收益<=0或盈亏比<1.05，或虽不足3笔平仓但已显著亏损(<=-3%)，强制触发「暂不适配·观望」熔断
-    oos_passed = False
+    # 若样本外收益<=0或盈亏比<1.05，或虽不足3笔平仓但已显著亏损(<=-3%)，强制触发「暂不适配·观望」熔断(oos_passed=False)；
+    # 若仅因样本期较短导致平仓<3笔且未出现明显亏损，则保留 oos_passed=None（放行标注「样本外交易不足」）
+    oos_passed = None
     if oos["sells"] >= OOS_MIN_TRADES:
         has_pf = bool(oos.get("has_pf", False))
         oos_passed = (oos["total_return"] > 0.0) and (not has_pf or oos["profit_factor"] >= 1.05)
@@ -292,6 +303,7 @@ def evaluate_stock_strategy(ts_code: str, name: str = "", industry: str = "",
         else:
             tag = f"⛔ 暂不适配·观望 ({prefix} 样本外{oos['total_return']:+.1f}%/回撤{oos['mdd']:.1f}%)"
     elif oos["sells"] >= 1 and oos["total_return"] <= -3.0:
+        oos_passed = False
         tag = f"⛔ 暂不适配·观望 ({prefix} 样本外交易不足且偏弱{oos['total_return']:+.1f}%)"
     else:
         tag = f"{prefix} (样本外交易不足)"

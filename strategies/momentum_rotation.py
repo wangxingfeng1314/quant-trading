@@ -166,9 +166,22 @@ class MomentumRotationStrategy(BaseStrategy):
                     price_ref=snap["close"],
                 ))
         else:
-            # 实盘扫描模式（portfolio=None）：输出入选 Top-K 买入信号 + 明显破位转弱卖出信号
+            # 实盘扫描模式（portfolio=None）：查询真实持仓防已持仓标的每日重复高分提醒买入
+            held_set = set()
+            try:
+                from data.storage import get_positions
+                for p in (get_positions() or []):
+                    if p.get("ts_code") and int(p.get("shares", 0) or 0) > 0:
+                        held_set.add(str(p["ts_code"]).strip())
+            except Exception:
+                held_set = set()
+
             for rank, (_, ts_code, snap) in enumerate(selected, start=1):
                 buy_score = round(max(0.68, 0.92 - (rank - 1) * 0.06), 2)
+                is_held = ts_code in held_set
+                prefix = "[持仓续持·无需加仓] " if is_held else ""
+                if is_held:
+                    buy_score = round(max(0.45, buy_score - 0.15), 2)
                 signals.append(Signal(
                     ts_code=ts_code,
                     trade_date=trade_date,
@@ -176,7 +189,7 @@ class MomentumRotationStrategy(BaseStrategy):
                     direction="BUY",
                     score=buy_score,
                     reason=(
-                        f"动量轮动第{rank}名优选: {self.lookback}日涨{snap['mom'] * 100:+.1f}%，"
+                        f"{prefix}动量轮动第{rank}名优选: {self.lookback}日涨{snap['mom'] * 100:+.1f}%，"
                         f"夏普动量{snap['rs']:.2f}，强于MA{self.ma_filter_period}"
                     ),
                     price_ref=snap["close"],

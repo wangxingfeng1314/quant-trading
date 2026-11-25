@@ -68,9 +68,15 @@ class BollingerReversalStrategy(BaseStrategy):
             pos = portfolio.get_position(ts_code) if portfolio is not None else None
             has_position = pos is not None and not pos.is_empty
 
-            # 胜率增强过滤：RSI<42超卖探底 + 收盘收阳/平盘企稳（避免阴线盲目接飞刀）
+            # 胜率增强过滤：RSI<42超卖探底 + 收盘收阳/平盘企稳；中期空头下行(close<ma20<ma60)收紧至RSI<30防接飞刀
             rsi = df["rsi14"].iloc[-1] if "rsi14" in df.columns else 50.0
-            rsi_oversold = pd.isna(rsi) or rsi < 42.0
+            rsi_limit = 42.0
+            if "ma20" in df.columns and "ma60" in df.columns:
+                ma20_val = df["ma20"].iloc[-1]
+                ma60_val = df["ma60"].iloc[-1]
+                if pd.notna(ma20_val) and pd.notna(ma60_val) and curr_close < float(ma20_val) < float(ma60_val):
+                    rsi_limit = 30.0
+            rsi_oversold = pd.isna(rsi) or float(rsi) < rsi_limit
             candle_ok = curr_close >= curr_open
 
             # 买入: 前一日在轨内或触轨，今日低点触及下轨后收盘阳线企稳回升 + RSI超卖支撑

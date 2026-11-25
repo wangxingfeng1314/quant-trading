@@ -261,10 +261,11 @@ class _SubPortfolioView:
 
 
 def _build_index_regime_map(index_code: str, start_date: str, end_date: str, fallback_sh: bool = False) -> dict:
-    """加载指数并构建 {trade_date: allow_buy} 牛熊映射表。"""
+    """加载指数并构建 {trade_date: allow_buy} 牛熊映射表（复用 signal_service.classify_index_regime）。"""
     regime_map: dict = {}
     try:
         from data.storage import get_index_daily_range
+        from services.signal_service import classify_index_regime
         from datetime import datetime, timedelta
         idx_warmup = start_date
         if start_date:
@@ -278,14 +279,22 @@ def _build_index_regime_map(index_code: str, start_date: str, end_date: str, fal
             bm_df = get_index_daily_range("000001.SH", idx_warmup, end_date)
         if not bm_df.empty and len(bm_df) >= 20:
             bm_df = clean_daily(bm_df)
-            bm_df = apply_indicators(bm_df, ["ma", "macd"])
-            for _, row in bm_df.iterrows():
+            bm_df = apply_indicators(bm_df, ["ma", "rsi"])
+            ma20_vals = bm_df["ma20"].tolist() if "ma20" in bm_df.columns else []
+            for idx_i, (_, row) in enumerate(bm_df.iterrows()):
                 d_str = str(row["trade_date"]).replace("-", "").strip()
                 c = float(row["close"])
-                m60 = float(row.get("ma60", c) or c)
-                m20 = float(row.get("ma20", c) or c)
-                is_bear = (c < m60) and (c < m20 or m20 < m60)
-                regime_map[d_str] = not is_bear
+                raw_m20 = row.get("ma20", None)
+                m20 = float(raw_m20) if (raw_m20 is not None and pd.notna(raw_m20)) else c
+                if ma20_vals and idx_i >= 2 and pd.notna(ma20_vals[idx_i - 2]):
+                    prev_m20 = float(ma20_vals[idx_i - 2])
+                else:
+                    prev_m20 = m20
+                raw_m60 = row.get("ma60", None)
+                m60 = float(raw_m60) if (raw_m60 is not None and pd.notna(raw_m60)) else m20
+                raw_rsi = row.get("rsi14", None)
+                rsi14 = float(raw_rsi) if (raw_rsi is not None and pd.notna(raw_rsi)) else 50.0
+                regime_map[d_str] = classify_index_regime(c, m20, prev_m20, m60, rsi14) != "BEAR"
     except Exception as e:
         logger.warning(f"指数 {index_code} 择时映射初始化失败: {e}")
     return regime_map
@@ -1249,3 +1258,246 @@ def grid_search_parallel(strategy_cls, universe: list, start_date: str, end_date
 
     results.sort(key=lambda r: r["metric_value"], reverse=True)
     return results
+
+
+def _add_calendar_months(dt, months: int):
+    """纯标准库按自然月增减日期，月末自动对齐。"""
+    import calendar
+    total_m = dt.year * 12 + (dt.month - 1) + int(months)
+    year = total_m // 12
+    month = total_m % 12 + 1
+    day = min(dt.day, calendar.monthrange(year, month)[1])
+    return dt.replace(year=year, month=month, day=day)
+
+
+def run_rolling_adaptive_backtest(
+    universe: list,
+    start_date: str,
+    end_date: str,
+    rebalance_months: int = 12,
+    train_lookback_years: int = 3,
+    initial_capital: float = 100000.0,
+    progress_callback: Callable = None,
+    **bt_kwargs,
+) -> dict:
+    """严格零前视滚动自适应组合回测：每期只用严格早于样本外起点的历史窗口定策略路由，冻结跑下一区间并复利拼接。"""
+    from datetime import datetime, timedelta
+    from data.storage import get_instrument_list
+    from services.strategy_recommender import (
+        evaluate_stock_strategy, is_no_trade_recommendation,
+    )
+    from strategies import STRATEGY_REGISTRY
+
+    clean_universe = list(dict.fromkeys(str(c).strip() for c in (universe or []) if str(c).strip()))
+    start_s = str(start_date).replace("-", "").replace("/", "").strip()[:8]
+    end_s = str(end_date).replace("-", "").replace("/", "").strip()[:8]
+    dt_s = datetime.strptime(start_s, "%Y%m%d")
+    dt_e = datetime.strptime(end_s, "%Y%m%d")
+    rb_months = max(3, int(rebalance_months or 12))
+    lb_years = max(1, int(train_lookback_years or 2))
+
+    # 1. 切分连续不重叠的样本外子期
+    segments = []
+    cur = dt_s
+    while cur <= dt_e:
+        nxt = _add_calendar_months(cur, rb_months)
+        seg_e = min(dt_e, nxt - timedelta(days=1))
+        if segments and (seg_e - cur).days < 15:
+            prev_s, _ = segments[-1]
+            segments[-1] = (prev_s, seg_e)
+        else:
+            segments.append((cur, seg_e))
+        if seg_e >= dt_e:
+            break
+        cur = nxt
+
+    if not segments or not clean_universe:
+        empty_res = BacktestResult(
+            strategy="rolling_adaptive_router", params="{}",
+            start_date=start_s, end_date=end_s,
+            initial_capital=float(initial_capital), final_capital=float(initial_capital),
+        )
+        return {"result": empty_res, "periods": []}
+
+    # 2. 一次性预加载覆盖最长回看训练窗口 + 全部测试区间的行情
+    preload_start = (_add_calendar_months(dt_s, -12 * lb_years) - timedelta(days=180)).strftime("%Y%m%d")
+    preloaded = preload_backtest_data(clean_universe, preload_start, end_s)
+
+    try:
+        inst_df = get_instrument_list()
+        inst_map = (
+            inst_df.set_index("ts_code")[["name", "industry"]].to_dict("index")
+            if (inst_df is not None and not inst_df.empty and "industry" in inst_df.columns)
+            else {}
+        )
+    except Exception:
+        inst_map = {}
+
+    # 提取测试期各交易日全集（用于空仓现金防守期对齐净值日历）
+    all_trade_dates = sorted({
+        str(d)
+        for df in preloaded.values()
+        if df is not None and not df.empty and "trade_date" in df.columns
+        for d in df["trade_date"].astype(str).tolist()
+        if start_s <= str(d) <= end_s
+    })
+
+    cur_capital = float(initial_capital)
+    stitched_eq = []
+    seen_eq_dates = set()
+    stitched_trades = []
+    period_rows = []
+
+    run_bt_kwargs = dict(bt_kwargs)
+    run_bt_kwargs.setdefault("execution_mode", "next_open")
+    run_bt_kwargs.setdefault("risk_manager", "auto")
+    run_bt_kwargs.setdefault("max_active_positions", 5)
+    run_bt_kwargs.setdefault("market_regime_filter", True)
+    # 避免外层重复透传与固定参数冲突
+    for k_drop in ("strategy_cls", "params", "universe", "start_date", "end_date",
+                   "initial_capital", "preloaded_data", "strategy_router"):
+        run_bt_kwargs.pop(k_drop, None)
+
+    total_segs = len(segments)
+    for idx_s, (seg_s_dt, seg_e_dt) in enumerate(segments):
+        seg_s = seg_s_dt.strftime("%Y%m%d")
+        seg_e = seg_e_dt.strftime("%Y%m%d")
+        tr_s = _add_calendar_months(seg_s_dt, -12 * lb_years).strftime("%Y%m%d")
+        tr_e = (seg_s_dt - timedelta(days=1)).strftime("%Y%m%d")
+
+        router = {}
+        blocked_codes = []
+        strat_counts: dict = {}
+        for code in clean_universe:
+            meta = inst_map.get(code, {})
+            try:
+                ev = evaluate_stock_strategy(
+                    code, name=meta.get("name", ""), industry=meta.get("industry", ""),
+                    start_date=tr_s, end_date=tr_e, preloaded_data=preloaded,
+                )
+            except TypeError:
+                ev = evaluate_stock_strategy(
+                    code, name=meta.get("name", ""), industry=meta.get("industry", ""),
+                    start_date=tr_s, end_date=tr_e,
+                )
+            if is_no_trade_recommendation(ev.get("tag", "")) or (ev.get("is_oos") and ev.get("oos_passed") is False):
+                blocked_codes.append(code)
+                continue
+            sk = ev.get("strategy", "kdj_cross")
+            if sk in STRATEGY_REGISTRY and not getattr(STRATEGY_REGISTRY[sk], "is_cross_sectional", False):
+                s_cls = STRATEGY_REGISTRY[sk]
+                s_params = {k: v.get("default", 0) for k, v in s_cls.param_schema.items()}
+                router[code] = (s_cls, s_params)
+                strat_counts[sk] = strat_counts.get(sk, 0) + 1
+            else:
+                blocked_codes.append(code)
+
+        if not router:
+            # 全部观望熔断：本期空仓持币防御，权益平直延续
+            for d_str in all_trade_dates:
+                if seg_s <= d_str <= seg_e and d_str not in seen_eq_dates:
+                    seen_eq_dates.add(d_str)
+                    stitched_eq.append({
+                        "date": d_str, "equity": round(cur_capital, 2),
+                        "cash": round(cur_capital, 2), "market_value": 0.0,
+                    })
+            period_rows.append({
+                "区间": f"{seg_s}~{seg_e}",
+                "训练窗口": f"{tr_s}~{tr_e}",
+                "入池标的": 0,
+                "观望熔断": len(blocked_codes),
+                "路由分布": "空仓防御",
+                "区间收益%": 0.0,
+                "最大回撤%": 0.0,
+                "胜率%": 0.0,
+                "盈亏比": 1.0,
+                "平仓笔数": 0,
+                "期末净值": round(cur_capital, 2),
+            })
+        else:
+            bt = Backtester(
+                strategy_cls=None,
+                params={},
+                universe=list(router.keys()),
+                start_date=seg_s,
+                end_date=seg_e,
+                initial_capital=cur_capital,
+                preloaded_data=preloaded,
+                strategy_router=router,
+                **run_bt_kwargs,
+            )
+            r_seg = bt.run(save=False)
+            if r_seg.equity_curve:
+                for pt in r_seg.equity_curve:
+                    dt_k = str(pt.get("date", ""))
+                    if dt_k and dt_k not in seen_eq_dates:
+                        seen_eq_dates.add(dt_k)
+                        stitched_eq.append(dict(pt))
+                cur_capital = float(r_seg.final_capital)
+            else:
+                for d_str in all_trade_dates:
+                    if seg_s <= d_str <= seg_e and d_str not in seen_eq_dates:
+                        seen_eq_dates.add(d_str)
+                        stitched_eq.append({
+                            "date": d_str, "equity": round(cur_capital, 2),
+                            "cash": round(cur_capital, 2), "market_value": 0.0,
+                        })
+            if r_seg.trades:
+                stitched_trades.extend(r_seg.trades)
+
+            dist_txt = ", ".join(f"{k}:{v}" for k, v in sorted(strat_counts.items()))
+            period_rows.append({
+                "区间": f"{seg_s}~{seg_e}",
+                "训练窗口": f"{tr_s}~{tr_e}",
+                "入池标的": len(router),
+                "观望熔断": len(blocked_codes),
+                "路由分布": dist_txt,
+                "区间收益%": round(float(r_seg.total_return), 2),
+                "最大回撤%": round(float(r_seg.max_drawdown), 2),
+                "胜率%": round(float(r_seg.win_rate), 1),
+                "盈亏比": round(float(getattr(r_seg, "profit_factor", 1.0)), 2),
+                "平仓笔数": int(r_seg.sell_count),
+                "期末净值": round(cur_capital, 2),
+            })
+
+        if progress_callback:
+            progress_callback(idx_s + 1, total_segs)
+
+    # 3. 对完整复利曲线重新计算全期一致的年化/回撤/夏普/胜率/Alpha/Beta
+    stitched_port = Portfolio(float(initial_capital))
+    stitched_port.equity_curve = stitched_eq
+    stitched_port.trades = stitched_trades
+    bm_ret = get_benchmark_returns(start_s, end_s) or None
+    metrics = stitched_port.calc_metrics(benchmark_returns=bm_ret)
+
+    res = BacktestResult(
+        strategy="rolling_adaptive_router",
+        params=json.dumps({
+            "rebalance_months": rb_months,
+            "train_lookback_years": lb_years,
+            "universe_size": len(clean_universe),
+        }, ensure_ascii=False),
+        start_date=start_s,
+        end_date=end_s,
+        initial_capital=float(initial_capital),
+        final_capital=float(metrics.get("final_capital", cur_capital)),
+        total_return=float(metrics.get("total_return", 0.0)),
+        annual_return=float(metrics.get("annual_return", 0.0)),
+        max_drawdown=float(metrics.get("max_drawdown", 0.0)),
+        sharpe_ratio=float(metrics.get("sharpe_ratio", 0.0)),
+        calmar_ratio=float(metrics.get("calmar_ratio", 0.0)),
+        win_rate=float(metrics.get("win_rate", 0.0)),
+        trade_count=int(metrics.get("trade_count", len(stitched_trades))),
+        sell_count=int(metrics.get("sell_count", 0)),
+        equity_curve=stitched_eq,
+        trades=stitched_trades,
+    )
+    res.alpha = float(metrics.get("alpha", 0.0))
+    res.beta = float(metrics.get("beta", 0.0))
+    res.profit_factor = float(metrics.get("profit_factor", 1.0))
+    res.win_loss_ratio = float(metrics.get("win_loss_ratio", 1.0))
+    res.avg_win = float(metrics.get("avg_win", 0.0))
+    res.avg_loss = float(metrics.get("avg_loss", 0.0))
+    res.break_even_count = int(metrics.get("break_even_count", 0))
+
+    return {"result": res, "periods": period_rows}
