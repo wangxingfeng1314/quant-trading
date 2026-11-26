@@ -341,29 +341,30 @@ def show():
     indicator_list.append("vol_ma")
     df = apply_indicators(df, indicator_list)
 
-    # 顶部指标卡片（同花顺风格：最新价/涨跌幅/今开/昨收/最高/最低）
+    # 顶部指标卡片（同花顺风格：最新价/涨跌幅/今开/昨收/最高/最低，ETF 自动3位小数）
+    from engine.commission import format_price, price_decimals
     latest = df.iloc[-1]
     prev = df.iloc[-2] if len(df) > 1 else latest
     chg = float(latest.get("pct_chg", 0) or 0)
-    chg_color = "inverse"  # 交给 delta_color 按正负显示 (红涨绿跌)
+    dec = price_decimals(ts_code)
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric("最新价", f"¥{latest['close']:.2f}",
+        st.metric("最新价", format_price(latest["close"], ts_code),
                   delta=f"{chg:+.2f}%", delta_color="inverse")
     with col2:
-        st.metric("今开", f"¥{latest['open']:.2f}",
-                  delta=f"{latest['open'] - prev['close']:+.2f}",
+        st.metric("今开", format_price(latest["open"], ts_code),
+                  delta=f"{float(latest['open']) - float(prev['close']):+.{dec}f}",
                   delta_color="inverse")
     with col3:
-        st.metric("昨收", f"¥{prev['close']:.2f}")
+        st.metric("昨收", format_price(prev["close"], ts_code))
     with col4:
         st.metric("数据条数", f"{len(df)}")
 
     col5, col6, col7, col8 = st.columns(4)
     with col5:
-        st.metric("最高", f"¥{latest['high']:.2f}")
+        st.metric("最高", format_price(latest["high"], ts_code))
     with col6:
-        st.metric("最低", f"¥{latest['low']:.2f}")
+        st.metric("最低", format_price(latest["low"], ts_code))
     with col7:
         vol_shares = float(latest.get("volume", 0) or 0)
         vol_str = f"{vol_shares / 1e6:.2f}万手" if vol_shares >= 1e6 else f"{vol_shares / 100:.0f}手"

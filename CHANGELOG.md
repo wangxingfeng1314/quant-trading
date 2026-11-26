@@ -1,5 +1,20 @@
 # Changelog
 
+## [v0.13.0] - 2026-11-26
+
+### 🛡️ 轮动资产防误删保护、侧边栏全局提速与收口完善
+
+1. **核心多资产轮动 ETF 缓存误删防护 (`data/storage.py`)**
+   - `get_non_watchlist_stocks_with_data(exclude_rotation_etfs=True)` 与 `clean_non_watchlist_data(codes=None, protect_rotation_etfs=True)` 默认将 `ROTATION_ETF_PRESETS` 纳入与自选/持仓同级的保护名单，防止侧边栏「清理非自选缓存」一键误删未加入自选组的 6 只核心多资产 ETF 历史行情。
+
+2. **侧边栏全局切页提速与一键更新估值联动 (`app/main.py`)**
+   - 侧边栏「清理非自选缓存」改用 `cached_instrument_list()` 消除全站每次切页时的 5,000+ 行未缓存全表查询。
+   - 侧边栏「🔄 更新自选股数据」按钮在增量补数后自动联动 `refresh_watchlist_valuations_if_stale(max_age_days=7)`，保持估值快照与行情同步新鲜。
+
+3. **数据浏览 ETF 3 位小数卡片与策略百科单 SQL 聚合 (`app/data_viewer.py`, `app/strategy_intro.py`)**
+   - 数据浏览页顶部 `最新价 / 今开 / 昨收 / 最高 / 最低` 卡片统一使用 `format_price()` / `price_decimals()`，ETF 精确显示 3 位小数。
+   - `_get_strategy_stats()` 合并为单次 `GROUP BY strategy` SQL 查询，排行榜同步纳入 `dual_sleeve_core_satellite` 与 `rolling_adaptive_portfolio` 组合历史成绩。
+
 ## [v0.12.0] - 2026-11-26
 
 ### ✨ 账本策略继承、规划器批查精算与信号验证净收益收口

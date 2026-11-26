@@ -1515,8 +1515,21 @@ def get_watchlist() -> pd.DataFrame:
         return pd.read_sql("SELECT * FROM watchlist ORDER BY added_date DESC", conn)
 
 
-def get_non_watchlist_stocks_with_data() -> list[str]:
-    """获取所有在 daily_price 中有行情数据，但既不在自选股中、也不在模拟持仓中的标的代码"""
+def _get_protected_rotation_etf_codes() -> set[str]:
+    """返回系统预设多资产轮动 ETF 代码集合，默认受非自选清理保护。"""
+    try:
+        from strategies.momentum_rotation import ROTATION_ETF_PRESETS
+        return {str(c).strip() for c, _ in ROTATION_ETF_PRESETS if str(c).strip()}
+    except Exception:
+        return set()
+
+
+def get_non_watchlist_stocks_with_data(exclude_rotation_etfs: bool = True) -> list[str]:
+    """获取所有在 daily_price 中有行情数据，但既不在自选股中、也不在模拟持仓中的标的代码
+
+    参数:
+        exclude_rotation_etfs: 是否默认排除系统多资产轮动 ETF（防止双舱核心资产被误当孤儿缓存清除）
+    """
     with get_conn() as conn:
         rows = conn.execute(
             """
@@ -1526,19 +1539,24 @@ def get_non_watchlist_stocks_with_data() -> list[str]:
             ORDER BY ts_code
             """
         ).fetchall()
-        return [r[0] for r in rows]
+    codes = [r[0] for r in rows]
+    if exclude_rotation_etfs:
+        protected_etfs = _get_protected_rotation_etf_codes()
+        codes = [c for c in codes if c not in protected_etfs]
+    return codes
 
 
-def clean_non_watchlist_data(codes: list[str] | None = None) -> dict:
+def clean_non_watchlist_data(codes: list[str] | None = None, protect_rotation_etfs: bool = True) -> dict:
     """清理非自选股且非持仓标的的本地行情日线与历史信号
 
     参数:
         codes: 指定清理的代码列表，若为 None 则清理全部非自选股标的
+        protect_rotation_etfs: 是否保护系统预设轮动 ETF（默认 True）
     返回:
         {"deleted_codes": list[str], "daily_rows": int, "signal_rows": int}
     """
     if codes is None:
-        codes = get_non_watchlist_stocks_with_data()
+        codes = get_non_watchlist_stocks_with_data(exclude_rotation_etfs=protect_rotation_etfs)
     else:
         # 安全守卫：绝不清理当前自选股或模拟持仓中的标的
         with get_conn() as conn:
@@ -1546,6 +1564,8 @@ def clean_non_watchlist_data(codes: list[str] | None = None) -> dict:
                 "SELECT ts_code FROM watchlist UNION SELECT ts_code FROM position"
             ).fetchall()
             protected = {r[0] for r in protected_rows}
+        if protect_rotation_etfs:
+            protected.update(_get_protected_rotation_etf_codes())
         codes = [c for c in codes if c not in protected]
 
     if not codes:

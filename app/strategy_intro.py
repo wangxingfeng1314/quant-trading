@@ -10,28 +10,26 @@ from data.storage import get_conn
 
 @st.cache_data(ttl=180)
 def _get_strategy_stats() -> dict:
-    """从回测记录中统计各策略的历史表现（缓存 3 分钟）"""
+    """从回测记录中单次 SQL GROUP BY 聚合各策略及组合的历史表现（缓存 3 分钟）"""
     stats = {}
     with get_conn() as conn:
-        for s in list_strategies():
-            name = s["name"]
-            df = pd.read_sql(
-                "SELECT total_return, sharpe_ratio, max_drawdown, win_rate, "
-                "trade_count, annual_return FROM backtest_result WHERE strategy = ?",
-                conn, params=[name]
-            )
-            if df.empty:
-                stats[name] = None
-            else:
-                stats[name] = {
-                    "回测次数": len(df),
-                    "平均总收益%": round(df["total_return"].mean(), 2),
-                    "平均年化%": round(df["annual_return"].mean(), 2),
-                    "平均夏普": round(df["sharpe_ratio"].mean(), 2),
-                    "平均最大回撤%": round(df["max_drawdown"].mean(), 2),
-                    "平均胜率%": round(df["win_rate"].mean(), 1),
-                    "总交易次数": int(df["trade_count"].sum()),
-                }
+        rows = conn.execute(
+            "SELECT strategy, COUNT(*), AVG(total_return), AVG(annual_return), "
+            "AVG(sharpe_ratio), AVG(max_drawdown), AVG(win_rate), SUM(trade_count) "
+            "FROM backtest_result GROUP BY strategy"
+        ).fetchall()
+    for strat_name, cnt, avg_ret, avg_ann, avg_sh, avg_dd, avg_wr, sum_tc in rows:
+        if not strat_name or not cnt:
+            continue
+        stats[str(strat_name)] = {
+            "回测次数": int(cnt),
+            "平均总收益%": round(float(avg_ret or 0.0), 2),
+            "平均年化%": round(float(avg_ann or 0.0), 2),
+            "平均夏普": round(float(avg_sh or 0.0), 2),
+            "平均最大回撤%": round(float(avg_dd or 0.0), 2),
+            "平均胜率%": round(float(avg_wr or 0.0), 1),
+            "总交易次数": int(sum_tc or 0),
+        }
     return stats
 
 
@@ -44,7 +42,6 @@ def show():
     strategy_stats = _get_strategy_stats()
 
     # 概览统计（按策略风格分类）
-    has_backtest = sum(1 for s in strategies if strategy_stats.get(s["name"]))
     style_count = {}
     for s in strategies:
         style = s.get("style", "综合")
@@ -61,13 +58,33 @@ def show():
     st.subheader("🏆 策略排行榜（基于历史回测）")
 
     ranking_data = []
+    seen_rank_keys = set()
     for s in strategies:
         stats = strategy_stats.get(s["name"])
         if stats:
+            seen_rank_keys.add(s["name"])
             ranking_data.append({
                 "风格": s.get("style", "综合"),
                 "策略": f"{format_strategy_cn(s['name'])} ({s['name']})",
                 "说明": s["desc"],
+                "平均总收益%": stats["平均总收益%"],
+                "平均年化%": stats["平均年化%"],
+                "平均夏普": stats["平均夏普"],
+                "平均最大回撤%": stats["平均最大回撤%"],
+                "平均胜率%": stats["平均胜率%"],
+                "回测次数": stats["回测次数"],
+                "总交易次数": stats["总交易次数"],
+            })
+    for comp_key, comp_desc in (
+        ("dual_sleeve_core_satellite", "个股零前视滚动路由 + 多资产 ETF 动量轮动双舱组合"),
+        ("rolling_adaptive_portfolio", "跨年度滚动选优自适应组合回测"),
+    ):
+        stats = strategy_stats.get(comp_key)
+        if stats and comp_key not in seen_rank_keys:
+            ranking_data.append({
+                "风格": "组合",
+                "策略": f"{format_strategy_cn(comp_key)} ({comp_key})",
+                "说明": comp_desc,
                 "平均总收益%": stats["平均总收益%"],
                 "平均年化%": stats["平均年化%"],
                 "平均夏普": stats["平均夏普"],

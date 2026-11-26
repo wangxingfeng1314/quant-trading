@@ -264,7 +264,7 @@ st.sidebar.markdown(
     f"**系统状态**\n\n"
     f"⭐ 自选股: {watchlist_count} 只\n\n"
     f"📊 日线数据: {db_count:,} 条\n\n"
-    f"版本: **v0.12.0**"
+    f"版本: **v0.13.0**"
 )
 
 # 登出按钮（仅认证模式下显示）
@@ -302,6 +302,11 @@ if st.sidebar.button("🔄 更新自选股数据", type="primary", width="stretc
             else:
                 from scripts.init_data import run_update
                 run_update(days=14, watchlist=True, progress_callback=_on_progress)
+                try:
+                    from services.valuation_service import refresh_watchlist_valuations_if_stale
+                    refresh_watchlist_valuations_if_stale(max_age_days=7)
+                except Exception:
+                    pass
                 from engine.backtester import clear_backtester_cache
                 st.cache_data.clear()
                 clear_backtester_cache()
@@ -317,8 +322,8 @@ if st.sidebar.button("🔄 更新自选股数据", type="primary", width="stretc
 # 数据库备份/恢复（使用 SQLite 原生在线热备 API，保障 WAL 模式一致性与文件锁安全）
 from core.config import DB_PATH
 from data.storage import (backup_database, restore_database,
-                          get_non_watchlist_stocks_with_data, clean_non_watchlist_data,
-                          get_instrument_list)
+                          get_non_watchlist_stocks_with_data, clean_non_watchlist_data)
+from app.st_utils import cached_instrument_list
 backup_dir = DB_PATH.parent / "backups"
 backup_dir.mkdir(exist_ok=True)
 
@@ -351,11 +356,11 @@ if backups:
             except Exception as e:
                 st.error(f"❌ 恢复失败: {e}")
 
-# 清理非自选股的历史缓存数据
+# 清理非自选股的历史缓存数据（默认已保护双舱核心轮动 ETF，且使用缓存标的列表避免切页全表扫描）
 try:
     non_wl_cached = get_non_watchlist_stocks_with_data()
     if non_wl_cached:
-        inst_df = get_instrument_list()
+        inst_df = cached_instrument_list()
         name_map = dict(zip(inst_df["ts_code"], inst_df["name"])) if not inst_df.empty else {}
         with st.sidebar.popover(f"🧹 清理非自选缓存 ({len(non_wl_cached)}只)"):
             st.markdown(f"**检测到 {len(non_wl_cached)} 只已移出自选的标的存有本地历史K线：**")
