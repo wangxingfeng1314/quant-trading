@@ -1,8 +1,40 @@
 """Streamlit 中文组件工具 - 替换内置组件的英文文本"""
 import calendar
+import mimetypes
+import socket
 from datetime import date, datetime
 import streamlit as st
 import pandas as pd
+
+
+def register_static_mimetypes():
+    """注册 Windows 下可能缺失的静态资源 MIME 类型，避免字体/JS 被当成 text/plain"""
+    for mime_type, ext in (
+        ("font/woff2", ".woff2"),
+        ("font/woff", ".woff"),
+        ("application/javascript", ".js"),
+        ("application/javascript", ".mjs"),
+        ("text/css", ".css"),
+    ):
+        mimetypes.add_type(mime_type, ext, strict=True)
+
+
+def get_dual_stack_server_address() -> str:
+    """探测系统是否支持 IPv6+IPv4 双栈监听（'::'），解决 Windows 下 localhost 走 ::1 超时问题"""
+    sock = None
+    try:
+        sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        sock.bind(("::", 0))
+        return "::"
+    except OSError:
+        return "0.0.0.0"
+    finally:
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
 
 
 def chinese_date_input(label: str, default_start: date = None,
@@ -101,26 +133,36 @@ def chinese_date_picker(label: str, default_val: date = None,
     return f"{int(y):04d}{int(m):02d}{min(int(d), max_day):02d}"
 
 
+def _build_chinese_dataframe_html(df: pd.DataFrame, height: int = 400) -> str:
+    """构建零缩进、无空行的紧凑数据表格 HTML，避免被 Markdown 解析为代码块"""
+    raw_table = df.to_html(index=False, escape=False, na_rep="-")
+    table_html = "\n".join(line.strip() for line in raw_table.splitlines() if line.strip())
+    css = (
+        ".quant-table-wrap table{width:100%;border-collapse:collapse;font-size:14px;}"
+        ".quant-table-wrap th{background-color:#131c30;color:#8b98b8;padding:8px 12px;"
+        "text-align:left !important;position:sticky;top:0;z-index:1;"
+        "border-bottom:2px solid #2a3a5e;font-weight:600;}"
+        ".quant-table-wrap td{padding:6px 12px;border-bottom:1px solid #1e2a44;"
+        "color:#dbe2ee;background-color:#0d1526;}"
+        ".quant-table-wrap tr:hover td{background-color:#182338;}"
+    )
+    parts = [
+        f'<div class="quant-table-wrap" style="overflow-x:auto;overflow-y:auto;height:{height}px;border:1px solid #1e2a44;border-radius:10px;background-color:#0d1526;">',
+        f"<style>{css}</style>",
+        table_html,
+        "</div>",
+        f'<div style="text-align:right;font-size:12px;color:#8b98b8;margin-top:4px;">共 {len(df)} 条记录</div>',
+    ]
+    return "\n".join(parts)
+
+
 def chinese_dataframe(df: pd.DataFrame, height: int = 400):
     """中文数据表格（替代 st.dataframe 的英文 AG Grid）— 深色金融主题"""
-    table_html = df.to_html(index=False, escape=False, na_rep="-")
-
-    html = f"""
-    <div style="overflow-x: auto; overflow-y: auto; height: {height}px; border: 1px solid #1e2a44; border-radius: 10px; background-color: #0d1526;">
-        <style>
-            table {{ width: 100%; border-collapse: collapse; font-size: 14px; }}
-            th {{ background-color: #131c30; color: #8b98b8; padding: 8px 12px; text-align: left !important;
-                 position: sticky; top: 0; z-index: 1; border-bottom: 2px solid #2a3a5e; font-weight: 600; }}
-            td {{ padding: 6px 12px; border-bottom: 1px solid #1e2a44; color: #dbe2ee; background-color: #0d1526; }}
-            tr:hover td {{ background-color: #182338; }}
-        </style>
-        {table_html}
-    </div>
-    <div style="text-align: right; font-size: 12px; color: #8b98b8; margin-top: 4px;">
-        共 {len(df)} 条记录
-    </div>
-    """
-    st.markdown(html, unsafe_allow_html=True)
+    html = _build_chinese_dataframe_html(df, height=height)
+    if hasattr(st, "html"):
+        st.html(html)
+    else:
+        st.markdown(html, unsafe_allow_html=True)
 
 
 def chinese_metric_grid(metrics: dict, columns: int = 4):

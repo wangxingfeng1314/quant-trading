@@ -3,6 +3,9 @@ import streamlit as st
 import app  # noqa: F401
 import traceback
 from datetime import datetime
+from app.st_utils import register_static_mimetypes
+
+register_static_mimetypes()
 
 st.set_page_config(
     page_title="A股量化交易系统",

@@ -275,7 +275,11 @@ MAIN_EXTRA = """
 
 def inject_theme_css():
     """注入全局主题 CSS（main.py 调用一次）"""
-    st.markdown(SIDEBAR_EXTRA + "\n" + MAIN_EXTRA, unsafe_allow_html=True)
+    css = f"{SIDEBAR_EXTRA.strip()}\n{MAIN_EXTRA.strip()}"
+    if hasattr(st, "html"):
+        st.html(css)
+    else:
+        st.markdown(css, unsafe_allow_html=True)
 
 
 def inject_page_transition_js():
@@ -466,16 +470,14 @@ def inject_page_transition_js():
 
 
 def card_html(title: str, content_html: str, accent: str = "#ef5350") -> str:
-    """生成深色卡片 HTML（用于 st.markdown 渲染）"""
-    return f"""
-    <div style="background:linear-gradient(160deg,#131c30,#0f1728);
-                border:1px solid #1e2a44;border-left:3px solid {accent};
-                border-radius:12px;padding:14px 18px;margin:8px 0;
-                box-shadow:0 4px 16px rgba(0,0,0,0.25);">
-        <div style="color:#ffd54f;font-weight:600;font-size:0.95rem;margin-bottom:6px;">{title}</div>
-        <div style="color:#dbe2ee;font-size:0.92rem;line-height:1.6;">{content_html}</div>
-    </div>
-    """
+    """生成深色卡片 HTML（零缩进无空行，用于 st.markdown / st.html 渲染）"""
+    content_clean = "\n".join(line.lstrip() for line in str(content_html).splitlines() if line.strip())
+    return "\n".join([
+        f'<div style="background:linear-gradient(160deg,#131c30,#0f1728);border:1px solid #1e2a44;border-left:3px solid {accent};border-radius:12px;padding:14px 18px;margin:8px 0;box-shadow:0 4px 16px rgba(0,0,0,0.25);">',
+        f'<div style="color:#ffd54f;font-weight:600;font-size:0.95rem;margin-bottom:6px;">{title}</div>',
+        f'<div style="color:#dbe2ee;font-size:0.92rem;line-height:1.6;">{content_clean}</div>',
+        "</div>",
+    ])
 
 
 def updown_color(value: float) -> str:

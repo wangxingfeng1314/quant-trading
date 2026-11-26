@@ -2,11 +2,13 @@
 # 风格参考：同花顺/东方财富 深蓝黑底 + 红涨绿跌
 
 [server]
+address = "::"
 headless = true
 maxUploadSize = 50
 
 [browser]
 gatherUsageStats = false
+serverAddress = "127.0.0.1"
 
 [theme]
 # 深蓝黑主背景

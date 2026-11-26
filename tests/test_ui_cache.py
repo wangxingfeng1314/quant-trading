@@ -98,4 +98,50 @@ def test_format_stock_cn():
     assert formatted.startswith("000001.SZ")
 
 
+def test_html_helpers_no_indented_code_blocks():
+    """验证表格/卡片 HTML 无 4 空格缩进与空行，避免被 Markdown 当作代码块渲染"""
+    from app.st_utils import _build_chinese_dataframe_html
+    from app.theme import card_html
+
+    df = pd.DataFrame({"代码": ["510310.SH"], "名称": ["沪深300ETF"], "最新价": ["¥3.860"]})
+    table_html = _build_chinese_dataframe_html(df, height=400)
+    assert 'class="quant-table-wrap"' in table_html
+    assert "<table " in table_html
+    assert "510310.SH" in table_html
+    assert "共 1 条记录" in table_html
+    for line in table_html.splitlines():
+        assert line != "", "HTML 中不应包含空行"
+        assert not line.startswith("    "), f"存在 4 空格缩进: {line!r}"
+
+    card = card_html("标题", "<div>内容</div>")
+    assert "标题" in card and "<div>内容</div>" in card
+    for line in card.splitlines():
+        assert line != "", "卡片 HTML 中不应包含空行"
+        assert not line.startswith("    "), f"卡片存在 4 空格缩进: {line!r}"
+
+
+def test_register_static_mimetypes():
+    """验证静态资源 MIME 类型注册完整（避免 Windows 下 woff2 图标字体变 text/plain）"""
+    import mimetypes
+    from app.st_utils import register_static_mimetypes
+
+    register_static_mimetypes()
+    assert mimetypes.guess_type("MaterialSymbols-Rounded.woff2")[0] == "font/woff2"
+    assert mimetypes.guess_type("font.woff")[0] == "font/woff"
+    assert mimetypes.guess_type("Metric.js")[0] in ("application/javascript", "text/javascript")
+    assert mimetypes.guess_type("index.css")[0] == "text/css"
+
+
+def test_get_dual_stack_server_address():
+    """验证双栈监听地址探测及配置文件启用双栈监听"""
+    import pathlib
+    from app.st_utils import get_dual_stack_server_address
+
+    addr = get_dual_stack_server_address()
+    assert addr in ("::", "0.0.0.0")
+
+    cfg_text = pathlib.Path(".streamlit/config.toml").read_text(encoding="utf-8")
+    assert 'address = "::"' in cfg_text
+
+
 
