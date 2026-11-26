@@ -14,6 +14,24 @@ def is_etf_code(ts_code: str) -> bool:
     return code.startswith(("51", "56", "58", "15", "16"))
 
 
+def price_decimals(ts_code: str = "") -> int:
+    """返回标的最小报价小数位数：场内 ETF 为 3 位，股票为 2 位。"""
+    return 3 if is_etf_code(ts_code) else 2
+
+
+def round_price(price: float, ts_code: str = "") -> float:
+    """按标的最小变动价位四舍五入（ETF 3位，股票 2位）。"""
+    return _exchange_round(price, decimals=price_decimals(ts_code))
+
+
+def format_price(price: float, ts_code: str = "", prefix: str = "¥") -> str:
+    """按标的精度格式化价格字符串（ETF 3位小数，股票 2位小数）。"""
+    if price is None:
+        return "-"
+    dec = price_decimals(ts_code)
+    return f"{prefix}{float(price):.{dec}f}"
+
+
 def _exchange_round(value, decimals: int = 2) -> float:
     """按交易所规则把价格舍入到最小变动价位（ROUND_HALF_UP）。
 

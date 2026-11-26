@@ -68,6 +68,8 @@ def diagnose_position_action(
     calc_atr_fn=None,
 ) -> dict:
     """诊断单只持仓标的的实时风控状态与止损/保本/移动止盈/时间止损操作指令。"""
+    from engine.commission import round_price, format_price
+
     daily_fn = get_daily_fn or get_daily
     signals_fn = get_signals_fn or get_signals
     if calc_atr_fn is None:
@@ -76,11 +78,15 @@ def diagnose_position_action(
     else:
         atr_fn = calc_atr_fn
 
-    buy_px = max(float(buy_price or 0.0), 0.01)
+    buy_px = max(float(buy_price or 0.0), 0.001)
     resolved_hint = _resolve_strategy_hint(ts_code, strategy_hint)
     is_reversal = resolved_hint in ("kdj_cross", "bollinger_reversal")
+    is_rotation = resolved_hint == "momentum_rotation"
 
-    plan = atr_fn(ts_code, buy_px, score=0.7)
+    try:
+        plan = atr_fn(ts_code, buy_px, score=0.7, strategy=resolved_hint)
+    except TypeError:
+        plan = atr_fn(ts_code, buy_px, score=0.7)
     atr_pct = float(plan.get("atr_pct") or 2.5)
 
     if is_reversal:
@@ -93,19 +99,32 @@ def diagnose_position_action(
         be_buffer = 0.0
         trail_act = 10.0
         trail_cb = 3.5
+    elif is_rotation:
+        sl_pct = round(max(4.0, min(10.0, atr_pct * 2.5)), 1)
+        tp_pct = round(max(8.0, sl_pct * 2.0), 1)
+        max_hold_limit = 0
+        max_hold_pnl_cap = None
+        enable_be = False
+        be_trigger = 999.0
+        be_buffer = 0.0
+        trail_act = 12.0
+        trail_cb = 4.5
     else:
         sl_pct = float(plan.get("sl_pct", 5.0))
         tp_pct = float(plan.get("tp_pct", 10.0))
         max_hold_limit = 0
         max_hold_pnl_cap = None
         enable_be = True
-        be_trigger = 5.0
+        raw_be = float(plan.get("break_even_trigger", 0.0) or 0.0)
+        be_trigger = raw_be if raw_be > 0 else 5.0
         be_buffer = 0.5
-        trail_act = 10.0
-        trail_cb = 3.5
+        raw_ta = float(plan.get("trail_activation", 0.0) or 0.0)
+        raw_tc = float(plan.get("trail_callback", 0.0) or 0.0)
+        trail_act = raw_ta if raw_ta > 0 else 10.0
+        trail_cb = raw_tc if raw_tc > 0 else 3.5
 
-    stop_loss_price = round(buy_px * (1.0 - sl_pct / 100.0), 2)
-    take_profit_price = round(buy_px * (1.0 + tp_pct / 100.0), 2)
+    stop_loss_price = round_price(buy_px * (1.0 - sl_pct / 100.0), ts_code)
+    take_profit_price = round_price(buy_px * (1.0 + tp_pct / 100.0), ts_code)
 
     df = daily_fn(ts_code, limit=60)
     current_price = float(df.iloc[-1]["close"]) if (df is not None and not df.empty) else buy_px
@@ -131,7 +150,14 @@ def diagnose_position_action(
 
     max_gain_pct = (peak_price / buy_px - 1.0) * 100.0
     drawdown_from_peak = ((peak_price - current_price) / peak_price * 100.0) if peak_price > 0 else 0.0
-    trailing_stop_price = round(peak_price * (1.0 - trail_cb / 100.0), 2) if max_gain_pct >= trail_act else None
+    trailing_stop_price = round_price(peak_price * (1.0 - trail_cb / 100.0), ts_code) if max_gain_pct >= trail_act else None
+
+    ma20_broken = False
+    ma20_val = 0.0
+    if is_rotation and df is not None and len(df) >= 20 and "close" in df.columns:
+        ma20_val = float(df["close"].tail(20).mean())
+        if ma20_val > 0 and current_price < ma20_val:
+            ma20_broken = True
 
     # 查询近期策略 SELL 信号
     recent_sell_str = ""
@@ -158,13 +184,16 @@ def diagnose_position_action(
         action = f"🚨 跌破ATR止损(-{sl_pct:.1f}%)·建议止损清仓"
         level = "danger"
     elif max_gain_pct >= trail_act and drawdown_from_peak >= trail_cb and pnl_pct > 1.0:
-        action = f"⚠️ 高点回撤({drawdown_from_peak:.1f}%，触发¥{trailing_stop_price:.2f})·建议移动止盈锁利"
+        action = f"⚠️ 高点回撤({drawdown_from_peak:.1f}%，触发{format_price(trailing_stop_price, ts_code)})·建议移动止盈锁利"
         level = "warning"
     elif enable_be and max_gain_pct >= be_trigger and pnl_pct <= be_buffer:
         action = f"🛡️ 回撤至保本线(最高+{max_gain_pct:.1f}%→现{pnl_pct:+.1f}%)·建议保本平仓"
         level = "warning"
     elif recent_sell_str:
         action = f"⚠️ 触发卖出信号({recent_sell_str})·建议减仓/离场"
+        level = "warning"
+    elif ma20_broken:
+        action = f"⚠️ 跌破MA20趋势线({format_price(ma20_val, ts_code)})·关注动量轮动调出"
         level = "warning"
     elif max_hold_limit > 0 and holding_days >= max_hold_limit and (max_hold_pnl_cap is None or pnl_pct < max_hold_pnl_cap):
         action = f"⏱️ 持仓已达{holding_days}天仍无起色(超{max_hold_limit}天且盈亏{pnl_pct:+.1f}%)·建议时间止损调仓"
@@ -173,8 +202,8 @@ def diagnose_position_action(
         action = f"🎯 达到目标止盈(+{tp_pct:.1f}%)·可分批止盈"
         level = "profit"
     else:
-        trail_suffix = f" / 移动止盈¥{trailing_stop_price:.2f}" if trailing_stop_price is not None else ""
-        action = f"✅ 趋势正常·持有(止损¥{stop_loss_price:.2f}{trail_suffix})"
+        trail_suffix = f" / 移动止盈{format_price(trailing_stop_price, ts_code)}" if trailing_stop_price is not None else ""
+        action = f"✅ 趋势正常·持有(止损{format_price(stop_loss_price, ts_code)}{trail_suffix})"
         level = "hold"
 
     return {
@@ -184,7 +213,7 @@ def diagnose_position_action(
         "take_profit_price": take_profit_price,
         "sl_pct": sl_pct,
         "tp_pct": tp_pct,
-        "peak_price": round(peak_price, 2),
+        "peak_price": round_price(peak_price, ts_code),
         "max_gain_pct": round(max_gain_pct, 2),
         "drawdown_from_peak": round(drawdown_from_peak, 2),
         "holding_days": holding_days,

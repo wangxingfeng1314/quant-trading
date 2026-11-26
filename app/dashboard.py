@@ -17,6 +17,7 @@ from app.st_utils import (
 )
 from data.indicators import apply_indicators
 from core.config import TUSHARE_TOKEN, TICKFLOW_API_KEY
+from engine.commission import format_price
 
 
 
@@ -361,7 +362,7 @@ def _show_system_status():
                     clear_backtester_cache()
                     st.rerun()
     with col_b:
-        st.markdown("🏷️ 版本: v0.10.0 | 🗄️ `data/quant.db`")
+        st.markdown("🏷️ 版本: v0.11.0 | 🗄️ `data/quant.db`")
     with col_c:
         import json
         report = {
@@ -435,11 +436,11 @@ def _calc_watchlist_snapshot_rows(watchlist_tuples: tuple, name_tuples: tuple) -
         rows.append({
             "代码": ts_code,
             "名称": name_map.get(ts_code, ts_code),
-            "最新价": f"¥{latest['close']:.2f}",
+            "最新价": format_price(latest["close"], ts_code),
             "涨跌幅": f"{chg_pct:.2f}%",
             "趋势": trend,
             "RSI": f"{rsi:.1f}",
-            "MA20": f"¥{ma20:.2f}",
+            "MA20": format_price(ma20, ts_code),
             "PE-TTM": pe_str,
             "PE分位%": pct_str,
             "备注": note,
@@ -488,7 +489,7 @@ def _show_today_signals():
             "方向": format_direction_cn(sig["direction"], with_icon=True),
             "策略": format_strategy_cn(sig["strategy"]),
             "评分": f"{sig['score']:.2f}",
-            "参考价": f"¥{sig['price_ref']:.2f}" if sig["price_ref"] else "-",
+            "参考价": format_price(sig["price_ref"], sig["ts_code"]) if sig["price_ref"] else "-",
             "原因": sig.get("reason", ""),
         })
 
@@ -539,7 +540,7 @@ def _show_hot_stocks():
         rows.append({
             "代码": ts_code,
             "名称": name_map.get(ts_code, ""),
-            "现价": f"¥{latest['close']:.2f}",
+            "现价": format_price(latest["close"], ts_code),
             "涨跌幅": f"{pct:+.2f}%",
             "成交量(手)": f"{vol_lots:,}",
         })
@@ -579,7 +580,7 @@ def _render_daily_report():
                     pct = float(latest["pct_chg"])
                 else:
                     pct = ((latest["close"] - prev["close"]) / prev["close"]) * 100 if prev["close"] > 0 else 0.0
-                lines.append(f"| {ts_code} | {name_map.get(ts_code, '')} | ¥{latest['close']:.2f} | {pct:+.2f}% |")
+                lines.append(f"| {ts_code} | {name_map.get(ts_code, '')} | {format_price(latest['close'], ts_code)} | {pct:+.2f}% |")
     else:
         lines.append("暂无自选股记录")
     lines.append("")

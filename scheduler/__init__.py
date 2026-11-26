@@ -86,7 +86,22 @@ def scan_and_notify(force: bool = False):
                 else:
                     regular_stocks.append(code)
 
-            # 若轮动池不足2只，并入常规扫描以避免横截面空跑
+            # 若未显式配置 ETF轮动池（至少2只），自动探测本地已下载的多资产轮动预设 ETF（>=60根K线）
+            if len(rotation_stocks) < 2:
+                try:
+                    from data.storage import get_stocks_with_data
+                    from strategies.momentum_rotation import ROTATION_ETF_PRESETS
+                    ready_set = set(get_stocks_with_data(min_days=60))
+                    preset_ready = [c for c, _ in ROTATION_ETF_PRESETS if c in ready_set]
+                    if len(preset_ready) >= 2:
+                        rotation_stocks = preset_ready
+                        rot_set = set(rotation_stocks)
+                        # 将已在轮动池中的标的从常规个股策略池剔除，避免重复互搏推送
+                        regular_stocks = [c for c in regular_stocks if c not in rot_set]
+                except Exception:
+                    pass
+
+            # 若轮动池仍不足2只，并入常规扫描以避免横截面空跑
             if len(rotation_stocks) == 1:
                 regular_stocks.extend(rotation_stocks)
                 rotation_stocks = []

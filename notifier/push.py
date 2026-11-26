@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 import requests
 
 from core.config import PROJECT_ROOT
+from engine.commission import price_decimals, round_price, format_price
 
 logger = logging.getLogger(__name__)
 
@@ -379,7 +380,7 @@ def calc_atr_stops_and_sizing(ts_code: str, price: float, score: float = 0.7,
                               strategy: str = "",
                               position_scale: float = 1.0) -> dict:
     """基于标的最近14日真实波幅(ATR14)与策略风格预设，计算动态止损止盈位与风险平价建议股数"""
-    price = max(float(price or 0.0), 0.01)
+    price = max(float(price or 0.0), 0.001)
     scale = min(1.0, max(0.0, float(position_scale if position_scale is not None else 1.0)))
     atr_pct = 2.5  # 默认日均振幅 2.5% -> 2*ATR = 5% 止损
     try:
@@ -416,8 +417,8 @@ def calc_atr_stops_and_sizing(ts_code: str, price: float, score: float = 0.7,
         except Exception:
             pass
 
-    stop_loss = round(price * (1.0 - sl_pct / 100.0), 2)
-    take_profit = round(price * (1.0 + tp_pct / 100.0), 2)
+    stop_loss = round_price(price * (1.0 - sl_pct / 100.0), ts_code)
+    take_profit = round_price(price * (1.0 + tp_pct / 100.0), ts_code)
 
     # 风险平价定仓：单笔最大承受总资金 1.2% ~ 1.8% 的止损风险（随信号评分与熊市缩放系数调整）
     risk_budget_pct = 0.010 + 0.008 * max(0.0, min(float(score or 0.7), 1.0))
@@ -606,7 +607,7 @@ def notify_signals(signals, strategy_names: list = None, min_buy_score: float = 
             "|------|------|------|--------|----------|----------|----------|----------|----------|\n"
         )
         for sig, strat_cn in buy_signals:
-            price = max(sig.price_ref, 0.01)
+            price = max(float(sig.price_ref or 0.0), 0.001)
             is_cy_or_bear = (
                 combined_regime == "BEAR"
                 or (combined_regime == "GROWTH_BEAR" and str(sig.ts_code).startswith(("300", "301", "688")))
@@ -661,8 +662,8 @@ def notify_signals(signals, strategy_names: list = None, min_buy_score: float = 
             strat_col = f"{strat_cn} {val_badge}".strip() if val_badge else strat_cn
             safe_reason = (sig.reason or "").replace("|", "/")
             content += (
-                f"| {_label(sig)} | {strat_col} | {sig.score:.2f} | ¥{price:.2f} | {shares_text} | {cost_text} "
-                f"| ¥{stop_loss:.2f} (-{sl_pct:g}%) | ¥{take_profit:.2f} (+{tp_pct:g}%{rm_suffix}) | {safe_reason} |\n"
+                f"| {_label(sig)} | {strat_col} | {sig.score:.2f} | {format_price(price, sig.ts_code)} | {shares_text} | {cost_text} "
+                f"| {format_price(stop_loss, sig.ts_code)} (-{sl_pct:g}%) | {format_price(take_profit, sig.ts_code)} (+{tp_pct:g}%{rm_suffix}) | {safe_reason} |\n"
             )
     else:
         notes = []
@@ -690,7 +691,7 @@ def notify_signals(signals, strategy_names: list = None, min_buy_score: float = 
         )
         for sig, strat_cn in dedup_sells[:5]:
             safe_reason = (sig.reason or "").replace("|", "/")
-            content += f"| {_label(sig)} | {strat_cn} | {sig.score:.2f} | ¥{sig.price_ref:.2f} | 建议平仓/减半 | {safe_reason} |\n"
+            content += f"| {_label(sig)} | {strat_cn} | {sig.score:.2f} | {format_price(sig.price_ref, sig.ts_code)} | 建议平仓/减半 | {safe_reason} |\n"
     else:
         content += "> 暂无卖出信号。\n"
 
@@ -781,12 +782,12 @@ def notify_position_summary() -> bool:
             sl_px = diag["stop_loss_price"]
             max_g = diag["max_gain_pct"]
             trail_px = diag.get("trailing_stop_price")
-            trail_txt = f" | 移动止盈¥{trail_px:.2f}" if trail_px is not None else ""
+            trail_txt = f" | 移动止盈{format_price(trail_px, ts_code)}" if trail_px is not None else ""
             rows.append(
                 f"{icon} **{name}** ({ts_code}{note_str})  "
-                f"成本¥{buy_price:.2f}→现¥{current_price:.2f}  "
+                f"成本{format_price(buy_price, ts_code)}→现{format_price(current_price, ts_code)}  "
                 f"**{pnl:+.0f}元 ({pnl_pct:+.1f}%)**  "
-                f"*(最高{max_g:+.1f}% | 止损¥{sl_px:.2f}{trail_txt} | {diag['action']})*"
+                f"*(最高{max_g:+.1f}% | 止损{format_price(sl_px, ts_code)}{trail_txt} | {diag['action']})*"
             )
 
         total_icon = "🟢" if total_pnl >= 0 else "🔴"

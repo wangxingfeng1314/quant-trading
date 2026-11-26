@@ -122,6 +122,7 @@ class BacktestService:
                         etf_top_k: int = 2,
                         etf_position_sizing: str = "atr_risk",
                         capital: float = None,
+                        save: bool = False,
                         progress_callback=None,
                         backtest_options: dict = None,
                         **bt_kwargs) -> dict:
@@ -155,6 +156,7 @@ class BacktestService:
             etf_top_k=int(etf_top_k),
             etf_position_sizing=etf_position_sizing,
             initial_capital=cap,
+            save=bool(save),
             progress_callback=progress_callback,
             **merged_kwargs,
         )

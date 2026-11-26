@@ -11,6 +11,7 @@ from data.storage import (
 )
 from app.st_utils import chinese_dataframe, cached_get_stocks_with_data, cached_instrument_list
 from data.indicators import apply_indicators
+from engine.commission import format_price
 
 
 def _render_screener_results(df_result: pd.DataFrame):
@@ -23,10 +24,12 @@ def _render_screener_results(df_result: pd.DataFrame):
     col3.metric("平均RSI", f"{df_result['RSI14'].mean():.1f}")
 
     display = df_result.copy()
-    display["最新价"] = display["最新价"].apply(lambda x: f"¥{x:.2f}" if pd.notna(x) and x > 0 else "-")
-    display["MA5"] = display["MA5"].apply(lambda x: f"¥{x:.2f}" if pd.notna(x) and x > 0 else "-")
-    display["MA20"] = display["MA20"].apply(lambda x: f"¥{x:.2f}" if pd.notna(x) and x > 0 else "-")
-    display["MA60"] = display["MA60"].apply(lambda x: f"¥{x:.2f}" if pd.notna(x) and x > 0 else "-")
+    for pcol in ("最新价", "MA5", "MA20", "MA60"):
+        if pcol in display.columns:
+            display[pcol] = display.apply(
+                lambda r, col=pcol: format_price(r[col], r.get("代码", "")) if pd.notna(r[col]) and float(r[col]) > 0 else "-",
+                axis=1,
+            )
     display["成交量(万手)"] = display["成交量(万手)"].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "0.00")
     if "PE-TTM" in display.columns:
         display["PE-TTM"] = display["PE-TTM"].apply(lambda x: f"{x:.1f}" if pd.notna(x) else "-")
@@ -141,14 +144,16 @@ def show():
                 turnover_min = st.number_input("换手率 ≥ %", value=0.0, step=0.5)
 
         with tab_c:
-            st.caption("基于本地 `stock_valuation` 估值表筛选（可在「自选股管理」同步最新 PE-TTM / PB）")
-            vc0, vc1, vc2 = st.columns(3)
+            st.caption("基于本地 `stock_valuation` 估值表筛选（可在「持仓管理」同步最新 PE-TTM / PB / 3年分位）")
+            vc0, vc1, vc2, vc3 = st.columns(4)
             with vc0:
                 exclude_loss = st.checkbox("剔除亏损股 (PE-TTM > 0)", value=False, key="sc_ex_loss")
             with vc1:
                 pe_max = st.number_input("PE-TTM 上限 (0=不限)", min_value=0.0, max_value=500.0, value=0.0, step=5.0, key="sc_pe_max")
             with vc2:
                 pb_max = st.number_input("PB 上限 (0=不限)", min_value=0.0, max_value=50.0, value=0.0, step=0.5, key="sc_pb_max")
+            with vc3:
+                pe_pct_max = st.number_input("3年 PE 分位上限 % (0=不限)", min_value=0.0, max_value=100.0, value=0.0, step=5.0, key="sc_pe_pct_max")
 
     # 执行按钮
     run_btn = st.button("🔍 开始筛选", type="primary", width='stretch')
@@ -279,7 +284,7 @@ def show():
                 if pd.notna(turnover) and turnover < turnover_min:
                     match = False
 
-            # 10. 基本面估值因子 (PE-TTM / PB / 剔除亏损股)
+            # 10. 基本面估值因子 (PE-TTM / PB / 3年 PE 分位 / 剔除亏损股)
             v_row = val_map.get(ts_code, {})
             pe_val = v_row.get("pe_ttm")
             pe_pct_val = v_row.get("pe_percentile")
@@ -293,12 +298,17 @@ def show():
             if match and pb_max > 0:
                 if pb_val is None or pd.isna(pb_val) or float(pb_val) <= 0 or float(pb_val) > pb_max:
                     match = False
-            if match and (exclude_loss or pe_max > 0 or pb_max > 0):
+            if match and pe_pct_max > 0:
+                if pe_pct_val is None or pd.isna(pe_pct_val) or float(pe_pct_val) > pe_pct_max:
+                    match = False
+            if match and (exclude_loss or pe_max > 0 or pb_max > 0 or pe_pct_max > 0):
                 val_tags = []
                 if pe_val is not None and pd.notna(pe_val) and float(pe_val) > 0:
                     val_tags.append(f"PE {float(pe_val):.1f}")
                 if pb_val is not None and pd.notna(pb_val) and float(pb_val) > 0:
                     val_tags.append(f"PB {float(pb_val):.2f}")
+                if pe_pct_val is not None and pd.notna(pe_pct_val):
+                    val_tags.append(f"PE分位 {float(pe_pct_val):.0f}%")
                 if val_tags:
                     reasons.append("/".join(val_tags))
 

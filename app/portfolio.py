@@ -16,6 +16,7 @@ from notifier.push import calc_atr_stops_and_sizing
 from data.fetcher import fetch_daily, fetch_instrument_daily
 from data.cleaner import clean_daily
 from core.config import DATA_START_DATE
+from engine.commission import format_price, round_price
 from app.st_utils import chinese_dataframe, chinese_date_picker, cached_instrument_list, format_strategy_cn, format_stock_cn
 from app.data_viewer import create_candlestick_chart
 from data.indicators import apply_indicators
@@ -226,7 +227,7 @@ def _show_watchlist():
 
         rows.append({
             "股票": format_stock_cn(ts_code, name_map),
-            "最新价": f"¥{latest['close']:.2f}",
+            "最新价": format_price(latest["close"], ts_code),
             "涨跌幅": f"{latest.get('pct_chg', 0):.2f}%",
             "推荐策略": rec_tag,
             "分组": wl_row.get("group_name", ""),
@@ -371,7 +372,7 @@ def _show_portfolio():
         with col1:
             code_input = st.text_input("股票代码", placeholder="000001.SZ")
         with col2:
-            buy_price = st.number_input("买入价", min_value=0.01, step=0.01)
+            buy_price = st.number_input("买入价", min_value=0.001, step=0.001, format="%.3f")
         with col3:
             shares = st.number_input("数量(股)", min_value=100, step=100)
         with col4:
@@ -428,17 +429,17 @@ def _show_portfolio():
         rows.append({
             "股票": stock_label,
             "建仓策略": strat_disp,
-            "买入价": f"¥{pos['buy_price']:.2f}",
-            "现价": f"¥{current_price:.2f}",
+            "买入价": format_price(pos["buy_price"], ts_code),
+            "现价": format_price(current_price, ts_code),
             "数量": pos["shares"],
             "市值": f"¥{value:.0f}",
             "盈亏": f"¥{pnl:+.0f}",
             "盈亏%": f"{pnl_pct:+.2f}%",
             "最高浮盈%": f"{diag.get('max_gain_pct', 0.0):+.1f}%",
             "持仓天数": f"{diag.get('holding_days', 0)}天",
-            "ATR止损价": f"¥{diag['stop_loss_price']:.2f} (-{diag['sl_pct']:.1f}%)",
-            "移动止盈价": f"¥{trail_px:.2f}" if trail_px else "未激活",
-            "目标止盈价": f"¥{diag['take_profit_price']:.2f} (+{diag['tp_pct']:.1f}%)",
+            "ATR止损价": f"{format_price(diag['stop_loss_price'], ts_code)} (-{diag['sl_pct']:.1f}%)",
+            "移动止盈价": format_price(trail_px, ts_code) if trail_px else "未激活",
+            "目标止盈价": f"{format_price(diag['take_profit_price'], ts_code)} (+{diag['tp_pct']:.1f}%)",
             "风控处置建议": diag["action"],
         })
 
@@ -471,7 +472,7 @@ def _show_portfolio():
             del_pos_choice = st.selectbox(
                 "选择要移除的持仓",
                 positions,
-                format_func=lambda p: f"{p['ts_code']} {name_map.get(p['ts_code'], '')} ({p['shares']}股 @ ¥{p['buy_price']:.2f})",
+                format_func=lambda p: f"{p['ts_code']} {name_map.get(p['ts_code'], '')} ({p['shares']}股 @ {format_price(p['buy_price'], p['ts_code'])})",
                 key="del_single_pos_select",
             )
             if st.button("确认移除", type="primary", key="confirm_del_single_pos"):
@@ -484,7 +485,7 @@ def _show_portfolio():
             sell_pos_choice = st.selectbox(
                 "选择卖出标的",
                 positions,
-                format_func=lambda p: f"{p['ts_code']} {name_map.get(p['ts_code'], '')} ({p['shares']}股 @ ¥{p['buy_price']:.2f})",
+                format_func=lambda p: f"{p['ts_code']} {name_map.get(p['ts_code'], '')} ({p['shares']}股 @ {format_price(p['buy_price'], p['ts_code'])})",
                 key="reduce_pos_select",
             )
             if sell_pos_choice:
@@ -492,7 +493,7 @@ def _show_portfolio():
                 sell_sh = st.number_input("卖出股数", min_value=1, max_value=max_sh, value=max_sh, step=100, key="reduce_shares")
                 cached_diag = diag_by_id.get(sell_pos_choice.get("_id"))
                 def_px = cached_diag["current_price"] if cached_diag else float(sell_pos_choice["buy_price"])
-                sell_px = st.number_input("成交价格(元)", min_value=0.01, value=round(float(def_px), 2), step=0.01, key="reduce_price")
+                sell_px = st.number_input("成交价格(元)", min_value=0.001, value=round_price(float(def_px), sell_pos_choice["ts_code"]), step=0.001, format="%.3f", key="reduce_price")
                 sell_dt = chinese_date_picker("卖出日期", key="reduce_date")
                 def_strat = str(sell_pos_choice.get("strategy") or (cached_diag.get("strategy_hint") if cached_diag else "") or "")
                 sell_strat = st.text_input("关联策略(可选)", value=def_strat, placeholder="如 kdj_cross / risk_manager", key="reduce_strat")
@@ -562,7 +563,7 @@ def _show_auto_trade():
         st.info(f"最近{auto_days}天无评分≥{min_score}的信号")
         return
 
-    stock_df = get_instrument_list()
+    stock_df = cached_instrument_list()
     name_map = {}
     if not stock_df.empty:
         name_map = dict(zip(stock_df["ts_code"], stock_df["name"]))
@@ -596,7 +597,7 @@ def _show_auto_trade():
 
             buy_rows.append({
                 "股票": f"{sig['ts_code']} {name_map.get(sig['ts_code'], '')}",
-                "信号价": f"¥{sig['price_ref']:.2f}" if sig["price_ref"] else "-",
+                "信号价": format_price(sig["price_ref"], sig["ts_code"]) if sig["price_ref"] else "-",
                 "评分": sig["score"],
                 "策略": format_strategy_cn(sig["strategy"]),
                 "状态": has_pos,
@@ -606,9 +607,16 @@ def _show_auto_trade():
         df_buy = pd.DataFrame(buy_rows)
         chinese_dataframe(df_buy)
 
-        # 一键跟单按钮（按 ATR 风险平价算手数、记录建仓策略并入实盘账本）
+        # 一键跟单按钮（按 ATR 风险平价算手数、联动双指数熊市半仓、记录建仓策略并入实盘账本）
         if st.button("📥 一键跟入（将买入信号加入持仓）", type="primary", key="btn_auto_buy"):
             from core.config import DEFAULT_CAPITAL
+            combined_regime = "RANGE"
+            try:
+                from services.signal_service import get_dual_market_regime
+                combined_regime = get_dual_market_regime().get("combined_regime", "RANGE")
+            except Exception:
+                combined_regime = "RANGE"
+
             added = 0
             existing_set = set(existing_codes)
             seen_codes = set()
@@ -617,11 +625,31 @@ def _show_auto_trade():
                 ref_px = float(sig.get("price_ref") or 0.0)
                 if code not in existing_set and code not in seen_codes and ref_px > 0:
                     strat_k = str(sig.get("strategy") or "").strip()
+                    pos_scale = (
+                        0.5
+                        if (
+                            combined_regime == "BEAR"
+                            or (combined_regime == "GROWTH_BEAR" and str(code).startswith(("300", "301", "688")))
+                        )
+                        else 1.0
+                    )
                     try:
                         plan = calc_atr_stops_and_sizing(
                             code, ref_px, float(sig.get("score") or 0.7),
                             base_capital=float(DEFAULT_CAPITAL), strategy=strat_k,
+                            position_scale=pos_scale,
                         )
+                        if (
+                            pos_scale == 1.0
+                            and combined_regime == "GROWTH_BEAR"
+                            and float(plan.get("atr_pct", 0.0) or 0.0) >= 2.2
+                        ):
+                            pos_scale = 0.5
+                            plan = calc_atr_stops_and_sizing(
+                                code, ref_px, float(sig.get("score") or 0.7),
+                                base_capital=float(DEFAULT_CAPITAL), strategy=strat_k,
+                                position_scale=0.5,
+                            )
                         shares = int(plan.get("shares") or 0)
                     except TypeError:
                         plan = calc_atr_stops_and_sizing(
@@ -629,11 +657,11 @@ def _show_auto_trade():
                         )
                         shares = int(plan.get("shares") or 0)
                     if shares < 100:
-                        shares = int(float(DEFAULT_CAPITAL) * 0.2 / ref_px) // 100 * 100
+                        shares = int(float(DEFAULT_CAPITAL) * 0.2 * pos_scale / ref_px) // 100 * 100
                     if shares >= 100:
                         upsert_position_buy(
                             ts_code=code,
-                            buy_price=ref_px,
+                            buy_price=round_price(ref_px, code),
                             shares=shares,
                             buy_date=str(sig.get("trade_date") or datetime.now().strftime("%Y%m%d")),
                             note=f"自动跟单:{strat_k}",
@@ -655,7 +683,7 @@ def _show_auto_trade():
             pos = next((p for p in existing_positions if p["ts_code"] == sig["ts_code"]), None)
             sell_rows.append({
                 "股票": f"{sig['ts_code']} {name_map.get(sig['ts_code'], '')}",
-                "信号价": f"¥{sig['price_ref']:.2f}" if sig["price_ref"] else "-",
+                "信号价": format_price(sig["price_ref"], sig["ts_code"]) if sig["price_ref"] else "-",
                 "评分": sig["score"],
                 "策略": format_strategy_cn(sig["strategy"]),
                 "持仓": f"{pos['shares']}股" if pos else "无",

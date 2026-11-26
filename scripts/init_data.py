@@ -164,17 +164,36 @@ def main():
             logger.error("数据库中无标的数据，请先运行完整初始化")
             return 1
 
-        # 自选股模式：只更新自选股
+        # 自选股模式：只更新自选股（并自动纳入本地已下载的多资产轮动 ETF，防止双舱数据源滞后）
+        from data.storage import get_conn
         if args.watchlist:
             watchlist_df = get_watchlist()
             if watchlist_df.empty:
                 logger.warning("自选股列表为空，将更新所有标的")
             else:
-                stock_df = stock_df[stock_df["ts_code"].isin(watchlist_df["ts_code"])]
-                logger.info(f"自选股模式: 只更新 {len(stock_df)} 只自选股")
+                target_codes = set(watchlist_df["ts_code"].tolist())
+                try:
+                    from strategies.momentum_rotation import ROTATION_ETF_PRESETS
+                    preset_etfs = [c for c, _ in ROTATION_ETF_PRESETS]
+                    if preset_etfs:
+                        with get_conn() as conn_etf:
+                            ph_e = ",".join("?" * len(preset_etfs))
+                            dl_etfs = {
+                                str(r[0]) for r in conn_etf.execute(
+                                    f"SELECT DISTINCT ts_code FROM daily_price WHERE ts_code IN ({ph_e})",
+                                    preset_etfs,
+                                ).fetchall()
+                            }
+                        extra_etfs = dl_etfs - target_codes
+                        if extra_etfs:
+                            target_codes.update(extra_etfs)
+                            logger.info(f"同步纳入本地已下载轮动 ETF {len(extra_etfs)} 只进行增量保鲜")
+                except Exception:
+                    pass
+                stock_df = stock_df[stock_df["ts_code"].isin(target_codes)]
+                logger.info(f"自选股模式: 只更新 {len(stock_df)} 只标的（含本地轮动 ETF）")
 
         # 批量查询每只股票的最新日期（一次SQL查完，比逐条查快100倍）
-        from data.storage import get_conn
         with get_conn() as conn:
             latest_map = dict(conn.execute(
                 "SELECT ts_code, MAX(trade_date) FROM daily_price GROUP BY ts_code"

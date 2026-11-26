@@ -349,6 +349,7 @@ def get_data_health_summary(max_valuation_age_days: int = 7) -> dict:
         "wl_latest_date": "",
         "idx_latest_date": "",
         "lagging_stocks": [],
+        "lagging_etfs": [],
         "lagging_indices": [],
         "valuation_covered": 0,
         "valuation_total": 0,
@@ -399,6 +400,31 @@ def get_data_health_summary(max_valuation_age_days: int = 7) -> dict:
                                 "latest_date": wdt or "缺失",
                             })
 
+            # 2.5 本地已下载的多资产轮动 ETF 新鲜度监控（即使未放入 watchlist 分组也监测滞后）
+            try:
+                from strategies.momentum_rotation import ROTATION_ETF_PRESETS
+                etf_presets = [c for c, _ in ROTATION_ETF_PRESETS]
+                etf_name_map = dict(ROTATION_ETF_PRESETS)
+                if etf_presets:
+                    ph_e = ",".join("?" * len(etf_presets))
+                    etf_rows = conn.execute(
+                        f"SELECT ts_code, MAX(trade_date) FROM daily_price WHERE ts_code IN ({ph_e}) GROUP BY ts_code",
+                        etf_presets,
+                    ).fetchall()
+                    etf_dates = {str(r[0]): str(r[1]) for r in etf_rows if r[1]}
+                    ref_dt = max(wl_dates.values(), default="") if wl_codes else (max(etf_dates.values(), default=""))
+                    for ec, edt in etf_dates.items():
+                        if ec in wl_codes:
+                            continue
+                        if ref_dt and edt < ref_dt:
+                            out["lagging_etfs"].append({
+                                "ts_code": ec,
+                                "name": name_map.get(ec, etf_name_map.get(ec, ec)),
+                                "latest_date": edt,
+                            })
+            except Exception:
+                pass
+
         # 3. 非ETF自选股估值快照新鲜度
         non_etf_codes = [
             c for c in wl_codes
@@ -428,6 +454,9 @@ def get_data_health_summary(max_valuation_age_days: int = 7) -> dict:
         if out["lagging_stocks"]:
             s_desc = "、".join(f"{x['name']}({x['ts_code']}停在{x['latest_date']})" for x in out["lagging_stocks"][:4])
             parts.append(f"行情滞后标的 {len(out['lagging_stocks'])} 只: {s_desc}")
+        if out["lagging_etfs"]:
+            e_desc = "、".join(f"{x['name']}({x['ts_code']}停在{x['latest_date']})" for x in out["lagging_etfs"][:4])
+            parts.append(f"滞后轮动ETF {len(out['lagging_etfs'])} 只: {e_desc}")
         if out["lagging_indices"]:
             i_desc = "、".join(f"{x['ts_code']}({x['latest_date']})" for x in out["lagging_indices"])
             parts.append(f"滞后指数: {i_desc}")

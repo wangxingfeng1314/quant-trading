@@ -5,6 +5,7 @@ import pandas as pd
 
 from strategies.base import BaseStrategy
 from core.models import Signal
+from engine.commission import format_price
 
 
 # 低相关多资产 ETF 推荐轮动池（宽基 + 红利防御 + 黄金避险 + 境外科技 + 国债防御）
@@ -161,7 +162,7 @@ class MomentumRotationStrategy(BaseStrategy):
                     score=buy_score,
                     reason=(
                         f"动量轮动第{rank}名入选: {self.lookback}日涨{snap['mom'] * 100:+.1f}%，"
-                        f"风险调整动量{snap['rs']:.2f}，站上MA{self.ma_filter_period}({snap['ma']:.2f})"
+                        f"风险调整动量{snap['rs']:.2f}，站上MA{self.ma_filter_period}({format_price(snap['ma'], ts_code, prefix='')})"
                     ),
                     price_ref=snap["close"],
                 ))
@@ -208,7 +209,7 @@ class MomentumRotationStrategy(BaseStrategy):
                         score=sell_score,
                         reason=(
                             f"动量走弱调出: {self.lookback}日跌{snap['mom'] * 100:+.1f}%，"
-                            f"位于MA{self.ma_filter_period}({snap['ma']:.2f})下方"
+                            f"位于MA{self.ma_filter_period}({format_price(snap['ma'], ts_code, prefix='')})下方"
                         ),
                         price_ref=snap["close"],
                     ))

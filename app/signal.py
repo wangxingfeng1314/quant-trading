@@ -300,16 +300,21 @@ def build_deduplicated_broker_orders(signals: list, capital: float = 100000.0,
                                      stop_loss_pct: float = 0.0, stock_map: dict = None,
                                      held_map: dict = None,
                                      min_buy_score: float = 0.0,
-                                     skip_held_buys: bool = True) -> tuple:
+                                     skip_held_buys: bool = True,
+                                     use_atr_sizing: bool = True,
+                                     respect_market_regime: bool = True) -> tuple:
     """将原始信号列表去重聚合为安全的单股单笔券商委托单（剔除同股多空冲突与同向重复下单）
 
     Args:
         stop_loss_pct: 若 <= 0 则自动启用 ATR14 动态止损，否则使用固定百分比
         min_buy_score: 买入委托最低评分门槛（默认 0.0 兼容全量生成，实盘建议 >= 0.60）
+        use_atr_sizing: 是否启用 ATR 风险平价算手数（受单票资金上限 max_pos_pct 封顶）
+        respect_market_regime: 是否联动双指数大盘择时，在熊市/成长走熊高波期自动半仓缩放
     Returns:
         (order_rows, txt_lines)
     """
     from notifier.push import calc_atr_stops_and_sizing
+    from engine.commission import round_price, format_price, price_decimals
     stock_map = stock_map or {}
     held_map = held_map or {}
     single_budget = capital * (max_pos_pct / 100.0)
@@ -317,6 +322,14 @@ def build_deduplicated_broker_orders(signals: list, capital: float = 100000.0,
         val_map = get_valuation_map([s.ts_code for s in signals]) if signals else {}
     except Exception:
         val_map = {}
+
+    combined_regime = "RANGE"
+    if respect_market_regime:
+        try:
+            from services.signal_service import get_dual_market_regime
+            combined_regime = get_dual_market_regime().get("combined_regime", "RANGE")
+        except Exception:
+            combined_regime = "RANGE"
 
     # 1. 按股票分组识别多空冲突与同向聚合
     sell_by_code = {}
@@ -356,29 +369,71 @@ def build_deduplicated_broker_orders(signals: list, capital: float = 100000.0,
         name = stock_map.get(sig.ts_code, "")
         symbol = sig.ts_code.split(".")[0]
         ref_price = sig.price_ref if sig.price_ref > 0 else 10.0
+        dec = price_decimals(sig.ts_code)
 
         if sig.direction == "BUY":
-            order_price = round(ref_price * (1 + price_offset_pct / 100.0), 2)
-            shares = int(single_budget / (order_price * 1.0003)) // 100 * 100
-            est_amount = round(shares * order_price, 2)
-            if stop_loss_pct <= 0:
+            order_price = round_price(ref_price * (1 + price_offset_pct / 100.0), sig.ts_code)
+            pos_scale = (
+                0.5
+                if (
+                    respect_market_regime
+                    and (
+                        combined_regime == "BEAR"
+                        or (combined_regime == "GROWTH_BEAR" and str(sig.ts_code).startswith(("300", "301", "688")))
+                    )
+                )
+                else 1.0
+            )
+            try:
+                atr_plan = calc_atr_stops_and_sizing(
+                    sig.ts_code, order_price, sig.score, capital,
+                    strategy=sig.strategy, position_scale=pos_scale,
+                )
+            except TypeError:
+                atr_plan = calc_atr_stops_and_sizing(sig.ts_code, order_price, sig.score, capital)
+            if (
+                respect_market_regime
+                and pos_scale == 1.0
+                and combined_regime == "GROWTH_BEAR"
+                and float(atr_plan.get("atr_pct", 0.0) or 0.0) >= 2.2
+            ):
+                pos_scale = 0.5
                 try:
                     atr_plan = calc_atr_stops_and_sizing(
-                        sig.ts_code, order_price, sig.score, capital, strategy=sig.strategy
+                        sig.ts_code, order_price, sig.score, capital,
+                        strategy=sig.strategy, position_scale=0.5,
                     )
                 except TypeError:
-                    atr_plan = calc_atr_stops_and_sizing(sig.ts_code, order_price, sig.score, capital)
-                stop_price = atr_plan["stop_loss"]
-                sl_tag = f"¥{stop_price:.2f} (-{atr_plan['sl_pct']:g}% ATR)"
+                    pass
+
+            max_cap_shares = int((single_budget * pos_scale) / (order_price * 1.0003)) // 100 * 100
+            if use_atr_sizing:
+                atr_shares = int(atr_plan.get("shares") or 0)
+                if atr_shares > 0 and max_cap_shares > 0:
+                    shares = min(atr_shares, max_cap_shares)
+                elif atr_shares > 0 and single_budget <= 0:
+                    shares = atr_shares
+                else:
+                    shares = max_cap_shares
+                sizing_tag = "ATR风险平价(熊市半仓)" if pos_scale < 1.0 else "ATR风险平价"
             else:
-                stop_price = round(order_price * (1 - stop_loss_pct / 100.0), 2)
-                sl_tag = f"¥{stop_price:.2f} (-{stop_loss_pct:g}%)"
+                shares = max_cap_shares
+                sizing_tag = "固定比例(熊市半仓)" if pos_scale < 1.0 else "固定比例"
+
+            est_amount = round(shares * order_price, 2)
+            if stop_loss_pct <= 0:
+                stop_price = round_price(atr_plan["stop_loss"], sig.ts_code)
+                sl_tag = f"{format_price(stop_price, sig.ts_code)} (-{atr_plan['sl_pct']:g}% ATR)"
+            else:
+                stop_price = round_price(order_price * (1 - stop_loss_pct / 100.0), sig.ts_code)
+                sl_tag = f"{format_price(stop_price, sig.ts_code)} (-{stop_loss_pct:g}%)"
             action_text = "买入"
         else:
-            order_price = round(ref_price * (1 - price_offset_pct / 100.0), 2)
+            order_price = round_price(ref_price * (1 - price_offset_pct / 100.0), sig.ts_code)
             shares = held_map.get(sig.ts_code, 100)
             est_amount = round(shares * order_price, 2)
             sl_tag = "-"
+            sizing_tag = "-"
             action_text = "卖出"
 
         val_badge = "-"
@@ -399,6 +454,7 @@ def build_deduplicated_broker_orders(signals: list, capital: float = 100000.0,
             "委托价格": order_price,
             "委托数量(股)": shares,
             "预估金额(元)": est_amount,
+            "仓位模型": sizing_tag,
             "建议止损价": sl_tag,
             "估值参考": val_badge,
             "来源策略": strat_str,
@@ -406,13 +462,14 @@ def build_deduplicated_broker_orders(signals: list, capital: float = 100000.0,
         })
 
         if shares > 0:
-            txt_lines.append(f"{symbol}\t{shares}\t{order_price:.2f}\t{action_text}")
+            txt_lines.append(f"{symbol}\t{shares}\t{order_price:.{dec}f}\t{action_text}")
 
     return order_rows, txt_lines
 
 
 def _render_broker_order_sheet(signals: list, scan_date_str: str, stock_map: dict):
     """渲染券商实盘批量委托单（Broker-Ready Order Sheet）"""
+    from engine.commission import format_price
     with st.expander("💼 实盘批量委托单生成器 (已开启同股去重防超买保护)", expanded=True):
         st.caption("自动剔除多空分歧股、将同一标的的多策略信号合并为单笔委托，防止导入券商时同股重复下单超买")
 
@@ -426,10 +483,17 @@ def _render_broker_order_sheet(signals: list, scan_date_str: str, stock_map: dic
         with col4:
             stop_loss_pct = st.number_input("硬止损% (0=ATR动态止损)", value=0.0, step=0.5, min_value=0.0)
 
-        skip_held_buys = st.checkbox(
-            "🛡️ 跳过已持仓标的买入委托 (防重复超买)", value=True, key="broker_skip_held_buys",
-            help="勾选后若账户当前已持有该标的，只生成止盈/卖出委托，不重复导出买入委托单",
-        )
+        bc1, bc2 = st.columns(2)
+        with bc1:
+            skip_held_buys = st.checkbox(
+                "🛡️ 跳过已持仓标的买入委托 (防重复超买)", value=True, key="broker_skip_held_buys",
+                help="勾选后若账户当前已持有该标的，只生成止盈/卖出委托，不重复导出买入委托单",
+            )
+        with bc2:
+            use_atr_sizing = st.checkbox(
+                "⚖️ 启用 ATR 风险平价算手数（联动双指数熊市半仓）", value=True, key="broker_use_atr_sizing",
+                help="按近期波动率(ATR)分配等风险手数并受单票资金上限封顶，熊市/成长走熊自动减半仓",
+            )
         held_map = {p["ts_code"]: p["shares"] for p in get_positions() if p.get("shares", 0) > 0}
         order_rows, txt_lines = build_deduplicated_broker_orders(
             signals=signals,
@@ -441,6 +505,8 @@ def _render_broker_order_sheet(signals: list, scan_date_str: str, stock_map: dic
             held_map=held_map,
             min_buy_score=SCANNER_MIN_BUY_SCORE,
             skip_held_buys=skip_held_buys,
+            use_atr_sizing=use_atr_sizing,
+            respect_market_regime=True,
         )
 
         if not order_rows:
@@ -478,7 +544,7 @@ def _render_broker_order_sheet(signals: list, scan_date_str: str, stock_map: dic
         with st.form("sync_broker_orders_to_pos"):
             st.markdown("**📌 实盘成交回填（同股自动合并均价 + 支持分批减仓与净盈亏记账，开启每日 ATR 止损/移动止盈预警）**")
             row_labels = [
-                f"{r['操作']} | {r['标的代码']} {r['名称']} ({r['委托数量(股)']}股 @ ¥{r['委托价格']:.2f})"
+                f"{r['操作']} | {r['标的代码']} {r['名称']} ({r['委托数量(股)']}股 @ {format_price(r['委托价格'], r['标的代码'])})"
                 for r in order_rows
             ]
             sc_col1, sc_col2 = st.columns([2.5, 1.2])

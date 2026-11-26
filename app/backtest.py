@@ -321,6 +321,11 @@ def _show_run_backtest():
                                 key="bt_dual_etf_sizing",
                                 help="ATR 风险平价会按 ETF 近期波动率自动降低高波权益 ETF 仓位、提高国债/黄金/红利仓位，显著压缩组合回撤",
                             )
+                        save_dual_res = st.checkbox(
+                            "💾 保存双舱位结果至历史记录（支持多策略同图对比）",
+                            value=True,
+                            key="bt_dual_save",
+                        )
                 st.caption(f"📊 当前自选池共 {len(universe)} 只标的")
         else:
             all_codes = stock_df_data["ts_code"].tolist()
@@ -699,6 +704,7 @@ def _show_run_backtest():
                     etf_top_k=2,
                     etf_position_sizing=str(etf_sizing_opt if "etf_sizing_opt" in locals() else "atr_risk"),
                     initial_capital=float(capital),
+                    save=bool(save_dual_res if "save_dual_res" in locals() else False),
                     progress_callback=_on_ds,
                     execution_mode=exec_mode,
                     risk_manager=pooled_rm,
@@ -723,11 +729,13 @@ def _show_run_backtest():
                     return
                 if not etf_codes:
                     st.warning("本地暂无轮动 ETF 历史数据，本次仅运行了核心个股滚动子舱（可在「持仓管理」导入轮动 ETF 数据）")
+                saved_id = getattr(ds_res, "id", None)
+                saved_note = f" | 💾 已入库历史 ID={saved_id}" if saved_id else ""
                 st.success(
                     f"🌐 双舱位核心-卫星组合回测完成！({len(stock_codes)} 只个股 {ds_out['weights']['stock']*100:.0f}% + "
                     f"{len(etf_codes)} 只ETF轮动 {ds_out['weights']['etf']*100:.0f}% | "
                     f"总收益 {ds_res.total_return:+.2f}% | 年化 {ds_res.annual_return:+.2f}% | "
-                    f"最大回撤 {ds_res.max_drawdown:.2f}% | 夏普 {ds_res.sharpe_ratio:.2f})"
+                    f"最大回撤 {ds_res.max_drawdown:.2f}% | 夏普 {ds_res.sharpe_ratio:.2f}{saved_note})"
                 )
                 sc_a, sc_b = st.columns(2)
                 sc_a.info(

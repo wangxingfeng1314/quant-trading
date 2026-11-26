@@ -1588,6 +1588,7 @@ def run_dual_sleeve_backtest(
     etf_top_k: int = 2,
     etf_position_sizing: str = "atr_risk",
     initial_capital: float = 100000.0,
+    save: bool = False,
     progress_callback: Callable = None,
     **bt_kwargs,
 ) -> dict:
@@ -1737,6 +1738,13 @@ def run_dual_sleeve_backtest(
     combined_res.avg_win = float(metrics.get("avg_win", 0.0))
     combined_res.avg_loss = float(metrics.get("avg_loss", 0.0))
     combined_res.break_even_count = int(metrics.get("break_even_count", 0))
+
+    if save and combined_curve:
+        bt_id = save_backtest_result(combined_res)
+        if merged_trades:
+            save_backtest_trades(bt_id, merged_trades)
+        combined_res.id = bt_id
+        logger.info(f"双舱位组合回测结果已保存, ID={bt_id}")
 
     if progress_callback:
         progress_callback(1, 1)

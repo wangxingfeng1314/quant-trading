@@ -1,5 +1,26 @@
 # Changelog
 
+## [v0.11.0] - 2026-11-26
+
+### ✨ 实盘自动化闭环、券商风控对齐与全链路 ETF 3位小数精度
+
+1. **每日轮动 ETF 自动保鲜与定时扫描推送闭环 (`scripts/init_data.py`, `scheduler/__init__.py`, `services/signal_service.py`)**
+   - `run_update(watchlist=True)` 自动识别并同步更新本地已下载的 7 只多资产轮动 ETF，避免定时任务后非自选池轮动 ETF 行情滞后。
+   - `scheduler.scan_and_notify()` 在自选未显式配置「ETF轮动池」分组时自动探测本地就绪（`≥60` 日线）轮动预设 ETF 执行横截面 `momentum_rotation` 扫描并纳入每日推送，同时对已纳入轮动池的标的去重隔离单股策略。
+   - `get_data_health_summary()` 新增 `lagging_etfs` 检查，主动预警本地轮动 ETF 滞后问题。
+
+2. **券商批量委托与一键跟单对齐 ATR 风险平价 + 双指数熊市半仓 (`app/signal.py`, `app/portfolio.py`)**
+   - `build_deduplicated_broker_orders()` 启用 `use_atr_sizing=True` 与 `respect_market_regime=True`：按 ATR 波动率风险平价计算委托股数（受单票上限封顶），并在 `BEAR` 或 `GROWTH_BEAR` 高波成长股期间自动施加 `0.5` 半仓系数，委托表新增「仓位模型」列。
+   - 持仓管理 `_show_auto_trade()` 切换为 `cached_instrument_list()` 消除冗余全表读取，并在一键跟入时对齐双指数半仓系数。
+
+3. **全链路 ETF 3 位小数精度与策略对齐持仓诊断 (`engine/commission.py`, `notifier/push.py`, `services/position_service.py`, `app/*`, `strategies/momentum_rotation.py`)**
+   - 新增 `price_decimals()`、`round_price()` 与 `format_price()` 统一规范（ETF 3 位小数 / 个股 2 位小数），全面打通 `calc_atr_stops_and_sizing()`、微信/钉钉/飞书推送日报、券商委托 CSV/TXT 导出、自选股快照、选股器、模拟持仓录入/平仓输入框（`step=0.001`）与轮动策略文案。
+   - `diagnose_position_action()` 显式透传 `strategy=resolved_hint` 对齐策略风控预设，并为 `momentum_rotation` 轮动 ETF 持仓新增 MA20 破位检测及防 5% 机械保本洗出逻辑。
+
+4. **双舱位组合持久化与选股器 3 年估值分位筛选 (`engine/backtester.py`, `services/backtest_service.py`, `app/backtest.py`, `app/screener.py`)**
+   - `run_dual_sleeve_backtest()` 与 `BacktestService.run_dual_sleeve()` 新增 `save: bool = False` 持久化支持，回测中心可一键将双舱位净值曲线与分策略成交归因存入历史记录并参与多策略同图对比。
+   - 选股器基本面估值页签新增「3年 PE 分位上限 %」筛选条件，支持一键联动技术企稳与低历史估值分位过滤。
+
 ## [v0.10.0] - 2026-11-25
 
 ### ✨ 精准执行定价、双舱风控默认、估值纠偏与驾驶舱升级
