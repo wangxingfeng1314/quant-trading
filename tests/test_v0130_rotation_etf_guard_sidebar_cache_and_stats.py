@@ -110,3 +110,38 @@ def test_main_sidebar_cache_valuation_refresh_and_data_viewer_etf_precision():
     dv_src = Path("app/data_viewer.py").read_text(encoding="utf-8")
     assert "format_price" in dv_src
     assert "price_decimals" in dv_src
+
+
+def test_batch_update_watchlist_recommendations_preserves_rotation_etf_and_preloads(monkeypatch, tmp_path):
+    """验证重新评估策略时保留轮动 ETF 的动量轮动标签不被单股策略覆盖，且常规个股走批量预加载"""
+    from services import strategy_recommender as sr
+
+    _use_temp_db(monkeypatch, tmp_path, "rec_rot_guard.db")
+    storage.save_daily(_make_daily_df("600036.SH", 40.0))
+    storage.save_daily(_make_daily_df("510310.SH", 3.86))
+    storage.save_daily(_make_daily_df("515180.SH", 1.35))
+
+    storage.add_to_watchlist("600036.SH", group_name="", recommended_strategy="旧标签")
+    storage.add_to_watchlist("510310.SH", group_name="", recommended_strategy="⚡ KDJ短线企稳 (样本外交易不足)")
+    storage.add_to_watchlist("515180.SH", group_name="ETF轮动池", recommended_strategy="🔄 动量轮动 (多资产横截面轮动)")
+
+    eval_calls = []
+
+    def _fake_eval(ts_code, **kw):
+        eval_calls.append((ts_code, kw.get("preloaded_data")))
+        return {"tag": "⚡ KDJ短线企稳 (样本外胜率75.0%/+6.7%)"}
+
+    monkeypatch.setattr(sr, "evaluate_stock_strategy", _fake_eval)
+    monkeypatch.setattr(sr, "preload_backtest_data", lambda codes, s, e: {c: pd.DataFrame() for c in codes})
+
+    cnt = sr.batch_update_watchlist_recommendations(force=True, start_date="20230101", end_date="20261125")
+    assert cnt == 3
+    assert len(eval_calls) == 1
+    assert eval_calls[0][0] == "600036.SH"
+    assert isinstance(eval_calls[0][1], dict) and "600036.SH" in eval_calls[0][1]
+
+    wl = storage.get_watchlist()
+    rec_map = dict(zip(wl["ts_code"], wl["recommended_strategy"]))
+    assert rec_map["510310.SH"] == "🔄 动量轮动 (多资产横截面轮动)"
+    assert rec_map["515180.SH"] == "🔄 动量轮动 (多资产横截面轮动)"
+    assert rec_map["600036.SH"] == "⚡ KDJ短线企稳 (样本外胜率75.0%/+6.7%)"

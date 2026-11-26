@@ -364,14 +364,40 @@ def batch_update_watchlist_recommendations(force: bool = False,
     name_map = dict(zip(inst_df["ts_code"], inst_df["name"])) if not inst_df.empty else {}
     ind_map = dict(zip(inst_df["ts_code"], inst_df.get("industry", ""))) if not inst_df.empty and "industry" in inst_df.columns else {}
 
+    rotation_preset_set = set()
+    try:
+        from strategies.momentum_rotation import ROTATION_ETF_PRESETS
+        rotation_preset_set = {str(c).strip() for c, _ in ROTATION_ETF_PRESETS if str(c).strip()}
+    except Exception:
+        rotation_preset_set = set()
+
+    has_group = "group_name" in wl.columns
     targets = []
+    rotation_targets = set()
     for _, r in wl.iterrows():
+        code = str(r["ts_code"]).strip()
+        if not code:
+            continue
         rec = r.get("recommended_strategy", "")
+        grp = str(r.get("group_name") or "").strip() if has_group else ""
         if force or not rec or not str(rec).strip():
-            targets.append(r["ts_code"])
+            targets.append(code)
+            if grp == "ETF轮动池" or code in rotation_preset_set:
+                rotation_targets.add(code)
 
     if not targets:
         return 0
+
+    regular_targets = [c for c in targets if c not in rotation_targets]
+    preloaded = None
+    if regular_targets:
+        try:
+            preloaded = preload_backtest_data(
+                regular_targets, _norm_date(start_date), _norm_date(end_date),
+            )
+        except Exception as e:
+            logger.debug(f"批量评估预加载行情跳过: {e}")
+            preloaded = None
 
     updated = 0
     total = len(targets)
@@ -381,9 +407,15 @@ def batch_update_watchlist_recommendations(force: bool = False,
         if progress_callback:
             progress_callback(idx + 1, total, code, c_name)
 
-        res = evaluate_stock_strategy(code, name=c_name, industry=c_ind,
-                                      start_date=start_date, end_date=end_date)
-        update_watchlist_recommendation(code, res["tag"])
+        if code in rotation_targets:
+            update_watchlist_recommendation(code, "🔄 动量轮动 (多资产横截面轮动)")
+        else:
+            res = evaluate_stock_strategy(
+                code, name=c_name, industry=c_ind,
+                start_date=start_date, end_date=end_date,
+                preloaded_data=preloaded,
+            )
+            update_watchlist_recommendation(code, res["tag"])
         updated += 1
 
     return updated
