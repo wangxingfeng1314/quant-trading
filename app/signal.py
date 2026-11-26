@@ -616,6 +616,7 @@ def _render_broker_order_sheet(signals: list, scan_date_str: str, stock_map: dic
 
 def _show_signal_table(signals):
     """显示信号表格"""
+    from engine.commission import format_price
     stock_df = cached_instrument_list()
     stock_map = {}
     if not stock_df.empty:
@@ -631,7 +632,7 @@ def _show_signal_table(signals):
             "策略": format_strategy_cn(sig.strategy),
             "方向": format_direction_cn(sig.direction),
             "评分": sig.score,
-            "参考价": f"¥{sig.price_ref:.2f}",
+            "参考价": format_price(sig.price_ref, sig.ts_code),
             "原因": sig.reason,
         })
     df = pd.DataFrame(rows)
@@ -691,10 +692,44 @@ def _show_history():
         )
 
 
+def calc_signal_forward_return(
+    entry_price: float,
+    future_price: float,
+    direction: str,
+    ts_code: str = "",
+    deduct_cost: bool = True,
+) -> float:
+    """计算信号发出后前向持有的毛收益率或扣除双边佣金/印花税/滑点后的净收益率 (%)。"""
+    ep = float(entry_price or 0.0)
+    fp = float(future_price or 0.0)
+    if ep <= 0 or fp <= 0:
+        return 0.0
+    if not deduct_cost:
+        raw = (fp / ep - 1.0) if direction == "BUY" else (1.0 - fp / ep)
+        return raw * 100.0
+
+    from core.config import COMMISSION_RATE, STAMP_TAX_RATE, TRANSFER_FEE_RATE, SLIPPAGE_RATE
+    from engine.commission import is_etf_code
+
+    slip = float(SLIPPAGE_RATE or 0.0)
+    comm = float(COMMISSION_RATE or 0.0)
+    etf = is_etf_code(ts_code)
+    xfer = 0.0 if etf else float(TRANSFER_FEE_RATE or 0.0)
+    tax = 0.0 if etf else float(STAMP_TAX_RATE or 0.0)
+    if direction == "BUY":
+        buy_eff = ep * (1.0 + slip) * (1.0 + comm + xfer)
+        sell_eff = fp * (1.0 - slip) * (1.0 - comm - xfer - tax)
+        return (sell_eff / buy_eff - 1.0) * 100.0 if buy_eff > 0 else 0.0
+    sell_eff = ep * (1.0 - slip) * (1.0 - comm - xfer - tax)
+    buy_eff = fp * (1.0 + slip) * (1.0 + comm + xfer)
+    return ((sell_eff - buy_eff) / ep) * 100.0
+
+
 def _show_signal_validation():
     """信号回测验证 - 信号发布后N日涨跌幅统计"""
+    from engine.commission import round_price
     st.subheader("📊 信号回测验证")
-    st.caption("按实盘「次日开盘买入」或「当日收盘」统计历史信号发出后N个交易日的真实胜率与期望收益，自动识别高胜率策略")
+    st.caption("按实盘「次日开盘买入」或「当日收盘」统计历史信号发出后N个交易日的真实净胜率与期望收益")
 
     col1, col2, col3, col4 = st.columns(4)
     with col1:
@@ -717,7 +752,11 @@ def _show_signal_validation():
             index=0,
             key="sv_exec_mode",
         )
-    skip_high_open = st.checkbox("实盘风控过滤：次日跳空高开 > 3% 不追高", value=True, key="sv_skip_gap")
+    sv_c1, sv_c2 = st.columns(2)
+    with sv_c1:
+        skip_high_open = st.checkbox("实盘风控过滤：次日跳空高开 > 3% 不追高", value=True, key="sv_skip_gap")
+    with sv_c2:
+        deduct_cost = st.checkbox("扣除双边交易摩擦成本（佣金/印花税/滑点）", value=True, key="sv_deduct_cost")
 
     strategy = "" if strategy_filter == "全部" else strategy_filter
     signals_df = get_signals(strategy=strategy, limit=500)
@@ -733,7 +772,7 @@ def _show_signal_validation():
         st.info("无匹配的信号记录")
         return
 
-    stock_df = get_instrument_list()
+    stock_df = cached_instrument_list()
     name_map = {}
     if not stock_df.empty:
         name_map = dict(zip(stock_df["ts_code"], stock_df["name"]))
@@ -783,13 +822,14 @@ def _show_signal_validation():
 
             future_price = float(df.iloc[future_idx]["close"])
 
-            # 计算涨跌幅
-            if direction == "BUY":
-                ret = (future_price / entry_price - 1) * 100
-                is_good = ret > 0
-            else:
-                ret = (1 - future_price / entry_price) * 100
-                is_good = ret > 0
+            ret = calc_signal_forward_return(
+                entry_price=entry_price,
+                future_price=future_price,
+                direction=direction,
+                ts_code=ts_code,
+                deduct_cost=deduct_cost,
+            )
+            is_good = ret > 0
 
             results.append({
                 "日期": trade_date,
@@ -798,8 +838,8 @@ def _show_signal_validation():
                 "策略代码": sig["strategy"],
                 "策略": format_strategy_cn(sig["strategy"]),
                 "评分": round(float(sig.get("score", 0)), 2),
-                "基准买入价": round(entry_price, 2),
-                f"{hold_days}日后价": round(future_price, 2),
+                "基准买入价": round_price(entry_price, ts_code),
+                f"{hold_days}日后价": round_price(future_price, ts_code),
                 f"{hold_days}日收益%": round(ret, 2),
                 "有效": "✅" if is_good else "❌",
             })
@@ -884,7 +924,7 @@ def _show_composite():
         st.info(f"最近{days}天无评分≥{min_score}的信号")
         return
 
-    stock_df = get_instrument_list()
+    stock_df = cached_instrument_list()
     name_map = dict(zip(stock_df["ts_code"], stock_df["name"]))
 
     # 按股票+方向聚合

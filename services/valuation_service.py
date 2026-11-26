@@ -395,7 +395,10 @@ def build_core_satellite_plan(
             "summary": "自选股为空，暂无可配置标的。",
         }
 
-    val_lookup = val_map if val_map is not None else get_valuation_map(watchlist_df["ts_code"].tolist())
+    from engine.commission import round_price
+
+    wl_codes = [str(c).strip() for c in watchlist_df["ts_code"].tolist() if str(c).strip()]
+    val_lookup = val_map if val_map is not None else get_valuation_map(wl_codes)
     if inst_df is None:
         try:
             inst_df = get_instrument_list()
@@ -403,7 +406,25 @@ def build_core_satellite_plan(
             inst_df = pd.DataFrame()
     name_map = dict(zip(inst_df["ts_code"], inst_df["name"])) if (inst_df is not None and not inst_df.empty) else {}
     type_map = dict(zip(inst_df["ts_code"], inst_df["type"])) if (inst_df is not None and not inst_df.empty and "type" in inst_df.columns) else {}
-    loader = daily_loader or get_daily
+
+    if daily_loader is not None:
+        loader = daily_loader
+    else:
+        batch_df_map = {}
+        try:
+            from data.storage import batch_get_latest
+            b_df = batch_get_latest(wl_codes, limit=90)
+            if b_df is not None and not b_df.empty and "ts_code" in b_df.columns:
+                for ck, grp in b_df.groupby("ts_code", sort=False):
+                    batch_df_map[str(ck)] = grp.sort_values("trade_date").reset_index(drop=True)
+        except Exception:
+            batch_df_map = {}
+
+        def loader(c: str, limit: int = 90):
+            cached_df = batch_df_map.get(c)
+            if cached_df is not None and not cached_df.empty:
+                return cached_df
+            return get_daily(c, limit=limit)
 
     items = []
     for _, r in watchlist_df.iterrows():
@@ -418,8 +439,14 @@ def build_core_satellite_plan(
         val_guard = evaluate_valuation_guard(code, val_info, is_etf=is_etf)
         div_y = _to_float(val_info.get("dividend_yield"))
         pe_ttm = _to_float(val_info.get("pe_ttm"))
+        pb_val = _to_float(val_info.get("pb"))
 
-        high_div_low_vol = (div_y is not None and div_y >= 3.5 and atr_pct < 2.2)
+        deep_value_low_vol = (
+            pe_ttm is not None and 0 < pe_ttm <= 12.0
+            and pb_val is not None and 0 < pb_val <= 1.2
+            and atr_pct < 2.2
+        )
+        high_div_low_vol = ((div_y is not None and div_y >= 3.5) and atr_pct < 2.2) or deep_value_low_vol
 
         if (no_trade and not is_etf and not high_div_low_vol) or val_guard["zone"] == "亏损预警":
             role = "⛔ 观望/不配"
@@ -471,7 +498,7 @@ def build_core_satellite_plan(
         actual_amt = round(shares * px, 2) if (shares > 0 and px > 0) else round(alloc, 2)
         if shares > 0:
             allocated_total += actual_amt
-        stop_px = round(px * (1.0 - sl_pct / 100.0), 2) if (px > 0 and sl_pct > 0) else 0.0
+        stop_px = round_price(px * (1.0 - sl_pct / 100.0), x["ts_code"]) if (px > 0 and sl_pct > 0) else 0.0
         target_pct = round(alloc / cap * 100.0, 1) if cap > 0 else 0.0
 
         rows.append({
@@ -479,7 +506,7 @@ def build_core_satellite_plan(
             "名称": x["name"],
             "资产角色": x["role"],
             "60日ATR%": x["atr_pct"],
-            "现价": round(px, 2) if px > 0 else 0.0,
+            "现价": round_price(px, x["ts_code"]) if px > 0 else 0.0,
             "估值状态": x["val_badge"],
             "推荐策略": x["rec_tag"],
             "目标仓位%": target_pct,

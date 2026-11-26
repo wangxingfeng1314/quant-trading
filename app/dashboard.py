@@ -362,7 +362,7 @@ def _show_system_status():
                     clear_backtester_cache()
                     st.rerun()
     with col_b:
-        st.markdown("🏷️ 版本: v0.11.0 | 🗄️ `data/quant.db`")
+        st.markdown("🏷️ 版本: v0.12.0 | 🗄️ `data/quant.db`")
     with col_c:
         import json
         report = {
@@ -477,7 +477,7 @@ def _show_today_signals():
         st.info("今日暂无交易信号，请前往「信号中心」扫描")
         return
 
-    stock_df = get_instrument_list()
+    stock_df = cached_instrument_list()
     name_map = {}
     if not stock_df.empty:
         name_map = dict(zip(stock_df["ts_code"], stock_df["name"]))

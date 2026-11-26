@@ -1,5 +1,22 @@
 # Changelog
 
+## [v0.12.0] - 2026-11-26
+
+### ✨ 账本策略继承、规划器批查精算与信号验证净收益收口
+
+1. **实盘平仓账本自动继承建仓策略 (`data/storage.py`)**
+   - `reduce_position()` 查询持仓记录时同步读取 `position.strategy`；当手动平仓或未显式传 `strategy` 参数时自动继承建仓策略写入 `real_trade_journal` 并在返回字典中附带 `strategy`，确保实盘分策略归因不断档。
+
+2. **核心-卫星配置规划器升级 (`services/valuation_service.py`)**
+   - `build_core_satellite_plan()` 新增深低估低波蓝筹保护（`0 < PE <= 12`、`0 < PB <= 1.2` 且 `ATR < 2.2%`），兼容 Baostock 无股息率字段的实盘数据；默认改用 `batch_get_latest()` 单次批量加载行情（消除 `$O(N)$` N+1 查询），并按 `round_price()` 输出 ETF 3 位小数现价与止损价。
+
+3. **策略中文映射补齐、信号验证扣费与 K 线/信号表 3 位精度 (`app/st_utils.py`, `app/signal.py`, `app/data_viewer.py`)**
+   - `STRATEGY_CHINESE_NAMES` 补齐 `dual_sleeve_core_satellite`、`rolling_adaptive_portfolio`、`adaptive_router` 与 `risk_manager` 中文名称。
+   - 新增 `calc_signal_forward_return()` 与信号验证「扣除双边交易成本（佣金/印花税/滑点，默认开启）」选项，按个股/ETF 真实费率与往返滑点折算净收益，且 `_show_signal_table` / `_show_signal_validation` / `create_candlestick_chart` 统一支持 ETF 3 位小数。
+
+4. **全站缓存列表收口与统一基准级联 (`app/signal.py`, `app/dashboard.py`, `app/backtest.py`)**
+   - 清零首页今日信号、信号验证、组合信号及回测对比矩阵中残余的未缓存 `get_instrument_list()` 全表扫描；`_get_benchmark_curve()` 外网回退接入 `fetch_index_daily()` 多源级联（TickFlow → AKShare → Baostock）。
+
 ## [v0.11.0] - 2026-11-26
 
 ### ✨ 实盘自动化闭环、券商风控对齐与全链路 ETF 3位小数精度

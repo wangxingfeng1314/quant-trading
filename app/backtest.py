@@ -1768,7 +1768,7 @@ def _show_multi_strategy():
                 st.warning("自选股列表为空，请先添加自选股")
                 return
 
-            stock_df = get_instrument_list()
+            stock_df = cached_instrument_list()
             name_map = dict(zip(stock_df["ts_code"], stock_df["name"]))
 
             # 构建矩阵数据（先一次性预加载全部自选股数据与指标，消除 N×M 重复 I/O 与计算）
@@ -2448,16 +2448,15 @@ def _get_benchmark_curve(start_date: str, end_date: str) -> list:
                         for _, row in df_local.iterrows()
                     ]
 
-        import akshare as ak
-        df = ak.stock_zh_index_daily(symbol="sh000300")
-        if df is None or df.empty:
-            # 尝试深交所代码
-            df = ak.stock_zh_index_daily(symbol="sz399300")
+        from data.fetcher import fetch_index_daily
+        df = pd.DataFrame()
+        for code in ("000300.SH", "000001.SH"):
+            df = fetch_index_daily(code, start_date=start_date, end_date=end_date)
+            if df is not None and not df.empty and len(df) >= 2:
+                break
         if df is None or df.empty:
             return None
-        df = df.rename(columns={"date": "trade_date"})
-        df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.strftime("%Y%m%d")
-        # 过滤日期范围
+        df = df.sort_values("trade_date")
         df = df[(df["trade_date"] >= start_date) & (df["trade_date"] <= end_date)]
         if df.empty:
             return None
@@ -2467,7 +2466,7 @@ def _get_benchmark_curve(start_date: str, end_date: str) -> list:
         curve = []
         for _, row in df.iterrows():
             curve.append({
-                "date": row["trade_date"],
+                "date": str(row["trade_date"]),
                 "equity": float(row["close"]) / first_close * 1000,
             })
         return curve

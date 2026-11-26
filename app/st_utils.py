@@ -205,6 +205,10 @@ STRATEGY_CHINESE_NAMES = {
     "high_dividend_value": "高股息价值红利",
     "momentum_rotation": "多资产动量轮动",
     "arbitrated_net": "多空博弈净额",
+    "dual_sleeve_core_satellite": "双舱位核心-卫星组合",
+    "rolling_adaptive_portfolio": "零前视滚动自适应组合",
+    "adaptive_router": "自适应策略路由",
+    "risk_manager": "风控止损止盈",
 }
 
 

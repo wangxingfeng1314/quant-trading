@@ -1814,18 +1814,23 @@ def reduce_position(
     with get_conn() as conn:
         if position_id is not None:
             rows = conn.execute(
-                "SELECT id, ts_code, buy_price, shares, buy_date FROM position WHERE id = ?",
+                "SELECT id, ts_code, buy_price, shares, buy_date, COALESCE(strategy, '') FROM position WHERE id = ?",
                 (position_id,),
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT id, ts_code, buy_price, shares, buy_date FROM position WHERE ts_code = ? ORDER BY buy_date ASC, id ASC",
+                "SELECT id, ts_code, buy_price, shares, buy_date, COALESCE(strategy, '') FROM position WHERE ts_code = ? ORDER BY buy_date ASC, id ASC",
                 (code,),
             ).fetchall()
         if not rows:
             return {"sold_shares": 0, "remaining_shares": 0, "pnl": 0.0, "pnl_pct": 0.0}
 
         code = code or str(rows[0][1])
+        inherited_strat = next(
+            (str(r[5]).strip() for r in rows if len(r) > 5 and str(r[5] or "").strip()),
+            "",
+        )
+        eff_strategy = str(strategy or "").strip() or inherited_strat
         total_avail = sum(int(r[3] or 0) for r in rows)
         to_sell = total_avail if req_qty <= 0 else min(req_qty, total_avail)
         if to_sell <= 0 or px <= 0:
@@ -1834,7 +1839,7 @@ def reduce_position(
         remaining_to_sell = to_sell
         sold_cost_principal = 0.0
         earliest_buy_date = str(rows[0][4] or "")
-        for rid, _rc, r_buy_px, r_shares, _r_bdate in rows:
+        for rid, _rc, r_buy_px, r_shares, _r_bdate, *_extra in rows:
             if remaining_to_sell <= 0:
                 break
             r_sh = int(r_shares or 0)
@@ -1864,7 +1869,7 @@ def reduce_position(
             "INSERT INTO real_trade_journal "
             "(ts_code, direction, trade_date, price, shares, signal_price, slippage_pct, strategy, pnl, pnl_pct, holding_days, note, created_at) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (code, "SELL", s_date, px, to_sell, sig_px, slip_pct, str(strategy or ""), realized_pnl, pnl_pct, hold_days, note, now),
+            (code, "SELL", s_date, px, to_sell, sig_px, slip_pct, eff_strategy, realized_pnl, pnl_pct, hold_days, note, now),
         )
 
     return {
@@ -1873,6 +1878,7 @@ def reduce_position(
         "remaining_shares": total_avail - to_sell,
         "sell_price": px,
         "avg_cost": round(avg_buy_px, 4),
+        "strategy": eff_strategy,
         "pnl": realized_pnl,
         "pnl_pct": pnl_pct,
         "holding_days": hold_days,

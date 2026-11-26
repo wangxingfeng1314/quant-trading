@@ -141,12 +141,13 @@ def create_candlestick_chart(df: pd.DataFrame, ts_code: str, name: str,
             annotation_font=dict(size=10, color="rgba(255,255,255,0.45)"),
         )
 
-    # ---------- 主图: 最新价虚线（金色标注） ----------
+    # ---------- 主图: 最新价虚线（金色标注，ETF 保留3位小数） ----------
+    from engine.commission import format_price
     last_close = float(df["close"].iloc[-1])
     fig.add_hline(
         y=last_close, row=1, col=1,
         line=dict(color="#FFD700", width=1.2, dash="dot"),
-        annotation_text=f"最新 {last_close:.2f}",
+        annotation_text=f"最新 {format_price(last_close, ts_code, prefix='')}",
         annotation_position="top right",
         annotation_font=dict(size=11, color="#FFD700"),
     )
